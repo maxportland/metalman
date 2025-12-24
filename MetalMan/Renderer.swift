@@ -378,9 +378,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Apply velocity to position
         characterPosition += characterVelocity * dt
         
-        // Keep character within the grid bounds (-9 to +9 to stay inside the posts)
-        let boundMin: Float = -9.0
-        let boundMax: Float = 9.0
+        // Keep character within the grid bounds (-95 to +95 to stay inside the posts)
+        let boundMin: Float = -95.0
+        let boundMax: Float = 95.0
         characterPosition.x = max(boundMin, min(boundMax, characterPosition.x))
         characterPosition.z = max(boundMin, min(boundMax, characterPosition.z))
         
@@ -555,35 +555,43 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Handle zero or invalid size
         guard size.width > 0 && size.height > 0 else {
             let defaultAspect: Float = 16.0 / 9.0
-            projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: defaultAspect, nearZ: 0.1, farZ: 100)
+            projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: defaultAspect, nearZ: 0.1, farZ: 500)
             return
         }
         
         let aspect = Float(size.width / size.height)
         
-        // Use a narrower FOV for more isometric feel
-        projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: aspect, nearZ: 0.1, farZ: 100)
+        // Use a narrower FOV for more isometric feel, extended far plane for larger world
+        projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: aspect, nearZ: 0.1, farZ: 500)
     }
     
     // MARK: - Static helpers for geometry
     
     private static func makeGridVertices(device: MTLDevice) -> (MTLBuffer, Int) {
-        // Grid of lines from -10 to 10 on X and Z axes, Y=0 plane
-        // Lines spaced by 1 unit
+        // Grid of lines from -100 to 100 on X and Z axes, Y=0 plane
+        // Major lines every 10 units, minor lines every 5 units
         var vertices: [Vertex] = []
         
-        let gridMin: Int = -10
-        let gridMax: Int = 10
-        let gridColor = simd_float4(0.4, 0.4, 0.4, 1)
+        let gridMin: Float = -100
+        let gridMax: Float = 100
+        let majorColor = simd_float4(0.45, 0.45, 0.45, 1)  // Brighter for major lines
+        let minorColor = simd_float4(0.3, 0.3, 0.3, 1)     // Dimmer for minor lines
         
-        for i in gridMin...gridMax {
+        // Draw grid lines every 5 units
+        var i: Float = gridMin
+        while i <= gridMax {
+            let isMajor = Int(i) % 10 == 0
+            let color = isMajor ? majorColor : minorColor
+            
             // Lines parallel to X axis (varying Z)
-            vertices.append(Vertex(position: simd_float3(Float(gridMin), 0, Float(i)), color: gridColor))
-            vertices.append(Vertex(position: simd_float3(Float(gridMax), 0, Float(i)), color: gridColor))
+            vertices.append(Vertex(position: simd_float3(gridMin, 0, i), color: color))
+            vertices.append(Vertex(position: simd_float3(gridMax, 0, i), color: color))
             
             // Lines parallel to Z axis (varying X)
-            vertices.append(Vertex(position: simd_float3(Float(i), 0, Float(gridMin)), color: gridColor))
-            vertices.append(Vertex(position: simd_float3(Float(i), 0, Float(gridMax)), color: gridColor))
+            vertices.append(Vertex(position: simd_float3(i, 0, gridMin), color: color))
+            vertices.append(Vertex(position: simd_float3(i, 0, gridMax), color: color))
+            
+            i += 5
         }
         
         let vertexCount = vertices.count
@@ -609,114 +617,212 @@ final class Renderer: NSObject, MTKViewDelegate {
         var vertices: [Vertex] = []
         
         // Colors for different elements
-        let treeGreen = simd_float4(0.2, 0.7, 0.3, 1)
-        let treeBrown = simd_float4(0.5, 0.3, 0.1, 1)
-        let rockGray = simd_float4(0.5, 0.5, 0.55, 1)
+        let treeTrunk = simd_float4(0.45, 0.25, 0.1, 1)
+        let treeGreenDark = simd_float4(0.15, 0.5, 0.2, 1)
+        let treeGreenLight = simd_float4(0.25, 0.7, 0.35, 1)
+        let treeGreenMid = simd_float4(0.2, 0.6, 0.28, 1)
+        let rockDark = simd_float4(0.4, 0.38, 0.42, 1)
+        let rockLight = simd_float4(0.6, 0.58, 0.62, 1)
+        let rockMid = simd_float4(0.5, 0.48, 0.52, 1)
         let postRed = simd_float4(0.9, 0.2, 0.2, 1)
         let postBlue = simd_float4(0.2, 0.4, 0.9, 1)
         let postYellow = simd_float4(0.9, 0.8, 0.2, 1)
         let postPurple = simd_float4(0.7, 0.2, 0.8, 1)
+        let postGreen = simd_float4(0.2, 0.8, 0.3, 1)
         
-        // Helper to add a tree at position (wireframe cone + trunk)
-        func addTree(at pos: simd_float3, height: Float = 2.5, radius: Float = 0.8) {
-            // Trunk (vertical line)
-            let trunkTop = pos + simd_float3(0, height * 0.4, 0)
-            vertices.append(Vertex(position: pos, color: treeBrown))
-            vertices.append(Vertex(position: trunkTop, color: treeBrown))
+        // Helper to add a detailed pine tree with multiple foliage layers
+        func addDetailedTree(at pos: simd_float3, height: Float = 4.0, baseRadius: Float = 1.5) {
+            let trunkHeight = height * 0.35
+            let trunkRadius: Float = 0.15
             
-            // Cone (triangular wireframe from trunk top to apex)
-            let apex = pos + simd_float3(0, height, 0)
-            let segments = 6
-            for i in 0..<segments {
-                let angle1 = Float(i) / Float(segments) * 2 * .pi
-                let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+            // Trunk with thickness (4 vertical lines forming a square)
+            let trunkOffsets: [simd_float3] = [
+                simd_float3(-trunkRadius, 0, -trunkRadius),
+                simd_float3( trunkRadius, 0, -trunkRadius),
+                simd_float3( trunkRadius, 0,  trunkRadius),
+                simd_float3(-trunkRadius, 0,  trunkRadius)
+            ]
+            for offset in trunkOffsets {
+                vertices.append(Vertex(position: pos + offset, color: treeTrunk))
+                vertices.append(Vertex(position: pos + offset + simd_float3(0, trunkHeight, 0), color: treeTrunk))
+            }
+            // Trunk horizontal braces
+            for i in 0..<4 {
+                let p1 = pos + trunkOffsets[i]
+                let p2 = pos + trunkOffsets[(i + 1) % 4]
+                vertices.append(Vertex(position: p1, color: treeTrunk))
+                vertices.append(Vertex(position: p2, color: treeTrunk))
+            }
+            
+            // Three layers of foliage (cones)
+            let layerHeights: [Float] = [trunkHeight, trunkHeight + height * 0.25, trunkHeight + height * 0.5]
+            let layerRadii: [Float] = [baseRadius, baseRadius * 0.7, baseRadius * 0.4]
+            let layerTops: [Float] = [trunkHeight + height * 0.35, trunkHeight + height * 0.55, height]
+            let layerColors = [treeGreenDark, treeGreenMid, treeGreenLight]
+            
+            let segments = 8
+            for layer in 0..<3 {
+                let baseY = layerHeights[layer]
+                let topY = layerTops[layer]
+                let radius = layerRadii[layer]
+                let color = layerColors[layer]
+                let apex = pos + simd_float3(0, topY, 0)
                 
-                let p1 = trunkTop + simd_float3(cos(angle1) * radius, 0, sin(angle1) * radius)
-                let p2 = trunkTop + simd_float3(cos(angle2) * radius, 0, sin(angle2) * radius)
-                
-                // Base edge
-                vertices.append(Vertex(position: p1, color: treeGreen))
-                vertices.append(Vertex(position: p2, color: treeGreen))
-                
-                // Edge to apex
-                vertices.append(Vertex(position: p1, color: treeGreen))
-                vertices.append(Vertex(position: apex, color: treeGreen))
+                for i in 0..<segments {
+                    let angle1 = Float(i) / Float(segments) * 2 * .pi
+                    let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+                    
+                    let p1 = pos + simd_float3(cos(angle1) * radius, baseY, sin(angle1) * radius)
+                    let p2 = pos + simd_float3(cos(angle2) * radius, baseY, sin(angle2) * radius)
+                    
+                    // Base edge
+                    vertices.append(Vertex(position: p1, color: color))
+                    vertices.append(Vertex(position: p2, color: color))
+                    
+                    // Edge to apex
+                    vertices.append(Vertex(position: p1, color: color))
+                    vertices.append(Vertex(position: apex, color: color))
+                }
             }
         }
         
-        // Helper to add a rock/boulder (wireframe cube)
-        func addRock(at pos: simd_float3, size: Float = 0.4) {
+        // Helper to add a detailed rock formation with multiple faces
+        func addDetailedRock(at pos: simd_float3, size: Float = 0.8) {
+            // Create an irregular rock shape with multiple vertices
             let s = size
-            let corners = [
-                pos + simd_float3(-s, 0, -s),
-                pos + simd_float3( s, 0, -s),
-                pos + simd_float3( s, 0,  s),
-                pos + simd_float3(-s, 0,  s),
-                pos + simd_float3(-s, s * 1.5, -s),
-                pos + simd_float3( s, s * 1.5, -s),
-                pos + simd_float3( s, s * 1.5,  s),
-                pos + simd_float3(-s, s * 1.5,  s),
+            let h = size * 1.2
+            
+            // Irregular top with offset peak
+            let peakOffset = simd_float3(s * 0.2, 0, s * 0.15)
+            
+            let corners: [simd_float3] = [
+                pos + simd_float3(-s, 0, -s * 0.8),
+                pos + simd_float3(s * 0.9, 0, -s),
+                pos + simd_float3(s, 0, s * 0.7),
+                pos + simd_float3(-s * 0.7, 0, s),
+                pos + simd_float3(-s * 0.6, h * 0.8, -s * 0.5) + peakOffset,
+                pos + simd_float3(s * 0.5, h, -s * 0.6) + peakOffset,
+                pos + simd_float3(s * 0.6, h * 0.9, s * 0.4) + peakOffset,
+                pos + simd_float3(-s * 0.4, h * 0.7, s * 0.5) + peakOffset,
             ]
+            
             // Bottom edges
-            let edges = [
-                (0, 1), (1, 2), (2, 3), (3, 0),  // bottom
-                (4, 5), (5, 6), (6, 7), (7, 4),  // top
-                (0, 4), (1, 5), (2, 6), (3, 7)   // verticals
-            ]
-            for (a, b) in edges {
-                vertices.append(Vertex(position: corners[a], color: rockGray))
-                vertices.append(Vertex(position: corners[b], color: rockGray))
+            let bottomEdges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+            // Top edges
+            let topEdges = [(4, 5), (5, 6), (6, 7), (7, 4)]
+            // Vertical edges
+            let vertEdges = [(0, 4), (1, 5), (2, 6), (3, 7)]
+            // Cross braces for detail
+            let crossEdges = [(0, 5), (1, 6), (2, 7), (3, 4)]
+            
+            for (a, b) in bottomEdges {
+                vertices.append(Vertex(position: corners[a], color: rockDark))
+                vertices.append(Vertex(position: corners[b], color: rockDark))
             }
+            for (a, b) in topEdges {
+                vertices.append(Vertex(position: corners[a], color: rockLight))
+                vertices.append(Vertex(position: corners[b], color: rockLight))
+            }
+            for (a, b) in vertEdges {
+                vertices.append(Vertex(position: corners[a], color: rockMid))
+                vertices.append(Vertex(position: corners[b], color: rockMid))
+            }
+            for (a, b) in crossEdges {
+                vertices.append(Vertex(position: corners[a], color: rockDark))
+                vertices.append(Vertex(position: corners[b], color: rockDark))
+            }
+        }
+        
+        // Helper to add a boulder cluster (3-4 rocks together)
+        func addBoulderCluster(at pos: simd_float3, baseSize: Float = 1.0) {
+            addDetailedRock(at: pos, size: baseSize)
+            addDetailedRock(at: pos + simd_float3(baseSize * 1.2, 0, baseSize * 0.3), size: baseSize * 0.7)
+            addDetailedRock(at: pos + simd_float3(-baseSize * 0.4, 0, baseSize * 1.0), size: baseSize * 0.5)
         }
         
         // Helper to add a vertical post/pole with color
-        func addPost(at pos: simd_float3, height: Float = 1.5, color: simd_float4) {
+        func addPost(at pos: simd_float3, height: Float = 3.0, color: simd_float4) {
             let top = pos + simd_float3(0, height, 0)
             vertices.append(Vertex(position: pos, color: color))
             vertices.append(Vertex(position: top, color: color))
             
-            // Add a small cross at top for visibility
-            let crossSize: Float = 0.15
+            // Add a larger cross at top for visibility at distance
+            let crossSize: Float = 0.4
             vertices.append(Vertex(position: top + simd_float3(-crossSize, 0, 0), color: color))
             vertices.append(Vertex(position: top + simd_float3( crossSize, 0, 0), color: color))
             vertices.append(Vertex(position: top + simd_float3(0, 0, -crossSize), color: color))
             vertices.append(Vertex(position: top + simd_float3(0, 0,  crossSize), color: color))
+            // Vertical marker
+            vertices.append(Vertex(position: top, color: color))
+            vertices.append(Vertex(position: top + simd_float3(0, crossSize, 0), color: color))
         }
         
-        // Place trees around the grid
-        addTree(at: simd_float3(-7, 0, -5), height: 3.0, radius: 1.0)
-        addTree(at: simd_float3(-5, 0, -8), height: 2.5, radius: 0.7)
-        addTree(at: simd_float3(-3, 0, 6), height: 2.8, radius: 0.9)
-        addTree(at: simd_float3(4, 0, -7), height: 3.2, radius: 1.1)
-        addTree(at: simd_float3(6, 0, -4), height: 2.4, radius: 0.6)
-        addTree(at: simd_float3(7, 0, 3), height: 2.9, radius: 0.85)
-        addTree(at: simd_float3(2, 0, 8), height: 2.6, radius: 0.75)
-        addTree(at: simd_float3(-6, 0, 4), height: 3.1, radius: 0.95)
-        addTree(at: simd_float3(8, 0, -2), height: 2.3, radius: 0.65)
-        addTree(at: simd_float3(-8, 0, -2), height: 2.7, radius: 0.8)
+        // Simple seeded random for reproducible placement
+        func seededRandom(_ seed: Int) -> Float {
+            let x = sin(Float(seed) * 12.9898 + Float(seed) * 78.233) * 43758.5453
+            return x - floor(x)
+        }
         
-        // Place rocks scattered around
-        addRock(at: simd_float3(-2, 0, -4), size: 0.35)
-        addRock(at: simd_float3(3, 0, -3), size: 0.45)
-        addRock(at: simd_float3(-4, 0, 2), size: 0.3)
-        addRock(at: simd_float3(5, 0, 5), size: 0.5)
-        addRock(at: simd_float3(-1, 0, 7), size: 0.4)
-        addRock(at: simd_float3(1, 0, -6), size: 0.35)
-        addRock(at: simd_float3(-5, 0, -3), size: 0.45)
-        addRock(at: simd_float3(6, 0, -6), size: 0.38)
+        // Place trees across the larger grid (approximately every 15-25 units with variation)
+        var treeSeed = 1
+        for gridX in stride(from: -90, through: 90, by: 12) {
+            for gridZ in stride(from: -90, through: 90, by: 12) {
+                // Skip area near origin for visibility
+                if abs(gridX) < 8 && abs(gridZ) < 8 { continue }
+                
+                // Random offset within cell
+                let offsetX = (seededRandom(treeSeed) - 0.5) * 10
+                let offsetZ = (seededRandom(treeSeed + 1) - 0.5) * 10
+                let height = 3.5 + seededRandom(treeSeed + 2) * 3.0  // 3.5 to 6.5
+                let radius = 1.0 + seededRandom(treeSeed + 3) * 1.0  // 1.0 to 2.0
+                
+                // 70% chance to place a tree
+                if seededRandom(treeSeed + 4) < 0.7 {
+                    addDetailedTree(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), 
+                                   height: height, baseRadius: radius)
+                }
+                treeSeed += 5
+            }
+        }
         
-        // Place colored posts at corners and key positions for orientation
-        addPost(at: simd_float3(0, 0, 0), height: 2.0, color: postYellow)      // Origin marker (tall yellow)
-        addPost(at: simd_float3(-9, 0, -9), height: 1.8, color: postRed)       // Corner 1
-        addPost(at: simd_float3( 9, 0, -9), height: 1.8, color: postBlue)      // Corner 2
-        addPost(at: simd_float3(-9, 0,  9), height: 1.8, color: postPurple)    // Corner 3
-        addPost(at: simd_float3( 9, 0,  9), height: 1.8, color: postRed)       // Corner 4
+        // Place rocks and boulder clusters
+        var rockSeed = 1000
+        for gridX in stride(from: -85, through: 85, by: 18) {
+            for gridZ in stride(from: -85, through: 85, by: 18) {
+                // Skip area near origin
+                if abs(gridX) < 10 && abs(gridZ) < 10 { continue }
+                
+                let offsetX = (seededRandom(rockSeed) - 0.5) * 12
+                let offsetZ = (seededRandom(rockSeed + 1) - 0.5) * 12
+                let size = 0.6 + seededRandom(rockSeed + 2) * 0.8  // 0.6 to 1.4
+                
+                // 50% chance for cluster, 30% for single rock
+                let chance = seededRandom(rockSeed + 3)
+                if chance < 0.3 {
+                    addDetailedRock(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), size: size)
+                } else if chance < 0.6 {
+                    addBoulderCluster(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), baseSize: size)
+                }
+                rockSeed += 4
+            }
+        }
         
-        // Additional posts along edges for reference
-        addPost(at: simd_float3(0, 0, -9), height: 1.2, color: postBlue)       // North edge center
-        addPost(at: simd_float3(0, 0,  9), height: 1.2, color: postPurple)     // South edge center
-        addPost(at: simd_float3(-9, 0, 0), height: 1.2, color: postRed)        // West edge center
-        addPost(at: simd_float3( 9, 0, 0), height: 1.2, color: postBlue)       // East edge center
+        // Place colored posts at corners and key positions for orientation (scaled up)
+        addPost(at: simd_float3(0, 0, 0), height: 5.0, color: postYellow)         // Origin marker (tall yellow)
+        addPost(at: simd_float3(-95, 0, -95), height: 4.0, color: postRed)        // Corner 1
+        addPost(at: simd_float3( 95, 0, -95), height: 4.0, color: postBlue)       // Corner 2
+        addPost(at: simd_float3(-95, 0,  95), height: 4.0, color: postPurple)     // Corner 3
+        addPost(at: simd_float3( 95, 0,  95), height: 4.0, color: postGreen)      // Corner 4
+        
+        // Posts along edges every 50 units for navigation
+        for i in stride(from: -50, through: 50, by: 50) {
+            if i != 0 {  // Skip origin
+                addPost(at: simd_float3(Float(i), 0, -95), height: 3.0, color: postBlue)
+                addPost(at: simd_float3(Float(i), 0,  95), height: 3.0, color: postPurple)
+                addPost(at: simd_float3(-95, 0, Float(i)), height: 3.0, color: postRed)
+                addPost(at: simd_float3( 95, 0, Float(i)), height: 3.0, color: postGreen)
+            }
+        }
         
         let vertexCount = vertices.count
         let buffer = device.makeBuffer(bytes: vertices,
