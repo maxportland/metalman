@@ -25,24 +25,7 @@ class CharacterMesh {
         let legSwingAmount: Float = 0.5
         let armSwingAmount: Float = 0.35
         
-        // Jump animation modifiers
-        let jumpLegTuck: Float = isJumping ? 0.3 : 0.0
-        let jumpArmRaise: Float = isJumping ? 0.4 : 0.0
-        
-        // Leg swing calculation
-        let walkLeftLegSwing = -sin(walkPhase) * legSwingAmount
-        let walkRightLegSwing = sin(walkPhase) * legSwingAmount
-        
-        let leftLegSwing = isJumping ? -jumpLegTuck : walkLeftLegSwing
-        let rightLegSwing = isJumping ? -jumpLegTuck : walkRightLegSwing
-        
-        // Arms: opposite to legs when walking, raised when jumping
-        let walkLeftArmSwing = sin(walkPhase) * armSwingAmount
-        let walkRightArmSwing = -sin(walkPhase) * armSwingAmount
-        
-        let leftArmSwing = isJumping ? -jumpArmRaise : walkLeftArmSwing
-        let rightArmSwing = isJumping ? -jumpArmRaise : walkRightArmSwing
-        
+        // Body bob during walking
         let bodyBob = isJumping ? 0.0 : abs(sin(walkPhase * 2)) * 0.03
         
         // Material index for character (5)
@@ -68,65 +51,145 @@ class CharacterMesh {
         
         // ARMS
         let shoulderWidth: Float = 0.25
+        let upperArmLength: Float = 0.30
+        let forearmLength: Float = 0.28
         
-        // Left arm
-        let leftShoulderPos = simd_float3(-shoulderWidth, shoulderY - 0.05, 0)
-        let leftElbowPos = simd_float3(-shoulderWidth - 0.08, shoulderY - 0.35, leftArmSwing * 0.3)
-        let leftHandPos = simd_float3(-shoulderWidth - 0.05, shoulderY - 0.65, leftArmSwing * 0.5)
-        
-        addLimb(from: leftShoulderPos, to: leftElbowPos, radius: 0.07, segments: 6,
-                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-        addLimb(from: leftElbowPos, to: leftHandPos, radius: 0.06, segments: 6,
-                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-        addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
-                  uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-        
-        // Right arm
-        let rightShoulderPos = simd_float3(shoulderWidth, shoulderY - 0.05, 0)
-        let rightElbowPos = simd_float3(shoulderWidth + 0.08, shoulderY - 0.35, rightArmSwing * 0.3)
-        let rightHandPos = simd_float3(shoulderWidth + 0.05, shoulderY - 0.65, rightArmSwing * 0.5)
-        
-        addLimb(from: rightShoulderPos, to: rightElbowPos, radius: 0.07, segments: 6,
-                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-        addLimb(from: rightElbowPos, to: rightHandPos, radius: 0.06, segments: 6,
-                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-        addSphere(center: rightHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
-                  uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        if isJumping {
+            // Jumping arm pose: arms raised up and slightly bent
+            // Left arm - raised up
+            let leftShoulderPos = simd_float3(-shoulderWidth, shoulderY - 0.05, 0)
+            let leftElbowPos = leftShoulderPos + simd_float3(-0.1, upperArmLength * 0.7, -0.05)
+            let leftHandPos = leftElbowPos + simd_float3(-0.05, forearmLength * 0.5, 0.1)
+            
+            addLimb(from: leftShoulderPos, to: leftElbowPos, radius: 0.07, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addLimb(from: leftElbowPos, to: leftHandPos, radius: 0.06, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
+                      uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            
+            // Right arm - raised up
+            let rightShoulderPos = simd_float3(shoulderWidth, shoulderY - 0.05, 0)
+            let rightElbowPos = rightShoulderPos + simd_float3(0.1, upperArmLength * 0.7, -0.05)
+            let rightHandPos = rightElbowPos + simd_float3(0.05, forearmLength * 0.5, 0.1)
+            
+            addLimb(from: rightShoulderPos, to: rightElbowPos, radius: 0.07, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addLimb(from: rightElbowPos, to: rightHandPos, radius: 0.06, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addSphere(center: rightHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
+                      uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        } else {
+            // Walking arm animation
+            let leftArmSwing = sin(walkPhase) * armSwingAmount
+            let rightArmSwing = -sin(walkPhase) * armSwingAmount
+            
+            // Left arm
+            let leftShoulderPos = simd_float3(-shoulderWidth, shoulderY - 0.05, 0)
+            let leftElbowPos = simd_float3(-shoulderWidth - 0.08, shoulderY - 0.35, leftArmSwing * 0.3)
+            let leftHandPos = simd_float3(-shoulderWidth - 0.05, shoulderY - 0.65, leftArmSwing * 0.5)
+            
+            addLimb(from: leftShoulderPos, to: leftElbowPos, radius: 0.07, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addLimb(from: leftElbowPos, to: leftHandPos, radius: 0.06, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
+                      uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            
+            // Right arm
+            let rightShoulderPos = simd_float3(shoulderWidth, shoulderY - 0.05, 0)
+            let rightElbowPos = simd_float3(shoulderWidth + 0.08, shoulderY - 0.35, rightArmSwing * 0.3)
+            let rightHandPos = simd_float3(shoulderWidth + 0.05, shoulderY - 0.65, rightArmSwing * 0.5)
+            
+            addLimb(from: rightShoulderPos, to: rightElbowPos, radius: 0.07, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addLimb(from: rightElbowPos, to: rightHandPos, radius: 0.06, segments: 6,
+                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            addSphere(center: rightHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
+                      uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        }
         
         // LEGS
         let legSeparation: Float = 0.12
-        let jumpKneeTuck: Float = isJumping ? 0.15 : 0.0
-        let jumpFootTuck: Float = isJumping ? 0.25 : 0.0
+        let thighLength: Float = 0.40
+        let shinLength: Float = 0.38
         
-        // Left leg
-        let leftHipPos = simd_float3(-legSeparation, hipY, 0)
-        let leftLegForward = isJumping ? 1.0 : max(0, -leftLegSwing / legSwingAmount)
-        let leftKneeHeight = 0.45 + leftLegForward * 0.08 + jumpKneeTuck
-        let leftKneePos = simd_float3(-legSeparation, leftKneeHeight, leftLegSwing * 0.4)
-        let leftFootHeight: Float = 0.08 + leftLegForward * 0.12 + jumpFootTuck
-        let leftFootPos = simd_float3(-legSeparation, leftFootHeight, leftLegSwing * 0.6)
-        
-        addLimb(from: leftHipPos, to: leftKneePos, radius: 0.09, segments: 6,
-                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-        addLimb(from: leftKneePos, to: leftFootPos, radius: 0.07, segments: 6,
-                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-        addBox(center: leftFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
-               uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-        
-        // Right leg
-        let rightHipPos = simd_float3(legSeparation, hipY, 0)
-        let rightLegForward = isJumping ? 1.0 : max(0, -rightLegSwing / legSwingAmount)
-        let rightKneeHeight = 0.45 + rightLegForward * 0.08 + jumpKneeTuck
-        let rightKneePos = simd_float3(legSeparation, rightKneeHeight, rightLegSwing * 0.4)
-        let rightFootHeight: Float = 0.08 + rightLegForward * 0.12 + jumpFootTuck
-        let rightFootPos = simd_float3(legSeparation, rightFootHeight, rightLegSwing * 0.6)
-        
-        addLimb(from: rightHipPos, to: rightKneePos, radius: 0.09, segments: 6,
-                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-        addLimb(from: rightKneePos, to: rightFootPos, radius: 0.07, segments: 6,
-                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-        addBox(center: rightFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
-               uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        if isJumping {
+            // Jumping leg pose: knees tucked up toward chest
+            // Hip flexion angle (thigh rotates up toward chest) - about 70-80 degrees
+            let hipFlexion: Float = 1.2  // radians (~70 degrees)
+            // Knee flexion angle (shin folds back) - about 90-100 degrees
+            let kneeFlexion: Float = 1.7  // radians (~100 degrees)
+            
+            // Left leg - tucked
+            let leftHipPos = simd_float3(-legSeparation, hipY, 0)
+            // Thigh goes forward and up (hip flexion)
+            let leftThighDir = simd_float3(0, -cos(hipFlexion), -sin(hipFlexion))
+            let leftKneePos = leftHipPos + leftThighDir * thighLength
+            // Shin goes down and back from knee (knee flexion)
+            // The shin direction is relative to thigh - it bends back
+            let shinAngle = hipFlexion - (.pi - kneeFlexion)  // Combined angle from vertical
+            let leftShinDir = simd_float3(0, -cos(shinAngle), -sin(shinAngle))
+            let leftAnklePos = leftKneePos + leftShinDir * shinLength
+            
+            addLimb(from: leftHipPos, to: leftKneePos, radius: 0.09, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            addLimb(from: leftKneePos, to: leftAnklePos, radius: 0.07, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            // Foot points down/back when tucked
+            let leftFootCenter = leftAnklePos + simd_float3(0, -0.05, 0.02)
+            addBox(center: leftFootCenter, size: simd_float3(0.1, 0.06, 0.16),
+                   uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            
+            // Right leg - tucked (same pose)
+            let rightHipPos = simd_float3(legSeparation, hipY, 0)
+            let rightThighDir = simd_float3(0, -cos(hipFlexion), -sin(hipFlexion))
+            let rightKneePos = rightHipPos + rightThighDir * thighLength
+            let rightShinDir = simd_float3(0, -cos(shinAngle), -sin(shinAngle))
+            let rightAnklePos = rightKneePos + rightShinDir * shinLength
+            
+            addLimb(from: rightHipPos, to: rightKneePos, radius: 0.09, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            addLimb(from: rightKneePos, to: rightAnklePos, radius: 0.07, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            let rightFootCenter = rightAnklePos + simd_float3(0, -0.05, 0.02)
+            addBox(center: rightFootCenter, size: simd_float3(0.1, 0.06, 0.16),
+                   uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        } else {
+            // Walking leg animation
+            let leftLegSwing = -sin(walkPhase) * legSwingAmount
+            let rightLegSwing = sin(walkPhase) * legSwingAmount
+            
+            // Left leg
+            let leftHipPos = simd_float3(-legSeparation, hipY, 0)
+            let leftLegForward = max(0, -leftLegSwing / legSwingAmount)
+            let leftKneeHeight = 0.45 + leftLegForward * 0.08
+            let leftKneePos = simd_float3(-legSeparation, leftKneeHeight, leftLegSwing * 0.4)
+            let leftFootHeight: Float = 0.08 + leftLegForward * 0.12
+            let leftFootPos = simd_float3(-legSeparation, leftFootHeight, leftLegSwing * 0.6)
+            
+            addLimb(from: leftHipPos, to: leftKneePos, radius: 0.09, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            addLimb(from: leftKneePos, to: leftFootPos, radius: 0.07, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            addBox(center: leftFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
+                   uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            
+            // Right leg
+            let rightHipPos = simd_float3(legSeparation, hipY, 0)
+            let rightLegForward = max(0, -rightLegSwing / legSwingAmount)
+            let rightKneeHeight = 0.45 + rightLegForward * 0.08
+            let rightKneePos = simd_float3(legSeparation, rightKneeHeight, rightLegSwing * 0.4)
+            let rightFootHeight: Float = 0.08 + rightLegForward * 0.12
+            let rightFootPos = simd_float3(legSeparation, rightFootHeight, rightLegSwing * 0.6)
+            
+            addLimb(from: rightHipPos, to: rightKneePos, radius: 0.09, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            addLimb(from: rightKneePos, to: rightFootPos, radius: 0.07, segments: 6,
+                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+            addBox(center: rightFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
+                   uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        }
         
         // Copy to buffer
         vertexCount = vertices.count
