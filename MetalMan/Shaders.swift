@@ -46,7 +46,7 @@ struct LitVertexOut {
     float3 normal;
     float2 texCoord;
     float4 lightSpacePosition;
-    uint materialIndex;
+    uint materialIndex [[flat]];  // flat interpolation prevents integer interpolation artifacts
 };
 
 struct LitUniforms {
@@ -104,6 +104,11 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
                              texture2d<float> poleTex [[texture(4)]],
                              depth2d<float> shadowMap [[texture(5)]],
                              texture2d<float> characterTex [[texture(6)]],
+                             texture2d<float> pathTex [[texture(7)]],
+                             texture2d<float> stoneWallTex [[texture(8)]],
+                             texture2d<float> roofTex [[texture(9)]],
+                             texture2d<float> woodPlankTex [[texture(10)]],
+                             texture2d<float> skyTex [[texture(11)]],
                              sampler texSampler [[sampler(0)]],
                              sampler shadowSampler [[sampler(1)]],
                              constant LitUniforms &uniforms [[buffer(1)]]) {
@@ -116,7 +121,17 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
         case 3: texColor = rockTex.sample(texSampler, in.texCoord); break;
         case 4: texColor = poleTex.sample(texSampler, in.texCoord); break;
         case 5: texColor = characterTex.sample(texSampler, in.texCoord); break;
+        case 6: texColor = pathTex.sample(texSampler, in.texCoord); break;
+        case 7: texColor = stoneWallTex.sample(texSampler, in.texCoord); break;
+        case 8: texColor = roofTex.sample(texSampler, in.texCoord); break;
+        case 9: texColor = woodPlankTex.sample(texSampler, in.texCoord); break;
+        case 10: texColor = skyTex.sample(texSampler, in.texCoord); break;
         default: texColor = float4(1, 0, 1, 1); break;
+    }
+    
+    // Skybox doesn't receive lighting or shadows
+    if (in.materialIndex == 10) {
+        return texColor;
     }
     
     // Lighting
@@ -145,4 +160,3 @@ fragment void fragment_shadow() {
     // Depth-only pass, no color output
 }
 """
-

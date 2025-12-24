@@ -1,4 +1,5 @@
 import Metal
+import AppKit
 
 /// Generates procedural textures for the game
 class TextureGenerator {
@@ -10,9 +11,144 @@ class TextureGenerator {
         self.commandQueue = commandQueue
     }
     
+    // MARK: - Texture Loading from Files
+    
+    /// Load a texture from the textures folder
+    func loadTexture(named filename: String) -> MTLTexture? {
+        // Try multiple locations to find the texture
+        let possiblePaths = [
+            // Absolute path for development (most reliable)
+            "/Users/maxdavis/Projects/MetalMan/textures/" + filename,
+            // From bundle going up to project root
+            Bundle.main.bundlePath + "/../../../textures/" + filename,
+            // From derived data build location
+            Bundle.main.bundlePath + "/../../../../../../../../textures/" + filename,
+            // From Resources in bundle
+            Bundle.main.bundlePath + "/Contents/Resources/textures/" + filename
+        ]
+        
+        var image: NSImage?
+        
+        for path in possiblePaths {
+            if FileManager.default.isReadableFile(atPath: path),
+               let img = NSImage(contentsOfFile: path) {
+                image = img
+                break
+            }
+        }
+        
+        guard let loadedImage = image else {
+            return nil
+        }
+        
+        guard let cgImage = loadedImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            print("Failed to get CGImage for: \(filename)")
+            return nil
+        }
+        
+        let width = cgImage.width
+        let height = cgImage.height
+        
+        // Create texture descriptor
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: width,
+            height: height,
+            mipmapped: true
+        )
+        descriptor.usage = [.shaderRead]
+        
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            print("Failed to create texture for: \(filename)")
+            return nil
+        }
+        
+        // Convert image to RGBA data
+        let bytesPerPixel = 4
+        let bytesPerRow = bytesPerPixel * width
+        var pixelData = [UInt8](repeating: 255, count: width * height * bytesPerPixel) // Initialize with 255 for alpha
+        
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        
+        // Use noneSkipLast for JPEGs (no alpha) with proper byte order
+        // This creates RGBX where X is ignored (we initialized to 255 for full alpha)
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        
+        guard let context = CGContext(
+            data: &pixelData,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            print("Failed to create context for: \(filename)")
+            // Try alternate bitmap info for images with alpha
+            let altBitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+            guard let altContext = CGContext(
+                data: &pixelData,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: altBitmapInfo.rawValue
+            ) else {
+                print("Failed to create alternate context for: \(filename)")
+                return nil
+            }
+            altContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: pixelData,
+                bytesPerRow: bytesPerRow
+            )
+            
+            // Generate mipmaps
+            if let commandBuffer = commandQueue.makeCommandBuffer(),
+               let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
+                blitEncoder.generateMipmaps(for: texture)
+                blitEncoder.endEncoding()
+                commandBuffer.commit()
+                commandBuffer.waitUntilCompleted()
+            }
+            
+            return texture
+        }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, width, height),
+            mipmapLevel: 0,
+            withBytes: pixelData,
+            bytesPerRow: bytesPerRow
+        )
+        
+        // Generate mipmaps
+        if let commandBuffer = commandQueue.makeCommandBuffer(),
+           let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
+            blitEncoder.generateMipmaps(for: texture)
+            blitEncoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+        
+        return texture
+    }
+    
     // MARK: - Public Texture Creation
     
     func createGroundTexture() -> MTLTexture {
+        // Try to load grass texture from file
+        if let texture = loadTexture(named: "grass_01_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
         let size = 256
         var pixels = [UInt8](repeating: 0, count: size * size * 4)
         
@@ -35,6 +171,12 @@ class TextureGenerator {
     }
     
     func createTrunkTexture() -> MTLTexture {
+        // Try to load tree bark texture from file
+        if let texture = loadTexture(named: "tree_01_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
         let size = 64
         var pixels = [UInt8](repeating: 0, count: size * size * 4)
         
@@ -56,6 +198,12 @@ class TextureGenerator {
     }
     
     func createFoliageTexture() -> MTLTexture {
+        // Try to load foliage texture from file
+        if let texture = loadTexture(named: "leaves_01_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
         let size = 64
         var pixels = [UInt8](repeating: 0, count: size * size * 4)
         
@@ -77,6 +225,12 @@ class TextureGenerator {
     }
     
     func createRockTexture() -> MTLTexture {
+        // Try to load rock texture from file
+        if let texture = loadTexture(named: "rock_01_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
         let size = 64
         var pixels = [UInt8](repeating: 0, count: size * size * 4)
         
@@ -100,6 +254,12 @@ class TextureGenerator {
     }
     
     func createPoleTexture() -> MTLTexture {
+        // Try to load wood texture from file
+        if let texture = loadTexture(named: "wood_wall_01_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
         let size = 32
         var pixels = [UInt8](repeating: 0, count: size * size * 4)
         
@@ -165,6 +325,206 @@ class TextureGenerator {
                     pixels[i + 2] = UInt8(min(255, (0.35 + denim) * 255))
                     pixels[i + 3] = 255
                 }
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    func createPathTexture() -> MTLTexture {
+        // Try to load path texture from file
+        if let texture = loadTexture(named: "path_01_diffuse.jpg") {
+            return texture
+        }
+        // Also try dirt texture
+        if let texture = loadTexture(named: "dirt_01_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
+        let size = 128
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                // Dirt path with pebbles
+                let base: Float = 0.45
+                let noise1 = Float((x * 17 + y * 11) % 23) / 23.0 * 0.12
+                let noise2 = Float((x * 7 + y * 19) % 13) / 13.0 * 0.08
+                let pebble: Float = Float((x * 31 + y * 37) % 47) < 5 ? 0.1 : 0.0
+                
+                let brown = base + noise1 - noise2 + pebble
+                pixels[i] = UInt8(min(255, (brown + 0.08) * 255))      // R
+                pixels[i + 1] = UInt8(min(255, (brown - 0.02) * 255))  // G
+                pixels[i + 2] = UInt8(min(255, (brown - 0.12) * 255))  // B
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    func createStoneWallTexture() -> MTLTexture {
+        // Try to load stone/concrete texture from file
+        if let texture = loadTexture(named: "concrete_01_diffuse.jpg") {
+            return texture
+        }
+        if let texture = loadTexture(named: "bricks_01_sm_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
+        let size = 128
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                
+                // Create brick pattern
+                let brickHeight = 16
+                let brickWidth = 32
+                let mortarWidth = 2
+                
+                let row = y / brickHeight
+                let offset = (row % 2) * (brickWidth / 2)
+                let brickX = (x + offset) % brickWidth
+                let brickY = y % brickHeight
+                
+                let isMortar = brickX < mortarWidth || brickY < mortarWidth
+                
+                let noise = Float((x * 13 + y * 17) % 19) / 19.0 * 0.1
+                
+                if isMortar {
+                    // Mortar - lighter gray
+                    let gray: Float = 0.55 + noise
+                    pixels[i] = UInt8(min(255, gray * 255))
+                    pixels[i + 1] = UInt8(min(255, (gray - 0.02) * 255))
+                    pixels[i + 2] = UInt8(min(255, (gray - 0.04) * 255))
+                } else {
+                    // Stone - varied gray/brown
+                    let brickNoise = Float((brickX * 7 + brickY * 11) % 13) / 13.0 * 0.15
+                    let base: Float = 0.4 + brickNoise + noise
+                    pixels[i] = UInt8(min(255, (base + 0.02) * 255))
+                    pixels[i + 1] = UInt8(min(255, base * 255))
+                    pixels[i + 2] = UInt8(min(255, (base - 0.02) * 255))
+                }
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    func createRoofTexture() -> MTLTexture {
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                
+                // Terracotta tile pattern
+                let tileHeight = 8
+                let row = y / tileHeight
+                let tileY = y % tileHeight
+                let rowShade = Float(tileY) / Float(tileHeight) * 0.15
+                
+                let noise = Float((x * 11 + y * 7 + row * 13) % 17) / 17.0 * 0.1
+                let base: Float = 0.6 + rowShade + noise
+                
+                pixels[i] = UInt8(min(255, (base + 0.15) * 255))       // R - reddish
+                pixels[i + 1] = UInt8(min(255, (base - 0.1) * 255))    // G
+                pixels[i + 2] = UInt8(min(255, (base - 0.2) * 255))    // B
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    func createWoodPlankTexture() -> MTLTexture {
+        // Try to load wood plank texture from file
+        if let texture = loadTexture(named: "wood_wall_02_sm_diffuse.jpg") {
+            return texture
+        }
+        
+        // Fallback to procedural
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                
+                // Wood grain
+                let plankWidth = 16
+                let plank = x / plankWidth
+                let plankX = x % plankWidth
+                let edge: Float = plankX < 1 ? 0.1 : 0.0
+                
+                let grain = sin(Float(y) * 0.3 + Float(plank) * 2.0) * 0.08
+                let noise = Float((x * 7 + y * 11) % 13) / 13.0 * 0.06
+                let base: Float = 0.5 + grain + noise - edge
+                
+                pixels[i] = UInt8(min(255, (base + 0.12) * 255))      // R
+                pixels[i + 1] = UInt8(min(255, (base - 0.02) * 255))  // G
+                pixels[i + 2] = UInt8(min(255, (base - 0.15) * 255))  // B
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    func createSkyTexture() -> MTLTexture {
+        let size = 256
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                
+                // Gradient from light blue at top to pale blue/white at horizon
+                let t = Float(y) / Float(size)
+                
+                // Base sky color gradient
+                let skyTopR: Float = 0.4
+                let skyTopG: Float = 0.6
+                let skyTopB: Float = 0.95
+                
+                let skyHorizonR: Float = 0.75
+                let skyHorizonG: Float = 0.85
+                let skyHorizonB: Float = 0.95
+                
+                var r = skyTopR + (skyHorizonR - skyTopR) * t
+                var g = skyTopG + (skyHorizonG - skyTopG) * t
+                var b = skyTopB + (skyHorizonB - skyTopB) * t
+                
+                // Add clouds using layered noise
+                let cloudNoise1 = sin(Float(x) * 0.03 + 1.5) * cos(Float(y) * 0.02) * 0.5 + 0.5
+                let cloudNoise2 = sin(Float(x) * 0.07 + Float(y) * 0.04) * 0.5 + 0.5
+                let cloudNoise3 = sin(Float(x + y) * 0.05) * cos(Float(x - y) * 0.03) * 0.5 + 0.5
+                
+                var cloudDensity = cloudNoise1 * 0.5 + cloudNoise2 * 0.3 + cloudNoise3 * 0.2
+                
+                // Clouds are more visible in the upper-middle area
+                let cloudBand = 1.0 - abs(t - 0.4) * 2.5
+                cloudDensity *= max(0, cloudBand)
+                
+                // Threshold for cloud visibility
+                if cloudDensity > 0.45 {
+                    let cloudAmount = (cloudDensity - 0.45) * 3.0
+                    r = r + (1.0 - r) * cloudAmount * 0.8
+                    g = g + (1.0 - g) * cloudAmount * 0.8
+                    b = b + (1.0 - b) * cloudAmount * 0.6
+                }
+                
+                pixels[i] = UInt8(min(255, r * 255))
+                pixels[i + 1] = UInt8(min(255, g * 255))
+                pixels[i + 2] = UInt8(min(255, b * 255))
+                pixels[i + 3] = 255
             }
         }
         

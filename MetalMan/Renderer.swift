@@ -16,6 +16,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let shadowPipelineState: MTLRenderPipelineState
     private let depthStencilState: MTLDepthStencilState
     private let depthStencilStateNoWrite: MTLDepthStencilState
+    private let depthStencilStateSkybox: MTLDepthStencilState
     private let shadowDepthStencilState: MTLDepthStencilState
     
     // Samplers
@@ -30,6 +31,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var rockTexture: MTLTexture!
     private var poleTexture: MTLTexture!
     private var characterTexture: MTLTexture!
+    private var pathTexture: MTLTexture!
+    private var stoneWallTexture: MTLTexture!
+    private var roofTexture: MTLTexture!
+    private var woodPlankTexture: MTLTexture!
+    private var skyTexture: MTLTexture!
     private var shadowMap: MTLTexture!
     private let shadowMapSize: Int = 2048
     
@@ -50,8 +56,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     // ============================================
     // WALK ANIMATION CONFIGURATION
-    // Adjust this to change leg swing speed
-    // Lower = slower, Higher = faster (recommended 0.5-3.0)
     private let stepsPerUnitDistance: Float = 0.5
     // ============================================
     
@@ -62,7 +66,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     private let jumpVelocity: Float = 8.0
     private let gravity: Float = 20.0
-    private let groundLevel: Float = 0.0
     
     // Movement config
     private let characterSpeed: Float = 6.0
@@ -100,6 +103,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var rockVertexCount: Int = 0
     private var poleVertexBuffer: MTLBuffer
     private var poleVertexCount: Int = 0
+    private var structureVertexBuffer: MTLBuffer
+    private var structureVertexCount: Int = 0
+    private var skyboxVertexBuffer: MTLBuffer
+    private var skyboxVertexCount: Int = 0
     
     // Character mesh (animated each frame)
     private let characterMesh: CharacterMesh
@@ -108,6 +115,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var uniformBuffer: MTLBuffer
     private var litUniformBuffer: MTLBuffer
     private var characterUniformBuffer: MTLBuffer
+    private var skyboxUniformBuffer: MTLBuffer
     
     // Collision
     private var colliders: [Collider] = []
@@ -148,6 +156,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         depthDescNoWrite.isDepthWriteEnabled = false
         self.depthStencilStateNoWrite = device.makeDepthStencilState(descriptor: depthDescNoWrite)!
         
+        // Skybox: always pass depth test (draw at infinity)
+        let skyboxDepthDesc = MTLDepthStencilDescriptor()
+        skyboxDepthDesc.depthCompareFunction = .lessEqual
+        skyboxDepthDesc.isDepthWriteEnabled = false
+        self.depthStencilStateSkybox = device.makeDepthStencilState(descriptor: skyboxDepthDesc)!
+        
         let shadowDepthDesc = MTLDepthStencilDescriptor()
         shadowDepthDesc.depthCompareFunction = .less
         shadowDepthDesc.isDepthWriteEnabled = true
@@ -173,6 +187,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         (gridLineBuffer, gridLineCount) = GeometryGenerator.makeGridLines(device: device)
         (groundVertexBuffer, groundVertexCount) = GeometryGenerator.makeGroundMesh(device: device)
+        (skyboxVertexBuffer, skyboxVertexCount) = GeometryGenerator.makeSkybox(device: device)
         
         let treeResult = GeometryGenerator.makeTreeMeshes(device: device)
         treeVertexBuffer = treeResult.0
@@ -189,6 +204,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         poleVertexCount = poleResult.1
         allColliders.append(contentsOf: poleResult.2)
         
+        let structureResult = GeometryGenerator.makeStructureMeshes(device: device)
+        structureVertexBuffer = structureResult.0
+        structureVertexCount = structureResult.1
+        allColliders.append(contentsOf: structureResult.2)
+        
         self.colliders = allColliders
         
         // Create character mesh
@@ -198,6 +218,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         uniformBuffer = device.makeBuffer(length: MemoryLayout<simd_float4x4>.stride * 3, options: [])!
         litUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: [])!
         characterUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: [])!
+        skyboxUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: [])!
         
         super.init()
         
@@ -209,6 +230,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         rockTexture = textureGen.createRockTexture()
         poleTexture = textureGen.createPoleTexture()
         characterTexture = textureGen.createCharacterTexture()
+        pathTexture = textureGen.createPathTexture()
+        stoneWallTexture = textureGen.createStoneWallTexture()
+        roofTexture = textureGen.createRoofTexture()
+        woodPlankTexture = textureGen.createWoodPlankTexture()
+        skyTexture = textureGen.createSkyTexture()
         shadowMap = textureGen.createShadowMap(size: shadowMapSize)
         
         // Initialize character mesh
@@ -275,17 +301,24 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     private static func texturedVertexDescriptor() -> MTLVertexDescriptor {
         let desc = MTLVertexDescriptor()
+        
+        // Use actual offsets from Swift struct layout
+        let positionOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.position)!
+        let normalOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.normal)!
+        let texCoordOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.texCoord)!
+        let materialIndexOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.materialIndex)!
+        
         desc.attributes[0].format = .float3  // position
-        desc.attributes[0].offset = 0
+        desc.attributes[0].offset = positionOffset
         desc.attributes[0].bufferIndex = 0
         desc.attributes[1].format = .float3  // normal
-        desc.attributes[1].offset = 12
+        desc.attributes[1].offset = normalOffset
         desc.attributes[1].bufferIndex = 0
         desc.attributes[2].format = .float2  // texCoord
-        desc.attributes[2].offset = 24
+        desc.attributes[2].offset = texCoordOffset
         desc.attributes[2].bufferIndex = 0
         desc.attributes[3].format = .uint    // materialIndex
-        desc.attributes[3].offset = 32
+        desc.attributes[3].offset = materialIndexOffset
         desc.attributes[3].bufferIndex = 0
         desc.layouts[0].stride = MemoryLayout<TexturedVertex>.stride
         return desc
@@ -397,8 +430,32 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func renderMainPass(commandBuffer: MTLCommandBuffer, descriptor: MTLRenderPassDescriptor, viewProjection vp: simd_float4x4) {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
         
-        encoder.setCullMode(.back)
+        // Bind all textures
+        bindTextures(encoder: encoder)
+        
+        // Draw skybox first (no depth write, always behind everything)
+        encoder.setCullMode(.front)  // Inside of cube
         encoder.setRenderPipelineState(litPipelineState)
+        encoder.setDepthStencilState(depthStencilStateSkybox)
+        
+        // Skybox follows camera position
+        var skyboxUniforms = LitUniforms(
+            modelMatrix: translation(cameraPosition.x, cameraPosition.y, cameraPosition.z),
+            viewProjectionMatrix: vp,
+            lightViewProjectionMatrix: lightViewProjectionMatrix,
+            lightDirection: lightDirection,
+            cameraPosition: cameraPosition,
+            ambientIntensity: 1.0,  // Full brightness for sky
+            diffuseIntensity: 0.0
+        )
+        memcpy(skyboxUniformBuffer.contents(), &skyboxUniforms, MemoryLayout<LitUniforms>.stride)
+        encoder.setVertexBuffer(skyboxUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(skyboxUniformBuffer, offset: 0, index: 1)
+        encoder.setVertexBuffer(skyboxVertexBuffer, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: skyboxVertexCount)
+        
+        // Now draw the rest with normal settings
+        encoder.setCullMode(.back)
         encoder.setDepthStencilState(depthStencilState)
         
         // Setup uniforms for landscape
@@ -414,17 +471,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         memcpy(litUniformBuffer.contents(), &litUniforms, MemoryLayout<LitUniforms>.stride)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
         encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
-        
-        // Bind textures
-        encoder.setFragmentTexture(groundTexture, index: 0)
-        encoder.setFragmentTexture(trunkTexture, index: 1)
-        encoder.setFragmentTexture(foliageTexture, index: 2)
-        encoder.setFragmentTexture(rockTexture, index: 3)
-        encoder.setFragmentTexture(poleTexture, index: 4)
-        encoder.setFragmentTexture(shadowMap, index: 5)
-        encoder.setFragmentTexture(characterTexture, index: 6)
-        encoder.setFragmentSamplerState(textureSampler, index: 0)
-        encoder.setFragmentSamplerState(shadowSampler, index: 1)
         
         // Draw landscape
         drawLandscape(encoder: encoder)
@@ -452,6 +498,23 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.endEncoding()
     }
     
+    private func bindTextures(encoder: MTLRenderCommandEncoder) {
+        encoder.setFragmentTexture(groundTexture, index: 0)
+        encoder.setFragmentTexture(trunkTexture, index: 1)
+        encoder.setFragmentTexture(foliageTexture, index: 2)
+        encoder.setFragmentTexture(rockTexture, index: 3)
+        encoder.setFragmentTexture(poleTexture, index: 4)
+        encoder.setFragmentTexture(shadowMap, index: 5)
+        encoder.setFragmentTexture(characterTexture, index: 6)
+        encoder.setFragmentTexture(pathTexture, index: 7)
+        encoder.setFragmentTexture(stoneWallTexture, index: 8)
+        encoder.setFragmentTexture(roofTexture, index: 9)
+        encoder.setFragmentTexture(woodPlankTexture, index: 10)
+        encoder.setFragmentTexture(skyTexture, index: 11)
+        encoder.setFragmentSamplerState(textureSampler, index: 0)
+        encoder.setFragmentSamplerState(shadowSampler, index: 1)
+    }
+    
     private func drawLandscape(encoder: MTLRenderCommandEncoder) {
         encoder.setVertexBuffer(groundVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: groundVertexCount)
@@ -464,6 +527,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         encoder.setVertexBuffer(poleVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: poleVertexCount)
+        
+        encoder.setVertexBuffer(structureVertexBuffer, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: structureVertexCount)
     }
     
     // MARK: - Character & Camera Updates
@@ -529,9 +595,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             characterVelocity *= 0.5
         }
         
-        characterPosition = finalPosition
-        characterPosition.x = max(-95, min(95, characterPosition.x))
-        characterPosition.z = max(-95, min(95, characterPosition.z))
+        characterPosition.x = max(-95, min(95, finalPosition.x))
+        characterPosition.z = max(-95, min(95, finalPosition.z))
+        
+        // Get terrain height at character position
+        let terrainHeight = Terrain.heightAt(x: characterPosition.x, z: characterPosition.z)
         
         // Smooth turning
         var yawDiff = targetYaw - characterYaw
@@ -568,11 +636,15 @@ final class Renderer: NSObject, MTKViewDelegate {
             verticalVelocity -= gravity * dt
             characterPosition.y += verticalVelocity * dt
             
-            if characterPosition.y <= groundLevel {
-                characterPosition.y = groundLevel
+            // Check if landed on terrain
+            if characterPosition.y <= terrainHeight {
+                characterPosition.y = terrainHeight
                 isJumping = false
                 verticalVelocity = 0
             }
+        } else {
+            // Follow terrain height when not jumping
+            characterPosition.y = terrainHeight
         }
     }
     
