@@ -5,6 +5,9 @@ import MetalKit
 import simd
 
 struct MetalGameView: UIViewRepresentable {
+    
+    /// HUD view model to bind to the player
+    var hudViewModel: GameHUDViewModel
 
     // MARK: - Coordinator
     class Coordinator: NSObject, MTKViewDelegate {
@@ -12,6 +15,9 @@ struct MetalGameView: UIViewRepresentable {
         let device: MTLDevice
         let mtkView: TouchForwardingMTKView
         let renderer: Renderer
+        
+        /// Reference to HUD view model for updates
+        weak var hudViewModel: GameHUDViewModel?
 
         // Input state
         var movementVector = SIMD2<Float>(0, 0)
@@ -20,8 +26,11 @@ struct MetalGameView: UIViewRepresentable {
         private var activeMovementTouch: UITouch?
         private var activeLookTouch: UITouch?
         private var lastLookTouchLocation: CGPoint?
+        
+        // Frame counter for HUD updates
+        private var frameCount: Int = 0
 
-        init(preferredFPS: Int) {
+        init(preferredFPS: Int, hudViewModel: GameHUDViewModel) {
             let device = MTLCreateSystemDefaultDevice()!
             self.device = device
             self.mtkView = TouchForwardingMTKView(frame: .zero, device: device)
@@ -30,15 +39,22 @@ struct MetalGameView: UIViewRepresentable {
             self.mtkView.preferredFramesPerSecond = preferredFPS
             self.mtkView.isPaused = false
             self.mtkView.enableSetNeedsDisplay = false
-
-            super.init()
+            self.hudViewModel = hudViewModel
 
             // Create renderer with both device and view
             let renderer = Renderer(device: device, view: self.mtkView)
             self.renderer = renderer
 
+            super.init()
+
             self.mtkView.delegate = self
             self.mtkView.touchDelegate = self
+            
+            // Bind HUD to player (on main actor)
+            let player = renderer.player
+            Task { @MainActor in
+                hudViewModel.bind(to: player)
+            }
         }
 
         // MARK: - Touch handling
@@ -120,6 +136,15 @@ struct MetalGameView: UIViewRepresentable {
             renderer.draw(in: view)
             // Reset look each frame
             lookDelta = SIMD2<Float>(0, 0)
+            
+            // Update HUD every 10 frames
+            frameCount += 1
+            if frameCount >= 10 {
+                frameCount = 0
+                DispatchQueue.main.async { [weak self] in
+                    self?.hudViewModel?.update()
+                }
+            }
         }
     }
 
@@ -143,7 +168,7 @@ struct MetalGameView: UIViewRepresentable {
 
     // MARK: - UIViewRepresentable
     func makeCoordinator() -> Coordinator {
-        return Coordinator(preferredFPS: 60)
+        return Coordinator(preferredFPS: 60, hudViewModel: hudViewModel)
     }
 
     func makeUIView(context: UIViewRepresentableContext<MetalGameView>) -> MTKView {
@@ -161,6 +186,9 @@ import MetalKit
 import simd
 
 struct MetalGameView: NSViewRepresentable {
+    
+    /// HUD view model to bind to the player
+    var hudViewModel: GameHUDViewModel
 
     // MARK: - Keyboard-handling MTKView
     class KeyboardMTKView: MTKView {
@@ -183,6 +211,9 @@ struct MetalGameView: NSViewRepresentable {
         let device: MTLDevice
         let mtkView: KeyboardMTKView
         let renderer: Renderer
+        
+        /// Reference to HUD view model for updates
+        weak var hudViewModel: GameHUDViewModel?
 
         // Input state
         var movementVector = SIMD2<Float>(0, 0)
@@ -190,8 +221,11 @@ struct MetalGameView: NSViewRepresentable {
         
         // Track pressed keys
         private var pressedKeys: Set<UInt16> = []
+        
+        // Frame counter for HUD updates (don't update every frame)
+        private var frameCount: Int = 0
 
-        init(preferredFPS: Int) {
+        init(preferredFPS: Int, hudViewModel: GameHUDViewModel) {
             let device = MTLCreateSystemDefaultDevice()!
             self.device = device
             let mtkView = KeyboardMTKView(frame: .zero, device: device)
@@ -201,6 +235,7 @@ struct MetalGameView: NSViewRepresentable {
             mtkView.isPaused = false
             mtkView.enableSetNeedsDisplay = false
             self.mtkView = mtkView
+            self.hudViewModel = hudViewModel
 
             // Create renderer with both device and view (before super.init)
             self.renderer = Renderer(device: device, view: mtkView)
@@ -209,6 +244,12 @@ struct MetalGameView: NSViewRepresentable {
 
             self.mtkView.delegate = self
             self.mtkView.keyboardDelegate = self
+            
+            // Bind HUD to player (on main actor)
+            let player = renderer.player
+            Task { @MainActor in
+                hudViewModel.bind(to: player)
+            }
         }
         
         // MARK: - Keyboard handling
@@ -237,6 +278,9 @@ struct MetalGameView: NSViewRepresentable {
             // Jump with spacebar
             renderer.jumpPressed = pressedKeys.contains(49)
             
+            // Interact with E key (keyCode 14)
+            renderer.interactPressed = pressedKeys.contains(14)
+            
             // Normalize diagonal movement
             if x != 0 && y != 0 {
                 let length = sqrt(x * x + y * y)
@@ -259,12 +303,21 @@ struct MetalGameView: NSViewRepresentable {
             renderer.draw(in: view)
             // Reset look each frame
             lookDelta = SIMD2<Float>(0, 0)
+            
+            // Update HUD every 10 frames (6 times per second at 60fps)
+            frameCount += 1
+            if frameCount >= 10 {
+                frameCount = 0
+                DispatchQueue.main.async { [weak self] in
+                    self?.hudViewModel?.update()
+                }
+            }
         }
     }
 
     // MARK: - NSViewRepresentable
     func makeCoordinator() -> Coordinator {
-        return Coordinator(preferredFPS: 60)
+        return Coordinator(preferredFPS: 60, hudViewModel: hudViewModel)
     }
 
     func makeNSView(context: NSViewRepresentableContext<MetalGameView>) -> MTKView {

@@ -9,14 +9,22 @@ import AppKit
 #endif
 
 struct MetalGameContainer: View {
+    @State private var hudViewModel = GameHUDViewModel()
+    
     var body: some View {
-        #if canImport(UIKit)
-        MetalGameView()
-        #elseif canImport(AppKit)
-        MetalGameView()
-        #else
-        Text("Metal not supported on this platform")
-        #endif
+        ZStack {
+            #if canImport(UIKit)
+            MetalGameView(hudViewModel: hudViewModel)
+            #elseif canImport(AppKit)
+            MetalGameView(hudViewModel: hudViewModel)
+            #else
+            Text("Metal not supported on this platform")
+            #endif
+            
+            // HUD overlay
+            GameHUD(viewModel: hudViewModel)
+                .allowsHitTesting(false)  // Don't block game input
+        }
     }
 }
 

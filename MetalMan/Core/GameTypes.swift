@@ -1,4 +1,5 @@
 import simd
+import Foundation
 
 // MARK: - Vertex Types
 
@@ -116,6 +117,42 @@ enum MaterialIndex: UInt32 {
     case roof = 8
     case woodPlank = 9
     case sky = 10
+    case treasureChest = 11
+}
+
+// MARK: - Interactables
+
+/// Type of interactable object in the world
+enum InteractableType {
+    case treasureChest
+}
+
+/// An interactable object in the world that the player can interact with
+struct Interactable: Identifiable {
+    let id: UUID
+    let type: InteractableType
+    var position: simd_float3
+    var isOpen: Bool = false
+    var interactionRadius: Float = 1.5
+    
+    // Treasure chest specific
+    var goldAmount: Int = 0
+    var containedItem: Item? = nil
+    
+    init(type: InteractableType, position: simd_float3) {
+        self.id = UUID()
+        self.type = type
+        self.position = position
+    }
+    
+    /// Check if player is close enough to interact
+    func canInteract(playerPosition: simd_float3) -> Bool {
+        guard !isOpen else { return false }
+        let dx = playerPosition.x - position.x
+        let dz = playerPosition.z - position.z
+        let distance = sqrt(dx * dx + dz * dz)
+        return distance <= interactionRadius
+    }
 }
 
 // MARK: - Terrain

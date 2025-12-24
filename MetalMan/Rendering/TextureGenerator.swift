@@ -478,6 +478,55 @@ class TextureGenerator {
         return createTexture(from: pixels, size: size)
     }
     
+    func createTreasureChestTexture() -> MTLTexture {
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                
+                // Rich brown wood base color
+                var r: Float = 0.45
+                var g: Float = 0.28
+                var b: Float = 0.12
+                
+                // Wood grain pattern
+                let grainX = Float(x) * 0.3
+                let grainY = Float(y) * 0.1
+                let grain = sin(grainX + sin(grainY * 2) * 3) * 0.5 + 0.5
+                r += grain * 0.08
+                g += grain * 0.04
+                b += grain * 0.02
+                
+                // Darker edges for depth (wood plank look)
+                let edgeX = min(Float(x), Float(size - 1 - x)) / Float(size / 4)
+                let edgeY = min(Float(y), Float(size - 1 - y)) / Float(size / 4)
+                let edgeFactor = min(1.0, min(edgeX, edgeY))
+                r *= 0.7 + edgeFactor * 0.3
+                g *= 0.7 + edgeFactor * 0.3
+                b *= 0.7 + edgeFactor * 0.3
+                
+                // Golden/brass tint for treasure feel
+                r += 0.05
+                g += 0.03
+                
+                // Add some noise
+                let noise = Float.random(in: -0.03...0.03)
+                r += noise
+                g += noise * 0.7
+                b += noise * 0.5
+                
+                pixels[i] = UInt8(min(255, max(0, r * 255)))
+                pixels[i + 1] = UInt8(min(255, max(0, g * 255)))
+                pixels[i + 2] = UInt8(min(255, max(0, b * 255)))
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
     func createSkyTexture() -> MTLTexture {
         let size = 256
         var pixels = [UInt8](repeating: 0, count: size * size * 4)

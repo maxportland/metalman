@@ -1007,6 +1007,150 @@ class GeometryGenerator {
         colliders.append(Collider.circle(x: basePos.x, z: basePos.z, radius: towerRadius + 0.5))
     }
     
+    // MARK: - Treasure Chest Meshes
+    
+    /// Generate treasure chest meshes at specified positions
+    static func makeTreasureChestMeshes(device: MTLDevice, interactables: [Interactable]) -> (MTLBuffer, Int, [Collider]) {
+        var vertices: [TexturedVertex] = []
+        var colliders: [Collider] = []
+        
+        for interactable in interactables {
+            if interactable.type == .treasureChest {
+                addTreasureChest(at: interactable.position, isOpen: interactable.isOpen, vertices: &vertices, colliders: &colliders)
+            }
+        }
+        
+        // Return empty buffer if no chests
+        if vertices.isEmpty {
+            let emptyBuffer = device.makeBuffer(length: MemoryLayout<TexturedVertex>.stride, options: [])!
+            return (emptyBuffer, 0, colliders)
+        }
+        
+        let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
+        return (buffer, vertices.count, colliders)
+    }
+    
+    /// Add a treasure chest at the specified position
+    private static func addTreasureChest(at pos: simd_float3, isOpen: Bool, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
+        let chestWidth: Float = 0.6
+        let chestDepth: Float = 0.4
+        let chestHeight: Float = 0.35
+        let lidHeight: Float = 0.15
+        
+        let matChest = MaterialIndex.treasureChest.rawValue
+        
+        // Base box (the main chest body)
+        addChestBox(at: pos + simd_float3(0, chestHeight / 2, 0),
+                    size: simd_float3(chestWidth, chestHeight, chestDepth),
+                    material: matChest, vertices: &vertices)
+        
+        // Lid (either closed on top, or rotated open)
+        if isOpen {
+            // Lid rotated back ~110 degrees
+            let lidPivotY = pos.y + chestHeight
+            let lidPivotZ = pos.z - chestDepth / 2
+            
+            // Lid is rotated back, so it's mostly vertical behind the chest
+            let lidAngle: Float = 1.9  // ~110 degrees in radians
+            let lidCenterY = lidPivotY + sin(lidAngle) * (lidHeight / 2)
+            let lidCenterZ = lidPivotZ - cos(lidAngle) * (lidHeight / 2)
+            
+            addChestBox(at: simd_float3(pos.x, lidCenterY, lidCenterZ),
+                        size: simd_float3(chestWidth, lidHeight, chestDepth * 0.9),
+                        material: matChest, vertices: &vertices)
+        } else {
+            // Lid closed on top
+            addChestBox(at: pos + simd_float3(0, chestHeight + lidHeight / 2, 0),
+                        size: simd_float3(chestWidth + 0.02, lidHeight, chestDepth + 0.02),
+                        material: matChest, vertices: &vertices)
+            
+            // Metal clasp/lock on front
+            addChestBox(at: pos + simd_float3(0, chestHeight * 0.6, chestDepth / 2 + 0.02),
+                        size: simd_float3(0.1, 0.1, 0.04),
+                        material: MaterialIndex.pole.rawValue, vertices: &vertices)
+        }
+        
+        // Metal corner reinforcements
+        let cornerOffset = simd_float3(chestWidth / 2 - 0.05, 0, chestDepth / 2 - 0.05)
+        let corners = [
+            simd_float3(-1, 0, -1), simd_float3(1, 0, -1),
+            simd_float3(-1, 0, 1), simd_float3(1, 0, 1)
+        ]
+        for corner in corners {
+            let cornerPos = pos + simd_float3(corner.x * cornerOffset.x, chestHeight / 2, corner.z * cornerOffset.z)
+            addChestBox(at: cornerPos, size: simd_float3(0.06, chestHeight + 0.02, 0.06),
+                        material: MaterialIndex.pole.rawValue, vertices: &vertices)
+        }
+        
+        // Collider
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: max(chestWidth, chestDepth) / 2 + 0.1))
+    }
+    
+    /// Helper to add a box for chest (uses wood plank texture coordinates)
+    private static func addChestBox(at center: simd_float3, size: simd_float3, material: UInt32, vertices: inout [TexturedVertex]) {
+        let hw = size.x / 2
+        let hh = size.y / 2
+        let hd = size.z / 2
+        
+        // Front face
+        addChestQuad(
+            bl: center + simd_float3(-hw, -hh, hd),
+            br: center + simd_float3(hw, -hh, hd),
+            tl: center + simd_float3(-hw, hh, hd),
+            tr: center + simd_float3(hw, hh, hd),
+            normal: simd_float3(0, 0, 1), material: material, vertices: &vertices)
+        
+        // Back face
+        addChestQuad(
+            bl: center + simd_float3(hw, -hh, -hd),
+            br: center + simd_float3(-hw, -hh, -hd),
+            tl: center + simd_float3(hw, hh, -hd),
+            tr: center + simd_float3(-hw, hh, -hd),
+            normal: simd_float3(0, 0, -1), material: material, vertices: &vertices)
+        
+        // Left face
+        addChestQuad(
+            bl: center + simd_float3(-hw, -hh, -hd),
+            br: center + simd_float3(-hw, -hh, hd),
+            tl: center + simd_float3(-hw, hh, -hd),
+            tr: center + simd_float3(-hw, hh, hd),
+            normal: simd_float3(-1, 0, 0), material: material, vertices: &vertices)
+        
+        // Right face
+        addChestQuad(
+            bl: center + simd_float3(hw, -hh, hd),
+            br: center + simd_float3(hw, -hh, -hd),
+            tl: center + simd_float3(hw, hh, hd),
+            tr: center + simd_float3(hw, hh, -hd),
+            normal: simd_float3(1, 0, 0), material: material, vertices: &vertices)
+        
+        // Top face
+        addChestQuad(
+            bl: center + simd_float3(-hw, hh, hd),
+            br: center + simd_float3(hw, hh, hd),
+            tl: center + simd_float3(-hw, hh, -hd),
+            tr: center + simd_float3(hw, hh, -hd),
+            normal: simd_float3(0, 1, 0), material: material, vertices: &vertices)
+        
+        // Bottom face
+        addChestQuad(
+            bl: center + simd_float3(-hw, -hh, -hd),
+            br: center + simd_float3(hw, -hh, -hd),
+            tl: center + simd_float3(-hw, -hh, hd),
+            tr: center + simd_float3(hw, -hh, hd),
+            normal: simd_float3(0, -1, 0), material: material, vertices: &vertices)
+    }
+    
+    private static func addChestQuad(bl: simd_float3, br: simd_float3, tl: simd_float3, tr: simd_float3,
+                                     normal: simd_float3, material: UInt32, vertices: inout [TexturedVertex]) {
+        vertices.append(TexturedVertex(position: bl, normal: normal, texCoord: simd_float2(0, 1), materialIndex: material))
+        vertices.append(TexturedVertex(position: br, normal: normal, texCoord: simd_float2(1, 1), materialIndex: material))
+        vertices.append(TexturedVertex(position: tr, normal: normal, texCoord: simd_float2(1, 0), materialIndex: material))
+        vertices.append(TexturedVertex(position: bl, normal: normal, texCoord: simd_float2(0, 1), materialIndex: material))
+        vertices.append(TexturedVertex(position: tr, normal: normal, texCoord: simd_float2(1, 0), materialIndex: material))
+        vertices.append(TexturedVertex(position: tl, normal: normal, texCoord: simd_float2(0, 0), materialIndex: material))
+    }
+    
     // MARK: - Pole Meshes
     
     static func makePoleMeshes(device: MTLDevice) -> (MTLBuffer, Int, [Collider]) {

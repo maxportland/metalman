@@ -36,8 +36,16 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var roofTexture: MTLTexture!
     private var woodPlankTexture: MTLTexture!
     private var skyTexture: MTLTexture!
+    private var treasureChestTexture: MTLTexture!
     private var shadowMap: MTLTexture!
     private let shadowMapSize: Int = 2048
+    
+    // MARK: - Interactables
+    
+    private var interactables: [Interactable] = []
+    private var chestVertexBuffer: MTLBuffer!
+    private var chestVertexCount: Int = 0
+    private var chestsNeedRebuild: Bool = false
     
     // MARK: - Textures (Normal Maps)
     
@@ -51,6 +59,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     var movementVector: simd_float2 = .zero
     var lookDelta: simd_float2 = .zero
     var jumpPressed: Bool = false
+    var interactPressed: Bool = false
+    private var interactWasPressed: Bool = false
+    
+    // MARK: - RPG Player
+    
+    /// The player character with stats, inventory, and equipment
+    let player: PlayerCharacter
     
     // MARK: - Character State
     
@@ -74,11 +89,16 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let jumpVelocity: Float = 8.0
     private let gravity: Float = 20.0
     
-    // Movement config
-    private let characterSpeed: Float = 6.0
+    // Movement config (base values, modified by player stats)
+    private let baseCharacterSpeed: Float = 6.0
     private let acceleration: Float = 40.0
     private let deceleration: Float = 25.0
     private let turnSpeed: Float = 15.0
+    
+    /// Effective character speed modified by player dexterity
+    private var characterSpeed: Float {
+        baseCharacterSpeed * player.speedModifier
+    }
     
     // MARK: - Camera & Lighting
     
@@ -243,6 +263,19 @@ final class Renderer: NSObject, MTKViewDelegate {
     init(device: MTLDevice, view: MTKView) {
         self.device = device
         
+        // Initialize player character
+        self.player = PlayerCharacter(
+            name: "Hero",
+            attributes: CharacterAttributes(strength: 10, dexterity: 12, intelligence: 8),
+            maxHP: 100,
+            inventoryCapacity: 20
+        )
+        
+        // Give starter items
+        player.inventory.addItem(ItemTemplates.healthPotion(size: .common), quantity: 3)
+        player.inventory.addItem(ItemTemplates.sword(rarity: .common))
+        player.inventory.addGold(50)
+        
         guard let commandQueue = device.makeCommandQueue() else {
             fatalError("Failed to create command queue")
         }
@@ -332,6 +365,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         poleVertexCount = poleResult.1
         allColliders.append(contentsOf: poleResult.2)
         
+        // 5. Create treasure chests
+        self.interactables = Renderer.createTreasureChests()
+        let chestResult = GeometryGenerator.makeTreasureChestMeshes(device: device, interactables: interactables)
+        chestVertexBuffer = chestResult.0
+        chestVertexCount = chestResult.1
+        allColliders.append(contentsOf: chestResult.2)
+        
         self.colliders = allColliders
         
         // Create character mesh
@@ -359,6 +399,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         roofTexture = textureGen.createRoofTexture()
         woodPlankTexture = textureGen.createWoodPlankTexture()
         skyTexture = textureGen.createSkyTexture()
+        treasureChestTexture = textureGen.createTreasureChestTexture()
         shadowMap = textureGen.createShadowMap(size: shadowMapSize)
         
         // Normal maps
@@ -482,6 +523,130 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
     
+    // MARK: - Treasure Chests
+    
+    /// Create treasure chests at interesting locations
+    private static func createTreasureChests() -> [Interactable] {
+        var chests: [Interactable] = []
+        
+        // Predefined chest locations (avoiding spawn area and paths)
+        let chestLocations: [(x: Float, z: Float)] = [
+            (15, 20),    // Near first house
+            (-25, 15),   // Near second house
+            (35, -30),   // Near third house
+            (-40, -35),  // In the ruins
+            (50, 45),    // In the second ruins
+            (-55, 55),   // Near the watchtower
+            (70, 10),    // Far east
+            (-70, -20),  // Far west
+            (20, -60),   // South area
+            (-30, 70),   // North area
+        ]
+        
+        var seed = 42
+        for (x, z) in chestLocations {
+            let terrainY = Terrain.heightAt(x: x, z: z)
+            var chest = Interactable(type: .treasureChest, position: simd_float3(x, terrainY, z))
+            
+            // Random loot
+            let lootRoll = seededRandom(seed)
+            seed += 1
+            
+            if lootRoll < 0.4 {
+                // Gold only (40% chance)
+                chest.goldAmount = 10 + Int(seededRandom(seed) * 40)
+                seed += 1
+            } else if lootRoll < 0.7 {
+                // Gold + common item (30% chance)
+                chest.goldAmount = 5 + Int(seededRandom(seed) * 20)
+                seed += 1
+                
+                let itemRoll = seededRandom(seed)
+                seed += 1
+                if itemRoll < 0.5 {
+                    chest.containedItem = ItemTemplates.healthPotion(size: .common)
+                } else {
+                    chest.containedItem = ItemTemplates.sword(rarity: .common)
+                }
+            } else if lootRoll < 0.9 {
+                // Uncommon item (20% chance)
+                chest.goldAmount = 15 + Int(seededRandom(seed) * 30)
+                seed += 1
+                
+                let itemRoll = seededRandom(seed)
+                seed += 1
+                if itemRoll < 0.3 {
+                    chest.containedItem = ItemTemplates.healthPotion(size: .uncommon)
+                } else if itemRoll < 0.6 {
+                    chest.containedItem = ItemTemplates.sword(rarity: .uncommon)
+                } else {
+                    chest.containedItem = ItemTemplates.chestplate(rarity: .common)
+                }
+            } else {
+                // Rare item (10% chance)
+                chest.goldAmount = 30 + Int(seededRandom(seed) * 50)
+                seed += 1
+                
+                let itemRoll = seededRandom(seed)
+                seed += 1
+                if itemRoll < 0.4 {
+                    chest.containedItem = ItemTemplates.sword(rarity: .rare)
+                } else if itemRoll < 0.7 {
+                    chest.containedItem = ItemTemplates.chestplate(rarity: .uncommon)
+                } else {
+                    chest.containedItem = ItemTemplates.boots(rarity: .rare)
+                }
+            }
+            
+            chests.append(chest)
+        }
+        
+        return chests
+    }
+    
+    /// Try to interact with nearby chests
+    func tryInteract() {
+        for i in 0..<interactables.count {
+            if interactables[i].canInteract(playerPosition: characterPosition) {
+                openChest(at: i)
+                break
+            }
+        }
+    }
+    
+    /// Open a chest and give loot to player
+    private func openChest(at index: Int) {
+        guard index >= 0 && index < interactables.count else { return }
+        guard !interactables[index].isOpen else { return }
+        
+        interactables[index].isOpen = true
+        chestsNeedRebuild = true
+        
+        // Give loot to player
+        if interactables[index].goldAmount > 0 {
+            player.inventory.addGold(interactables[index].goldAmount)
+            print("[Chest] Found \(interactables[index].goldAmount) gold!")
+        }
+        
+        if let item = interactables[index].containedItem {
+            if player.inventory.addItem(item) {
+                print("[Chest] Found \(item.rarity.name) \(item.name)!")
+            } else {
+                print("[Chest] Inventory full! Couldn't pick up \(item.name)")
+            }
+        }
+    }
+    
+    /// Rebuild chest meshes if needed (after opening)
+    private func rebuildChestsIfNeeded() {
+        guard chestsNeedRebuild else { return }
+        chestsNeedRebuild = false
+        
+        let chestResult = GeometryGenerator.makeTreasureChestMeshes(device: device, interactables: interactables)
+        chestVertexBuffer = chestResult.0
+        chestVertexCount = chestResult.1
+    }
+    
     // MARK: - MTKViewDelegate
     
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -511,6 +676,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Update day/night cycle
         updateTimeOfDay(deltaTime: dt)
+        
+        // Handle interaction input (E key)
+        if interactPressed && !interactWasPressed {
+            tryInteract()
+        }
+        interactWasPressed = interactPressed
+        
+        // Rebuild chest meshes if any were opened
+        rebuildChestsIfNeeded()
         
         updateCharacter(deltaTime: dt)
         updateCamera(deltaTime: dt)
@@ -686,6 +860,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setFragmentTexture(rockNormalMap, index: 14)
         encoder.setFragmentTexture(pathNormalMap, index: 15)
         
+        // Treasure chest texture (index 16)
+        encoder.setFragmentTexture(treasureChestTexture, index: 16)
+        
         encoder.setFragmentSamplerState(textureSampler, index: 0)
         encoder.setFragmentSamplerState(shadowSampler, index: 1)
     }
@@ -705,6 +882,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         encoder.setVertexBuffer(structureVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: structureVertexCount)
+        
+        // Draw treasure chests
+        if chestVertexCount > 0 {
+            encoder.setVertexBuffer(chestVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: chestVertexCount)
+        }
     }
     
     // MARK: - Character & Camera Updates
