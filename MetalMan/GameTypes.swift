@@ -8,13 +8,40 @@ struct Vertex {
     var color: simd_float4
 }
 
-/// Textured vertex for solid geometry with lighting
+/// Textured vertex for solid geometry with lighting and normal mapping
 struct TexturedVertex {
     var position: simd_float3
     var normal: simd_float3
+    var tangent: simd_float3      // For normal mapping (tangent space)
     var texCoord: simd_float2
-    var materialIndex: UInt32  // 0=ground, 1=tree trunk, 2=foliage, 3=rock, 4=pole, 5=character
+    var materialIndex: UInt32     // 0=ground, 1=tree trunk, 2=foliage, 3=rock, 4=pole, 5=character
     var padding: UInt32 = 0
+    
+    /// Initialize with automatic tangent computation from normal
+    init(position: simd_float3, normal: simd_float3, texCoord: simd_float2, materialIndex: UInt32) {
+        self.position = position
+        self.normal = normal
+        self.texCoord = texCoord
+        self.materialIndex = materialIndex
+        self.padding = 0
+        
+        // Compute tangent perpendicular to normal, pointing along texture U axis
+        var t = simd_float3(1, 0, 0)
+        if abs(simd_dot(normal, t)) > 0.9 {
+            t = simd_float3(0, 0, 1)
+        }
+        self.tangent = simd_normalize(t - simd_dot(t, normal) * normal)
+    }
+    
+    /// Initialize with explicit tangent
+    init(position: simd_float3, normal: simd_float3, tangent: simd_float3, texCoord: simd_float2, materialIndex: UInt32) {
+        self.position = position
+        self.normal = normal
+        self.tangent = tangent
+        self.texCoord = texCoord
+        self.materialIndex = materialIndex
+        self.padding = 0
+    }
 }
 
 // MARK: - Uniform Types

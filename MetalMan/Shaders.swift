@@ -32,18 +32,20 @@ fragment float4 fragment_main(VertexOut in [[stage_in]]) {
     return in.color;
 }
 
-// Textured lit vertex
+// Textured lit vertex with tangent for normal mapping
 struct TexturedVertexIn {
     float3 position [[attribute(0)]];
     float3 normal [[attribute(1)]];
-    float2 texCoord [[attribute(2)]];
-    uint materialIndex [[attribute(3)]];
+    float3 tangent [[attribute(2)]];
+    float2 texCoord [[attribute(3)]];
+    uint materialIndex [[attribute(4)]];
 };
 
 struct LitVertexOut {
     float4 position [[position]];
     float3 worldPosition;
     float3 normal;
+    float3 tangent;
     float2 texCoord;
     float4 lightSpacePosition;
     uint materialIndex [[flat]];  // flat interpolation prevents integer interpolation artifacts
@@ -66,6 +68,7 @@ vertex LitVertexOut vertex_lit(TexturedVertexIn in [[stage_in]],
     out.worldPosition = worldPos.xyz;
     out.position = uniforms.viewProjectionMatrix * worldPos;
     out.normal = normalize((uniforms.modelMatrix * float4(in.normal, 0.0)).xyz);
+    out.tangent = normalize((uniforms.modelMatrix * float4(in.tangent, 0.0)).xyz);
     out.texCoord = in.texCoord;
     out.lightSpacePosition = uniforms.lightViewProjectionMatrix * worldPos;
     out.materialIndex = in.materialIndex;
@@ -109,6 +112,10 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
                              texture2d<float> roofTex [[texture(9)]],
                              texture2d<float> woodPlankTex [[texture(10)]],
                              texture2d<float> skyTex [[texture(11)]],
+                             texture2d<float> groundNormalMap [[texture(12)]],
+                             texture2d<float> trunkNormalMap [[texture(13)]],
+                             texture2d<float> rockNormalMap [[texture(14)]],
+                             texture2d<float> pathNormalMap [[texture(15)]],
                              sampler texSampler [[sampler(0)]],
                              sampler shadowSampler [[sampler(1)]],
                              constant LitUniforms &uniforms [[buffer(1)]]) {
@@ -134,8 +141,42 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
         return texColor;
     }
     
+    // Build TBN (Tangent-Bitangent-Normal) matrix for normal mapping
+    float3 N = normalize(in.normal);
+    float3 T = normalize(in.tangent);
+    // Re-orthogonalize T with respect to N
+    T = normalize(T - dot(T, N) * N);
+    float3 B = cross(N, T);
+    float3x3 TBN = float3x3(T, B, N);
+    
+    // Sample normal map based on material
+    float3 sampledNormal = float3(0.0, 0.0, 1.0); // Default: straight up in tangent space
+    switch (in.materialIndex) {
+        case 0: // Ground
+            sampledNormal = groundNormalMap.sample(texSampler, in.texCoord).rgb;
+            break;
+        case 1: // Tree trunk
+            sampledNormal = trunkNormalMap.sample(texSampler, in.texCoord).rgb;
+            break;
+        case 3: // Rock
+            sampledNormal = rockNormalMap.sample(texSampler, in.texCoord).rgb;
+            break;
+        case 6: // Path
+            sampledNormal = pathNormalMap.sample(texSampler, in.texCoord).rgb;
+            break;
+        default:
+            // Use flat normal for materials without normal maps
+            sampledNormal = float3(0.5, 0.5, 1.0);
+            break;
+    }
+    
+    // Convert from [0,1] to [-1,1] range
+    sampledNormal = sampledNormal * 2.0 - 1.0;
+    
+    // Transform normal from tangent space to world space
+    float3 normal = normalize(TBN * sampledNormal);
+    
     // Lighting
-    float3 normal = normalize(in.normal);
     float3 lightDir = normalize(-uniforms.lightDirection);
     float NdotL = max(dot(normal, lightDir), 0.0);
     

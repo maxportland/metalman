@@ -4,6 +4,49 @@ import simd
 /// Generates static world geometry meshes
 class GeometryGenerator {
     
+    // MARK: - Tangent Calculation Helper
+    
+    /// Compute tangent vector for a surface given its normal
+    /// For flat or mostly-flat surfaces, tangent points along the texture U axis
+    static func computeTangent(normal: simd_float3) -> simd_float3 {
+        // Start with world X axis as initial tangent direction
+        var tangent = simd_float3(1, 0, 0)
+        
+        // If normal is too close to X axis, use Z axis instead
+        if abs(simd_dot(normal, tangent)) > 0.9 {
+            tangent = simd_float3(0, 0, 1)
+        }
+        
+        // Make tangent perpendicular to normal using Gram-Schmidt
+        tangent = simd_normalize(tangent - simd_dot(tangent, normal) * normal)
+        return tangent
+    }
+    
+    /// Compute tangent for a triangle given its vertices and UVs
+    static func computeTriangleTangent(
+        p0: simd_float3, p1: simd_float3, p2: simd_float3,
+        uv0: simd_float2, uv1: simd_float2, uv2: simd_float2
+    ) -> simd_float3 {
+        let edge1 = p1 - p0
+        let edge2 = p2 - p0
+        let deltaUV1 = uv1 - uv0
+        let deltaUV2 = uv2 - uv0
+        
+        let denom = deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y
+        if abs(denom) < 0.0001 {
+            return simd_float3(1, 0, 0) // Fallback
+        }
+        
+        let f = 1.0 / denom
+        let tangent = simd_float3(
+            f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x),
+            f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y),
+            f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z)
+        )
+        
+        return simd_normalize(tangent)
+    }
+    
     // MARK: - Grid Lines (Wireframe)
     
     static func makeGridLines(device: MTLDevice) -> (MTLBuffer, Int) {
@@ -77,15 +120,21 @@ class GeometryGenerator {
                 let u1 = u0 + texScale
                 let v1 = v0 + texScale
                 
+                // Compute tangents from normals
+                let t00 = computeTangent(normal: n00)
+                let t10 = computeTangent(normal: n10)
+                let t01 = computeTangent(normal: n01)
+                let t11 = computeTangent(normal: n11)
+                
                 // Triangle 1
-                vertices.append(TexturedVertex(position: simd_float3(x0, h00, z0), normal: n00, texCoord: simd_float2(u0, v0), materialIndex: material))
-                vertices.append(TexturedVertex(position: simd_float3(x1, h10, z0), normal: n10, texCoord: simd_float2(u1, v0), materialIndex: material))
-                vertices.append(TexturedVertex(position: simd_float3(x1, h11, z1), normal: n11, texCoord: simd_float2(u1, v1), materialIndex: material))
+                vertices.append(TexturedVertex(position: simd_float3(x0, h00, z0), normal: n00, tangent: t00, texCoord: simd_float2(u0, v0), materialIndex: material))
+                vertices.append(TexturedVertex(position: simd_float3(x1, h10, z0), normal: n10, tangent: t10, texCoord: simd_float2(u1, v0), materialIndex: material))
+                vertices.append(TexturedVertex(position: simd_float3(x1, h11, z1), normal: n11, tangent: t11, texCoord: simd_float2(u1, v1), materialIndex: material))
                 
                 // Triangle 2
-                vertices.append(TexturedVertex(position: simd_float3(x0, h00, z0), normal: n00, texCoord: simd_float2(u0, v0), materialIndex: material))
-                vertices.append(TexturedVertex(position: simd_float3(x1, h11, z1), normal: n11, texCoord: simd_float2(u1, v1), materialIndex: material))
-                vertices.append(TexturedVertex(position: simd_float3(x0, h01, z1), normal: n01, texCoord: simd_float2(u0, v1), materialIndex: material))
+                vertices.append(TexturedVertex(position: simd_float3(x0, h00, z0), normal: n00, tangent: t00, texCoord: simd_float2(u0, v0), materialIndex: material))
+                vertices.append(TexturedVertex(position: simd_float3(x1, h11, z1), normal: n11, tangent: t11, texCoord: simd_float2(u1, v1), materialIndex: material))
+                vertices.append(TexturedVertex(position: simd_float3(x0, h01, z1), normal: n01, tangent: t01, texCoord: simd_float2(u0, v1), materialIndex: material))
             }
         }
         

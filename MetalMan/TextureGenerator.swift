@@ -531,6 +531,54 @@ class TextureGenerator {
         return createTexture(from: pixels, size: size)
     }
     
+    // MARK: - Normal Map Textures
+    
+    func createGroundNormalMap() -> MTLTexture {
+        // Try to load normal map from file
+        if let texture = loadTexture(named: "grass_01_normal.jpg") {
+            return texture
+        }
+        // Fallback: flat normal map (pointing straight up)
+        return createFlatNormalMap(size: 64)
+    }
+    
+    func createTrunkNormalMap() -> MTLTexture {
+        if let texture = loadTexture(named: "tree_01_normal.jpg") {
+            return texture
+        }
+        return createFlatNormalMap(size: 64)
+    }
+    
+    func createRockNormalMap() -> MTLTexture {
+        if let texture = loadTexture(named: "rock_01_normal.jpg") {
+            return texture
+        }
+        return createFlatNormalMap(size: 64)
+    }
+    
+    func createPathNormalMap() -> MTLTexture {
+        // Path doesn't have a normal map, use dirt if available
+        if let texture = loadTexture(named: "dirt_01_normal.jpg") {
+            return texture
+        }
+        return createFlatNormalMap(size: 64)
+    }
+    
+    /// Create a flat normal map (all normals pointing straight up in tangent space)
+    private func createFlatNormalMap(size: Int) -> MTLTexture {
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            // Normal pointing up in tangent space: (0, 0, 1) encoded as (128, 128, 255)
+            pixels[i] = 128     // R = X (0 -> 128)
+            pixels[i + 1] = 128 // G = Y (0 -> 128)
+            pixels[i + 2] = 255 // B = Z (1 -> 255)
+            pixels[i + 3] = 255 // A
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
     func createShadowMap(size: Int) -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .depth32Float,

@@ -23,7 +23,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let textureSampler: MTLSamplerState
     private let shadowSampler: MTLSamplerState
     
-    // MARK: - Textures
+    // MARK: - Textures (Diffuse)
     
     private var groundTexture: MTLTexture!
     private var trunkTexture: MTLTexture!
@@ -38,6 +38,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var skyTexture: MTLTexture!
     private var shadowMap: MTLTexture!
     private let shadowMapSize: Int = 2048
+    
+    // MARK: - Textures (Normal Maps)
+    
+    private var groundNormalMap: MTLTexture!
+    private var trunkNormalMap: MTLTexture!
+    private var rockNormalMap: MTLTexture!
+    private var pathNormalMap: MTLTexture!
     
     // MARK: - Input
     
@@ -224,6 +231,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Create textures
         let textureGen = TextureGenerator(device: device, commandQueue: commandQueue)
+        // Diffuse textures
         groundTexture = textureGen.createGroundTexture()
         trunkTexture = textureGen.createTrunkTexture()
         foliageTexture = textureGen.createFoliageTexture()
@@ -236,6 +244,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         woodPlankTexture = textureGen.createWoodPlankTexture()
         skyTexture = textureGen.createSkyTexture()
         shadowMap = textureGen.createShadowMap(size: shadowMapSize)
+        
+        // Normal maps
+        groundNormalMap = textureGen.createGroundNormalMap()
+        trunkNormalMap = textureGen.createTrunkNormalMap()
+        rockNormalMap = textureGen.createRockNormalMap()
+        pathNormalMap = textureGen.createPathNormalMap()
         
         // Initialize character mesh
         characterMesh.update(walkPhase: walkPhase, isJumping: isJumping)
@@ -305,6 +319,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Use actual offsets from Swift struct layout
         let positionOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.position)!
         let normalOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.normal)!
+        let tangentOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.tangent)!
         let texCoordOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.texCoord)!
         let materialIndexOffset = MemoryLayout<TexturedVertex>.offset(of: \TexturedVertex.materialIndex)!
         
@@ -314,12 +329,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         desc.attributes[1].format = .float3  // normal
         desc.attributes[1].offset = normalOffset
         desc.attributes[1].bufferIndex = 0
-        desc.attributes[2].format = .float2  // texCoord
-        desc.attributes[2].offset = texCoordOffset
+        desc.attributes[2].format = .float3  // tangent
+        desc.attributes[2].offset = tangentOffset
         desc.attributes[2].bufferIndex = 0
-        desc.attributes[3].format = .uint    // materialIndex
-        desc.attributes[3].offset = materialIndexOffset
+        desc.attributes[3].format = .float2  // texCoord
+        desc.attributes[3].offset = texCoordOffset
         desc.attributes[3].bufferIndex = 0
+        desc.attributes[4].format = .uint    // materialIndex
+        desc.attributes[4].offset = materialIndexOffset
+        desc.attributes[4].bufferIndex = 0
         desc.layouts[0].stride = MemoryLayout<TexturedVertex>.stride
         return desc
     }
@@ -499,6 +517,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     private func bindTextures(encoder: MTLRenderCommandEncoder) {
+        // Diffuse textures (indices 0-11)
         encoder.setFragmentTexture(groundTexture, index: 0)
         encoder.setFragmentTexture(trunkTexture, index: 1)
         encoder.setFragmentTexture(foliageTexture, index: 2)
@@ -511,6 +530,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setFragmentTexture(roofTexture, index: 9)
         encoder.setFragmentTexture(woodPlankTexture, index: 10)
         encoder.setFragmentTexture(skyTexture, index: 11)
+        
+        // Normal maps (indices 12-15)
+        encoder.setFragmentTexture(groundNormalMap, index: 12)
+        encoder.setFragmentTexture(trunkNormalMap, index: 13)
+        encoder.setFragmentTexture(rockNormalMap, index: 14)
+        encoder.setFragmentTexture(pathNormalMap, index: 15)
+        
         encoder.setFragmentSamplerState(textureSampler, index: 0)
         encoder.setFragmentSamplerState(shadowSampler, index: 1)
     }
