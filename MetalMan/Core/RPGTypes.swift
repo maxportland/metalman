@@ -110,6 +110,20 @@ enum EquipmentSlot: CaseIterable {
     case offHand
     case accessory1
     case accessory2
+    
+    var displayName: String {
+        switch self {
+        case .head: return "Head"
+        case .chest: return "Chest"
+        case .legs: return "Legs"
+        case .feet: return "Feet"
+        case .hands: return "Hands"
+        case .mainHand: return "Main Hand"
+        case .offHand: return "Off Hand"
+        case .accessory1: return "Accessory"
+        case .accessory2: return "Accessory"
+        }
+    }
 }
 
 /// Base item definition
@@ -158,6 +172,30 @@ struct Item: Identifiable, Equatable {
     
     static func == (lhs: Item, rhs: Item) -> Bool {
         lhs.id == rhs.id
+    }
+    
+    /// Icon name based on category for UI display
+    var iconName: String {
+        switch category {
+        case .weapon:
+            if name.lowercased().contains("staff") { return "staff" }
+            if name.lowercased().contains("bow") { return "bow" }
+            return "sword"
+        case .armor:
+            if equipSlot == .head { return "helmet" }
+            if equipSlot == .feet { return "boots" }
+            if equipSlot == .hands { return "ring" }
+            return "armor"
+        case .consumable:
+            if name.lowercased().contains("scroll") { return "scroll" }
+            return "potion"
+        case .material:
+            return "material"
+        case .quest:
+            return "quest"
+        case .misc:
+            return "misc"
+        }
     }
 }
 
@@ -282,6 +320,26 @@ final class Inventory: @unchecked Sendable {
         return slots[slot]
     }
     
+    /// Remove item at a specific slot index (used when equipping)
+    @discardableResult
+    func removeItem(at slotIndex: Int, quantity: Int = 1) -> Item? {
+        guard slotIndex >= 0 && slotIndex < slots.count else { return nil }
+        guard var stack = slots[slotIndex] else { return nil }
+        
+        let item = stack.item
+        
+        if stack.quantity <= quantity {
+            // Remove entire stack
+            slots[slotIndex] = nil
+        } else {
+            // Reduce quantity
+            stack.quantity -= quantity
+            slots[slotIndex] = stack
+        }
+        
+        return item
+    }
+    
     /// Add gold
     func addGold(_ amount: Int) {
         gold += max(0, amount)
@@ -339,6 +397,18 @@ final class Equipment: @unchecked Sendable {
     var totalHPBonus: Int { slots.values.reduce(0) { $0 + $1.hpBonus } }
     var totalDamageBonus: Int { slots.values.reduce(0) { $0 + $1.damageBonus } }
     var totalArmorBonus: Int { slots.values.reduce(0) { $0 + $1.armorBonus } }
+    
+    /// Check if a weapon (sword) is equipped in main hand
+    var hasSwordEquipped: Bool {
+        guard let weapon = slots[.mainHand] else { return false }
+        return weapon.category == .weapon && weapon.name.lowercased().contains("sword")
+    }
+    
+    /// Check if any weapon is equipped in main hand
+    var hasWeaponEquipped: Bool {
+        guard let weapon = slots[.mainHand] else { return false }
+        return weapon.category == .weapon
+    }
 }
 
 // MARK: - Player Character

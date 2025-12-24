@@ -60,6 +60,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     var lookDelta: simd_float2 = .zero
     var jumpPressed: Bool = false
     var interactPressed: Bool = false
+    
+    // MARK: - HUD Reference
+    
+    weak var hudViewModel: GameHUDViewModel?
     private var interactWasPressed: Bool = false
     
     // MARK: - RPG Player
@@ -71,8 +75,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     private var characterPosition: simd_float3 = .zero
     private var characterVelocity: simd_float3 = .zero
-    private var characterYaw: Float = 0
-    private var targetYaw: Float = 0
+    private var characterYaw: Float = 0  // Direction character is facing (controlled by left/right)
     private var walkPhase: Float = 0
     private var isMoving: Bool = false
     
@@ -103,8 +106,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: - Camera & Lighting
     
     private var cameraPosition: simd_float3 = simd_float3(0, 8, 10)
-    private let cameraHeight: Float = 8.0
-    private let cameraDistance: Float = 10.0
+    private let cameraHeight: Float = 4.0    // Height above character
+    private let cameraDistance: Float = 8.0  // Distance behind character
     
     // MARK: - Day/Night Cycle
     
@@ -409,7 +412,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         pathNormalMap = textureGen.createPathNormalMap()
         
         // Initialize character mesh
-        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping)
+        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, hasSwordEquipped: player.equipment.hasSwordEquipped)
         
         // Setup view
         view.depthStencilPixelFormat = .depth32Float
@@ -622,18 +625,29 @@ final class Renderer: NSObject, MTKViewDelegate {
         interactables[index].isOpen = true
         chestsNeedRebuild = true
         
+        let goldFound = interactables[index].goldAmount
+        var itemName: String? = nil
+        var itemRarity: String? = nil
+        
         // Give loot to player
-        if interactables[index].goldAmount > 0 {
-            player.inventory.addGold(interactables[index].goldAmount)
-            print("[Chest] Found \(interactables[index].goldAmount) gold!")
+        if goldFound > 0 {
+            player.inventory.addGold(goldFound)
+            print("[Chest] Found \(goldFound) gold!")
         }
         
         if let item = interactables[index].containedItem {
             if player.inventory.addItem(item) {
+                itemName = item.name
+                itemRarity = item.rarity.name
                 print("[Chest] Found \(item.rarity.name) \(item.name)!")
             } else {
                 print("[Chest] Inventory full! Couldn't pick up \(item.name)")
             }
+        }
+        
+        // Show loot notification on HUD
+        Task { @MainActor in
+            hudViewModel?.showLoot(gold: goldFound, itemName: itemName, itemRarity: itemRarity)
         }
     }
     
@@ -696,7 +710,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         
         // Update character mesh animation
-        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping)
+        let hasSword = player.equipment.hasSwordEquipped
+        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, hasSwordEquipped: hasSword)
         
         // Shadow pass
         renderShadowPass(commandBuffer: commandBuffer, viewProjection: vp)
@@ -893,16 +908,37 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: - Character & Camera Updates
     
     private func updateCharacter(deltaTime dt: Float) {
-        let targetVelocity = simd_float3(
-            movementVector.x * characterSpeed,
-            0,
-            -movementVector.y * characterSpeed
-        )
+        // Tank controls:
+        // - Left/Right (movementVector.x) rotates the character
+        // - Up/Down (movementVector.y) moves forward/backward
         
-        let targetSpeed = simd_length(targetVelocity)
+        // Rotation from left/right input
+        let rotationSpeed: Float = 3.0  // Radians per second
+        characterYaw += movementVector.x * rotationSpeed * dt
+        
+        // Normalize yaw
+        while characterYaw > .pi { characterYaw -= 2 * .pi }
+        while characterYaw < -.pi { characterYaw += 2 * .pi }
+        
+        // Forward/backward movement in the direction the character is facing
+        let forwardInput = movementVector.y  // Positive = forward, negative = backward
+        
+        // Calculate forward direction based on character yaw
+        let forwardX = sin(characterYaw)
+        let forwardZ = -cos(characterYaw)
+        
+        let targetSpeed = abs(forwardInput) * characterSpeed
         isMoving = targetSpeed > 0.1
         
         if isMoving {
+            // Target velocity in the direction character is facing
+            let moveDirection = forwardInput > 0 ? 1.0 : -1.0
+            let targetVelocity = simd_float3(
+                Float(moveDirection) * forwardX * targetSpeed,
+                0,
+                Float(moveDirection) * forwardZ * targetSpeed
+            )
+            
             let currentSpeed = simd_length(characterVelocity)
             let speedDiff = targetSpeed - currentSpeed
             let accelThisFrame = acceleration * dt
@@ -914,9 +950,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             } else {
                 characterVelocity = targetVelocity
             }
-            
-            targetYaw = atan2(targetVelocity.x, -targetVelocity.z)
         } else {
+            // Decelerate when not moving
             let currentSpeed = simd_length(characterVelocity)
             if currentSpeed > 0.01 {
                 let newSpeed = max(currentSpeed - deceleration * dt, 0)
@@ -1042,19 +1077,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             terrainHeight = surfaceHeight
         }
         
-        // Smooth turning
-        var yawDiff = targetYaw - characterYaw
-        while yawDiff > .pi { yawDiff -= 2 * .pi }
-        while yawDiff < -.pi { yawDiff += 2 * .pi }
-        
-        let maxTurn = turnSpeed * dt
-        if abs(yawDiff) < maxTurn {
-            characterYaw = targetYaw
-        } else {
-            characterYaw += (yawDiff > 0 ? 1 : -1) * maxTurn
-        }
-        
-        // Walk animation
+        // Walk animation (rotation is now handled in input section above)
         if isMoving && !isJumping {
             let distanceThisFrame = simd_length(characterVelocity) * dt
             let radiansPerStep: Float = 2 * .pi
@@ -1090,15 +1113,30 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     private func updateCamera(deltaTime dt: Float) {
-        cameraPosition = simd_float3(
-            characterPosition.x,
+        // Camera stays directly behind the character (over-the-shoulder)
+        // Character forward direction: (sin(yaw), 0, -cos(yaw))
+        // Camera should be behind, so we negate the forward direction
+        
+        // Calculate camera position behind character
+        // Behind = opposite of forward = (-sin(yaw), 0, cos(yaw))
+        let offsetX = -sin(characterYaw) * cameraDistance
+        let offsetZ = cos(characterYaw) * cameraDistance
+        
+        // Target camera position (behind and above the character)
+        let targetCameraPos = simd_float3(
+            characterPosition.x + offsetX,
             characterPosition.y + cameraHeight,
-            characterPosition.z + cameraDistance
+            characterPosition.z + offsetZ
         )
+        
+        // Smooth camera position follow
+        let positionSmoothness: Float = 12.0
+        cameraPosition = cameraPosition + (targetCameraPos - cameraPosition) * min(1.0, positionSmoothness * dt)
     }
     
     private func buildViewMatrix() -> simd_float4x4 {
-        let lookTarget = characterPosition + simd_float3(0, 1.0, 0)
+        // Camera looks at the character (slightly above their feet)
+        let lookTarget = characterPosition + simd_float3(0, 1.2, 0)
         return lookAt(eye: cameraPosition, center: lookTarget, up: simd_float3(0, 1, 0))
     }
     

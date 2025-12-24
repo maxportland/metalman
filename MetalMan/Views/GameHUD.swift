@@ -1,10 +1,256 @@
 import SwiftUI
 
+/// Represents loot found in a chest
+struct LootNotification: Identifiable {
+    let id = UUID()
+    let gold: Int
+    let itemName: String?
+    let itemRarity: String?
+    var opacity: Double = 1.0
+}
+
+/// Represents an item slot in the inventory grid
+struct InventorySlot: Identifiable {
+    let id: Int
+    var item: InventoryItemDisplay?
+}
+
+/// Display info for an inventory item
+struct InventoryItemDisplay: Identifiable {
+    let id: UUID
+    let name: String
+    let rarity: String
+    let quantity: Int
+    let iconName: String
+    let isEquippable: Bool
+    let equipSlotName: String?
+}
+
 /// HUD overlay displaying player stats, health, and XP
 struct GameHUD: View {
     var viewModel: GameHUDViewModel
     
     var body: some View {
+        ZStack {
+            // Main HUD content
+            mainHUDContent
+            
+            // Inventory overlay
+            if viewModel.isInventoryOpen {
+                inventoryOverlay
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+            
+            // Loot notification popup
+            if let loot = viewModel.currentLoot {
+                lootNotificationView(loot: loot)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+            }
+        }
+    }
+    
+    private var inventoryOverlay: some View {
+        ZStack {
+            // Dimmed background
+            Color.black.opacity(0.6)
+                .ignoresSafeArea()
+            
+            // Inventory panel
+            VStack(spacing: 16) {
+                // Header
+                HStack {
+                    Text("🎒 Inventory")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                    
+                    Spacer()
+                    
+                    // Gold display
+                    HStack(spacing: 4) {
+                        Image(systemName: "circle.fill")
+                            .foregroundColor(.yellow)
+                            .font(.system(size: 14))
+                        Text("\(viewModel.gold)")
+                            .font(.system(size: 18, weight: .bold, design: .monospaced))
+                            .foregroundColor(.yellow)
+                    }
+                    
+                    Spacer()
+                    
+                    // Close hint
+                    Text("Press I to close")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundColor(.gray)
+                }
+                .padding(.horizontal)
+                
+                HStack(alignment: .top, spacing: 20) {
+                    // Equipment slots on the left
+                    VStack(spacing: 8) {
+                        Text("Equipped")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundColor(.gray)
+                        
+                        // Main Hand slot
+                        equipmentSlotView(item: viewModel.equippedMainHand, slotName: "Main Hand")
+                    }
+                    .frame(width: 90)
+                    
+                    // Inventory grid (4 columns x 5 rows = 20 slots)
+                    VStack(spacing: 8) {
+                        Text("Inventory")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundColor(.gray)
+                        
+                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(70), spacing: 8), count: 4), spacing: 8) {
+                            ForEach(viewModel.inventorySlots) { slot in
+                                inventorySlotView(slot: slot)
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
+            .padding(20)
+            .frame(width: 480)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(white: 0.15))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 2)
+                    )
+            )
+            .shadow(color: .black.opacity(0.5), radius: 20)
+        }
+    }
+    
+    private func equipmentSlotView(item: InventoryItemDisplay?, slotName: String) -> some View {
+        ZStack {
+            // Slot background
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(white: 0.15))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(item != nil ? Color.orange.opacity(0.8) : Color.gray.opacity(0.3), lineWidth: 2)
+                )
+            
+            if let item = item {
+                VStack(spacing: 2) {
+                    // Item icon
+                    Image(systemName: iconForItem(item.iconName))
+                        .font(.system(size: 24))
+                        .foregroundColor(rarityColor(item.rarity))
+                    
+                    // Item name (truncated)
+                    Text(item.name)
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    
+                    // Unequip hint
+                    Text("2x to Unequip")
+                        .font(.system(size: 6, weight: .medium))
+                        .foregroundColor(.orange.opacity(0.8))
+                }
+                .padding(4)
+            } else {
+                VStack(spacing: 4) {
+                    Image(systemName: "hand.raised.slash")
+                        .font(.system(size: 20))
+                        .foregroundColor(.gray.opacity(0.5))
+                    Text(slotName)
+                        .font(.system(size: 7, weight: .medium))
+                        .foregroundColor(.gray.opacity(0.5))
+                }
+            }
+        }
+        .frame(width: 80, height: 80)
+        .onTapGesture(count: 2) {
+            if item != nil {
+                viewModel.unequipMainHand()
+            }
+        }
+    }
+    
+    private func inventorySlotView(slot: InventorySlot) -> some View {
+        ZStack {
+            ZStack {
+                // Slot background
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(white: 0.1))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(slot.item != nil ? rarityBorderColor(slot.item?.rarity) : Color.gray.opacity(0.3), lineWidth: 2)
+                    )
+                
+                if let item = slot.item {
+                    VStack(spacing: 2) {
+                        // Item icon
+                        Image(systemName: iconForItem(item.iconName))
+                            .font(.system(size: 24))
+                            .foregroundColor(rarityColor(item.rarity))
+                        
+                        // Item name (truncated)
+                        Text(item.name)
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        
+                        // Quantity (if > 1) or Equip hint
+                        if item.quantity > 1 {
+                            Text("x\(item.quantity)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.8))
+                        } else if item.isEquippable {
+                            Text("2x to Equip")
+                                .font(.system(size: 7, weight: .medium))
+                                .foregroundColor(.green.opacity(0.8))
+                        }
+                    }
+                    .padding(4)
+                }
+            }
+            .frame(width: 70, height: 70)
+        }
+        .onTapGesture(count: 2) {
+            print("[UI] Double-clicked slot \(slot.id), hasItem: \(slot.item != nil)")
+            if slot.item != nil {
+                viewModel.equipItem(at: slot.id)
+            }
+        }
+    }
+    
+    private func iconForItem(_ iconName: String) -> String {
+        // Map item icon names to SF Symbols
+        switch iconName {
+        case "sword": return "bolt.fill"
+        case "shield": return "shield.fill"
+        case "helmet": return "crown.fill"
+        case "armor": return "person.crop.square.fill"
+        case "boots": return "figure.walk"
+        case "ring": return "circle.circle.fill"
+        case "potion": return "drop.fill"
+        case "staff": return "wand.and.stars"
+        case "bow": return "arrow.up.right"
+        case "scroll": return "scroll.fill"
+        case "material": return "cube.fill"
+        case "quest": return "star.fill"
+        case "misc": return "archivebox.fill"
+        default: return "questionmark.square.fill"
+        }
+    }
+    
+    private func rarityBorderColor(_ rarity: String?) -> Color {
+        rarityColor(rarity).opacity(0.8)
+    }
+    
+    private var mainHUDContent: some View {
         VStack {
             // Top bar with HP and XP
             HStack(alignment: .top) {
@@ -78,6 +324,59 @@ struct GameHUD: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
+        }
+    }
+    
+    private func lootNotificationView(loot: LootNotification) -> some View {
+        VStack(spacing: 8) {
+            Text("🎁 Treasure Found!")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundColor(.yellow)
+            
+            if loot.gold > 0 {
+                HStack(spacing: 6) {
+                    Image(systemName: "circle.fill")
+                        .foregroundColor(.yellow)
+                        .font(.system(size: 14))
+                    Text("+\(loot.gold) Gold")
+                        .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.yellow)
+                }
+            }
+            
+            if let itemName = loot.itemName {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles")
+                        .foregroundColor(rarityColor(loot.itemRarity))
+                        .font(.system(size: 14))
+                    Text(itemName)
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .foregroundColor(rarityColor(loot.itemRarity))
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.black.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.yellow.opacity(0.6), lineWidth: 2)
+                )
+        )
+        .shadow(color: .yellow.opacity(0.3), radius: 10)
+        .opacity(loot.opacity)
+    }
+    
+    private func rarityColor(_ rarity: String?) -> Color {
+        switch rarity?.lowercased() {
+        case "common": return .white
+        case "uncommon": return .green
+        case "rare": return .blue
+        case "epic": return .purple
+        case "legendary": return .orange
+        default: return .white
         }
     }
     
@@ -176,6 +475,17 @@ final class GameHUDViewModel {
     var intelligence: Int = 10
     var unspentPoints: Int = 0
     
+    // Loot notification
+    var currentLoot: LootNotification? = nil
+    private var lootDismissTask: Task<Void, Never>?
+    
+    // Inventory state
+    var isInventoryOpen: Bool = false
+    var inventorySlots: [InventorySlot] = (0..<20).map { InventorySlot(id: $0, item: nil) }
+    
+    // Equipment slots display
+    var equippedMainHand: InventoryItemDisplay? = nil
+    
     var hpPercentage: Float {
         guard maxHP > 0 else { return 0 }
         return Float(currentHP) / Float(maxHP)
@@ -204,6 +514,153 @@ final class GameHUDViewModel {
         dexterity = player.effectiveDexterity
         intelligence = player.effectiveIntelligence
         unspentPoints = player.unspentAttributePoints
+    }
+    
+    /// Show a loot notification for the given gold and item
+    func showLoot(gold: Int, itemName: String?, itemRarity: String?) {
+        // Cancel any existing dismiss task
+        lootDismissTask?.cancel()
+        
+        // Show the new loot
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            currentLoot = LootNotification(gold: gold, itemName: itemName, itemRarity: itemRarity)
+        }
+        
+        // Auto-dismiss after 3 seconds
+        lootDismissTask = Task {
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if !Task.isCancelled {
+                withAnimation(.easeOut(duration: 0.5)) {
+                    currentLoot = nil
+                }
+            }
+        }
+    }
+    
+    /// Toggle inventory visibility
+    func toggleInventory() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            isInventoryOpen.toggle()
+            if isInventoryOpen {
+                updateInventorySlots()
+                updateEquipmentDisplay()
+            }
+        }
+    }
+    
+    /// Equip an item from inventory slot
+    func equipItem(at slotIndex: Int) {
+        print("[Inventory] equipItem called for slot \(slotIndex)")
+        
+        guard let player = player else {
+            print("[Inventory] ERROR: player is nil")
+            return
+        }
+        guard slotIndex >= 0 && slotIndex < player.inventory.slots.count else {
+            print("[Inventory] ERROR: slotIndex \(slotIndex) out of range (0..<\(player.inventory.slots.count))")
+            return
+        }
+        guard let stack = player.inventory.slots[slotIndex] else {
+            print("[Inventory] ERROR: no item in slot \(slotIndex)")
+            return
+        }
+        
+        let item = stack.item
+        
+        // Only equip if it has an equipment slot
+        guard item.equipSlot != nil else {
+            print("[Inventory] Item '\(item.name)' is not equippable")
+            return
+        }
+        
+        // Try to equip the item
+        if let previousItem = player.equipment.equip(item) {
+            // Put the previously equipped item back in inventory
+            player.inventory.addItem(previousItem)
+            print("[Inventory] Swapped '\(previousItem.name)' for '\(item.name)'")
+        } else {
+            print("[Inventory] Equipped '\(item.name)'")
+        }
+        
+        // Remove the equipped item from inventory
+        player.inventory.removeItem(at: slotIndex)
+        
+        // Update display
+        updateInventorySlots()
+        updateEquipmentDisplay()
+    }
+    
+    /// Unequip item from main hand and return to inventory
+    func unequipMainHand() {
+        print("[Inventory] unequipMainHand called")
+        guard let player = player else {
+            print("[Inventory] ERROR: player is nil")
+            return
+        }
+        
+        guard let item = player.equipment.unequip(.mainHand) else {
+            print("[Inventory] No item equipped in main hand")
+            return
+        }
+        
+        // Add back to inventory
+        if player.inventory.addItem(item) {
+            print("[Inventory] Unequipped '\(item.name)' and returned to inventory")
+        } else {
+            // Inventory full, re-equip
+            player.equipment.equip(item)
+            print("[Inventory] Inventory full! Cannot unequip '\(item.name)'")
+        }
+        
+        updateInventorySlots()
+        updateEquipmentDisplay()
+    }
+    
+    /// Update equipment display
+    func updateEquipmentDisplay() {
+        guard let player = player else { return }
+        
+        if let weapon = player.equipment.itemIn(.mainHand) {
+            equippedMainHand = InventoryItemDisplay(
+                id: weapon.id,
+                name: weapon.name,
+                rarity: weapon.rarity.name,
+                quantity: 1,
+                iconName: weapon.iconName,
+                isEquippable: true,
+                equipSlotName: EquipmentSlot.mainHand.displayName
+            )
+        } else {
+            equippedMainHand = nil
+        }
+    }
+    
+    /// Update inventory slots from player data
+    func updateInventorySlots() {
+        guard let player = player else { return }
+        
+        var newSlots: [InventorySlot] = []
+        let slots = player.inventory.slots
+        
+        for i in 0..<20 {
+            if i < slots.count, let stack = slots[i] {
+                let item = stack.item
+                let display = InventoryItemDisplay(
+                    id: item.id,
+                    name: item.name,
+                    rarity: item.rarity.name,
+                    quantity: stack.quantity,
+                    iconName: item.iconName,
+                    isEquippable: item.equipSlot != nil,
+                    equipSlotName: item.equipSlot?.displayName
+                )
+                newSlots.append(InventorySlot(id: i, item: display))
+            } else {
+                newSlots.append(InventorySlot(id: i, item: nil))
+            }
+        }
+        
+        inventorySlots = newSlots
     }
 }
 

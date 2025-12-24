@@ -23,7 +23,7 @@ struct MetalGameContainer: View {
             
             // HUD overlay
             GameHUD(viewModel: hudViewModel)
-                .allowsHitTesting(false)  // Don't block game input
+                .allowsHitTesting(hudViewModel.isInventoryOpen)  // Only allow hit testing when inventory is open
         }
     }
 }

@@ -50,11 +50,12 @@ struct MetalGameView: UIViewRepresentable {
             self.mtkView.delegate = self
             self.mtkView.touchDelegate = self
             
-            // Bind HUD to player (on main actor)
+            // Bind HUD to player and renderer (on main actor)
             let player = renderer.player
             Task { @MainActor in
                 hudViewModel.bind(to: player)
             }
+            renderer.hudViewModel = hudViewModel
         }
 
         // MARK: - Touch handling
@@ -245,11 +246,12 @@ struct MetalGameView: NSViewRepresentable {
             self.mtkView.delegate = self
             self.mtkView.keyboardDelegate = self
             
-            // Bind HUD to player (on main actor)
+            // Bind HUD to player and renderer (on main actor)
             let player = renderer.player
             Task { @MainActor in
                 hudViewModel.bind(to: player)
             }
+            renderer.hudViewModel = hudViewModel
         }
         
         // MARK: - Keyboard handling
@@ -263,17 +265,19 @@ struct MetalGameView: NSViewRepresentable {
             updateMovementFromKeys()
         }
         
+        private var inventoryKeyWasPressed = false
+        
         private func updateMovementFromKeys() {
             var x: Float = 0
             var y: Float = 0
             
             // Arrow key codes:
             // Left: 123, Right: 124, Down: 125, Up: 126
-            // Spacebar: 49
-            if pressedKeys.contains(123) { x -= 1 } // Left arrow
-            if pressedKeys.contains(124) { x += 1 } // Right arrow
-            if pressedKeys.contains(125) { y -= 1 } // Down arrow
-            if pressedKeys.contains(126) { y += 1 } // Up arrow
+            // Spacebar: 49, E: 14, I: 34
+            if pressedKeys.contains(123) { x -= 1 } // Left arrow - rotate left
+            if pressedKeys.contains(124) { x += 1 } // Right arrow - rotate right
+            if pressedKeys.contains(125) { y -= 1 } // Down arrow - walk backward
+            if pressedKeys.contains(126) { y += 1 } // Up arrow - walk forward
             
             // Jump with spacebar
             renderer.jumpPressed = pressedKeys.contains(49)
@@ -281,13 +285,16 @@ struct MetalGameView: NSViewRepresentable {
             // Interact with E key (keyCode 14)
             renderer.interactPressed = pressedKeys.contains(14)
             
-            // Normalize diagonal movement
-            if x != 0 && y != 0 {
-                let length = sqrt(x * x + y * y)
-                x /= length
-                y /= length
+            // Toggle inventory with I key (keyCode 34)
+            let inventoryKeyPressed = pressedKeys.contains(34)
+            if inventoryKeyPressed && !inventoryKeyWasPressed {
+                Task { @MainActor in
+                    hudViewModel?.toggleInventory()
+                }
             }
+            inventoryKeyWasPressed = inventoryKeyPressed
             
+            // For tank controls, do NOT normalize - rotation (x) and movement (y) are independent
             movementVector = SIMD2<Float>(x, y)
         }
 
