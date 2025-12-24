@@ -527,6 +527,59 @@ class TextureGenerator {
         return createTexture(from: pixels, size: size)
     }
     
+    /// Creates a red shirt texture for enemy bandits
+    func createEnemyTexture() -> MTLTexture {
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                
+                // Deep red base color for bandit shirt
+                var r: Float = 0.7
+                var g: Float = 0.15
+                var b: Float = 0.12
+                
+                // Fabric weave pattern
+                let weaveX = sin(Float(x) * 0.8) * 0.5 + 0.5
+                let weaveY = sin(Float(y) * 0.8) * 0.5 + 0.5
+                let weave = (weaveX + weaveY) * 0.5
+                r += weave * 0.08
+                g += weave * 0.02
+                b += weave * 0.02
+                
+                // Fold/crease shadows
+                let foldPattern = sin(Float(x) * 0.2 + Float(y) * 0.1) * 0.5 + 0.5
+                r *= 0.85 + foldPattern * 0.15
+                g *= 0.85 + foldPattern * 0.15
+                b *= 0.85 + foldPattern * 0.15
+                
+                // Slight dirt/wear at edges
+                let edgeY = Float(y) / Float(size)
+                if edgeY > 0.8 || edgeY < 0.2 {
+                    let edgeDirt = abs(edgeY - 0.5) * 0.3
+                    r -= edgeDirt * 0.15
+                    g -= edgeDirt * 0.05
+                    b -= edgeDirt * 0.05
+                }
+                
+                // Add fabric noise
+                let noise = Float.random(in: -0.04...0.04)
+                r += noise
+                g += noise * 0.3
+                b += noise * 0.3
+                
+                pixels[i] = UInt8(min(255, max(0, r * 255)))
+                pixels[i + 1] = UInt8(min(255, max(0, g * 255)))
+                pixels[i + 2] = UInt8(min(255, max(0, b * 255)))
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
     func createSkyTexture() -> MTLTexture {
         let size = 256
         var pixels = [UInt8](repeating: 0, count: size * size * 4)

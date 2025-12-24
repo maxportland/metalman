@@ -1,6 +1,25 @@
 import Metal
 import simd
 
+/// Types of sword swings available
+enum SwingType: Int, CaseIterable {
+    case oberhaw = 0    // Overhead descending cut
+    case mittelhaw = 1  // Horizontal slash
+    case unterhaw = 2   // Upward cut
+    case zornhaw = 3    // Diagonal 45-degree cut
+    case thrust = 4     // Forward thrust/pierce
+    
+    var name: String {
+        switch self {
+        case .oberhaw: return "Oberhaw"
+        case .mittelhaw: return "Mittelhaw"
+        case .unterhaw: return "Unterhaw"
+        case .zornhaw: return "Zornhaw"
+        case .thrust: return "Thrust"
+        }
+    }
+}
+
 /// Generates and animates the 3D character mesh
 class CharacterMesh {
     private let maxVertices = 2000
@@ -19,7 +38,11 @@ class CharacterMesh {
     ///   - walkPhase: Current phase of the walking animation cycle
     ///   - isJumping: Whether the character is currently jumping
     ///   - hasSwordEquipped: Whether a sword is equipped in the right hand
-    func update(walkPhase: Float, isJumping: Bool, hasSwordEquipped: Bool = false) {
+    ///   - isAttacking: Whether currently performing an attack
+    ///   - attackPhase: Progress through attack animation (0 to 1)
+    ///   - swingType: Type of sword swing being performed
+    func update(walkPhase: Float, isJumping: Bool, hasSwordEquipped: Bool = false,
+                isAttacking: Bool = false, attackPhase: Float = 0, swingType: SwingType = .mittelhaw) {
         var vertices: [TexturedVertex] = []
         
         // Animation parameters
@@ -27,33 +50,141 @@ class CharacterMesh {
         let armSwingAmount: Float = 0.35
         
         // Body bob during walking
-        let bodyBob = isJumping ? 0.0 : abs(sin(walkPhase * 2)) * 0.03
+        let bodyBob: Float = isJumping ? 0.0 : abs(sin(walkPhase * 2)) * 0.03
         
         // Material index for character (5)
         let matChar: UInt32 = MaterialIndex.character.rawValue
         
-        // Character dimensions
-        let hipY: Float = 0.85 + bodyBob
-        let shoulderY: Float = 1.45 + bodyBob
+        // ========== BODY MOVEMENT DURING ATTACKS ==========
+        // These modifiers affect torso, hips, and head
+        var torsoTwist: Float = 0      // Rotation around Y axis (left/right twist)
+        var torsoLean: Float = 0       // Forward/backward lean
+        var torsoTilt: Float = 0       // Side-to-side tilt
+        var hipShiftX: Float = 0       // Weight shift left/right
+        var hipShiftZ: Float = 0       // Weight shift forward/back
+        var shoulderDropRight: Float = 0 // Right shoulder drops during swing
+        var headTurn: Float = 0        // Head follows the swing direction
+        
+        if isAttacking && !isJumping {
+            let windUpT = min(attackPhase / 0.25, 1.0)
+            let swingT = max(0, (attackPhase - 0.25) / 0.75)
+            
+            switch swingType {
+            case .oberhaw:
+                // Overhead cut - lean back then drive forward, rise on toes
+                if attackPhase < 0.25 {
+                    torsoLean = windUpT * 0.15           // Lean back during windup
+                    shoulderDropRight = -windUpT * 0.08  // Raise right shoulder
+                    hipShiftZ = windUpT * 0.05           // Shift weight back
+                } else {
+                    torsoLean = 0.15 - swingT * 0.35     // Drive forward
+                    shoulderDropRight = -0.08 + swingT * 0.15 // Drop shoulder with swing
+                    hipShiftZ = 0.05 - swingT * 0.12     // Weight forward
+                }
+                
+            case .mittelhaw:
+                // Horizontal slash - strong hip and torso rotation
+                if attackPhase < 0.25 {
+                    torsoTwist = windUpT * 0.4           // Twist right (wind up)
+                    hipShiftX = windUpT * 0.08           // Weight shifts right
+                    shoulderDropRight = windUpT * 0.05   // Right shoulder back
+                    headTurn = windUpT * 0.2             // Look right
+                } else {
+                    torsoTwist = 0.4 - swingT * 0.8      // Twist left (follow through)
+                    hipShiftX = 0.08 - swingT * 0.16     // Weight transfers left
+                    shoulderDropRight = 0.05 - swingT * 0.12 // Shoulder comes forward
+                    headTurn = 0.2 - swingT * 0.4        // Head follows
+                    torsoTilt = swingT * 0.1             // Slight tilt into swing
+                }
+                
+            case .unterhaw:
+                // Upward cut - crouch then rise explosively
+                if attackPhase < 0.25 {
+                    torsoLean = -windUpT * 0.2           // Crouch forward
+                    shoulderDropRight = windUpT * 0.1    // Right shoulder drops
+                    hipShiftZ = -windUpT * 0.06          // Weight forward
+                } else {
+                    torsoLean = -0.2 + swingT * 0.3      // Rise up and back
+                    shoulderDropRight = 0.1 - swingT * 0.15 // Shoulder rises
+                    hipShiftZ = -0.06 + swingT * 0.1     // Weight back
+                }
+                
+            case .zornhaw:
+                // Diagonal wrath cut - combines rotation and lean
+                if attackPhase < 0.25 {
+                    torsoTwist = windUpT * 0.3           // Twist right
+                    torsoLean = windUpT * 0.1            // Lean back slightly
+                    shoulderDropRight = -windUpT * 0.06  // Raise shoulder
+                    hipShiftX = windUpT * 0.06
+                    headTurn = windUpT * 0.15
+                } else {
+                    torsoTwist = 0.3 - swingT * 0.6      // Twist through
+                    torsoLean = 0.1 - swingT * 0.25      // Lean into strike
+                    shoulderDropRight = -0.06 + swingT * 0.14 // Drop with power
+                    hipShiftX = 0.06 - swingT * 0.12
+                    headTurn = 0.15 - swingT * 0.3
+                    torsoTilt = swingT * 0.08
+                }
+                
+            case .thrust:
+                // Forward thrust - lunge motion
+                if attackPhase < 0.25 {
+                    hipShiftZ = -windUpT * 0.04          // Slight pull back
+                    torsoLean = windUpT * 0.05           // Coil slightly
+                } else {
+                    let lungeT = sin(swingT * .pi)
+                    hipShiftZ = -0.04 + lungeT * 0.15    // Drive forward
+                    torsoLean = 0.05 - lungeT * 0.2      // Lean into thrust
+                    shoulderDropRight = lungeT * 0.08    // Shoulder extends
+                }
+            }
+        }
+        
+        // Character dimensions with body movement applied
+        let baseHipY: Float = 0.85 + bodyBob
+        let hipY: Float = baseHipY
+        let shoulderY: Float = 1.45 + bodyBob + shoulderDropRight * 0.5
         let neckY: Float = 1.55 + bodyBob
         let headY: Float = 1.75 + bodyBob
         
-        // HEAD
-        addSphere(center: simd_float3(0, headY, 0), radius: 0.22, latSegments: 8, lonSegments: 12,
+        // Apply hip shift for weight transfer
+        let hipCenter = simd_float3(hipShiftX, hipY, hipShiftZ)
+        
+        // ========== HEAD ==========
+        // Head follows swing direction slightly
+        let headOffset = simd_float3(headTurn * 0.1 + hipShiftX * 0.5, 0, torsoLean * -0.15 + hipShiftZ * 0.5)
+        addSphere(center: simd_float3(0, headY, 0) + headOffset, radius: 0.22, latSegments: 8, lonSegments: 12,
                   uvYStart: 0.0, uvYEnd: 0.25, material: matChar, vertices: &vertices)
         
-        // NECK
-        addLimb(from: simd_float3(0, shoulderY, 0), to: simd_float3(0, neckY, 0),
+        // ========== NECK ==========
+        let neckBase = simd_float3(hipShiftX * 0.8, shoulderY, hipShiftZ * 0.8 - torsoLean * 0.1)
+        let neckTop = simd_float3(0, neckY, 0) + headOffset * 0.7
+        addLimb(from: neckBase, to: neckTop,
                 radius: 0.08, segments: 6, uvYStart: 0.0, uvYEnd: 0.25, material: matChar, vertices: &vertices)
         
-        // TORSO
-        addBox(center: simd_float3(0, (hipY + shoulderY) / 2, 0), size: simd_float3(0.4, shoulderY - hipY, 0.22),
-               uvYStart: 0.5, uvYEnd: 0.75, material: matChar, vertices: &vertices)
+        // ========== TORSO ==========
+        // Torso with twist, lean, and tilt
+        let torsoCenter = simd_float3(hipShiftX * 0.5, (hipY + shoulderY) / 2, hipShiftZ * 0.5 - torsoLean * 0.08)
+        addRotatedBox(center: torsoCenter, size: simd_float3(0.4, shoulderY - hipY, 0.22),
+                      yaw: torsoTwist, pitch: torsoLean, roll: torsoTilt,
+                      uvYStart: 0.5, uvYEnd: 0.75, material: matChar, vertices: &vertices)
         
-        // ARMS
+        // ========== ARMS ==========
         let shoulderWidth: Float = 0.25
         let upperArmLength: Float = 0.30
         let forearmLength: Float = 0.28
+        
+        // Shoulder positions affected by torso twist
+        let leftShoulderOffset = simd_float3(
+            -shoulderWidth * cos(torsoTwist) + hipShiftX * 0.8,
+            shoulderY - 0.05 - torsoTilt * 0.05,
+            -shoulderWidth * sin(torsoTwist) * 0.3 + hipShiftZ * 0.8 - torsoLean * 0.08
+        )
+        let rightShoulderOffset = simd_float3(
+            shoulderWidth * cos(torsoTwist) + hipShiftX * 0.8 + shoulderDropRight * 0.1,
+            shoulderY - 0.05 + shoulderDropRight + torsoTilt * 0.05,
+            shoulderWidth * sin(torsoTwist) * 0.3 + hipShiftZ * 0.8 - torsoLean * 0.08
+        )
         
         if isJumping {
             // Jumping arm pose: arms raised up and slightly bent
@@ -86,14 +217,29 @@ class CharacterMesh {
                 addSword(at: rightHandPos, swingAngle: 0.5, vertices: &vertices)
             }
         } else {
-            // Walking arm animation
+            // Walking/attacking arm animation
             let leftArmSwing = sin(walkPhase) * armSwingAmount
             let rightArmSwing = -sin(walkPhase) * armSwingAmount
             
-            // Left arm
-            let leftShoulderPos = simd_float3(-shoulderWidth, shoulderY - 0.05, 0)
-            let leftElbowPos = simd_float3(-shoulderWidth - 0.08, shoulderY - 0.35, leftArmSwing * 0.3)
-            let leftHandPos = simd_float3(-shoulderWidth - 0.05, shoulderY - 0.65, leftArmSwing * 0.5)
+            // Left arm - follows body movement, counter-balances during attacks
+            let leftShoulderPos = leftShoulderOffset
+            var leftElbowOffset = simd_float3(-0.08, -0.30, leftArmSwing * 0.3)
+            var leftHandOffset = simd_float3(-0.05, -0.30, leftArmSwing * 0.5)
+            
+            // Left arm counter-movement during attacks
+            if isAttacking {
+                let counterSwing = -torsoTwist * 0.5  // Counter-balance the twist
+                leftElbowOffset.z += counterSwing * 0.2
+                leftHandOffset.z += counterSwing * 0.3
+                // Slight guard position during attack
+                leftElbowOffset.y += 0.05
+                leftElbowOffset.z -= 0.1
+                leftHandOffset.y += 0.1
+                leftHandOffset.z -= 0.15
+            }
+            
+            let leftElbowPos = leftShoulderPos + leftElbowOffset
+            let leftHandPos = leftElbowPos + leftHandOffset
             
             addLimb(from: leftShoulderPos, to: leftElbowPos, radius: 0.07, segments: 6,
                     uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
@@ -102,10 +248,98 @@ class CharacterMesh {
             addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
                       uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
             
-            // Right arm
-            let rightShoulderPos = simd_float3(shoulderWidth, shoulderY - 0.05, 0)
-            let rightElbowPos = simd_float3(shoulderWidth + 0.08, shoulderY - 0.35, rightArmSwing * 0.3)
-            let rightHandPos = simd_float3(shoulderWidth + 0.05, shoulderY - 0.65, rightArmSwing * 0.5)
+            // Right arm - with attack animation support
+            let rightShoulderPos = rightShoulderOffset
+            var rightElbowPos: simd_float3
+            var rightHandPos: simd_float3
+            var swordSwingAngle: Float = rightArmSwing
+            
+            if isAttacking && hasSwordEquipped {
+                // Attack animation based on swing type
+                let windUpPhase = min(attackPhase / 0.25, 1.0)       // 0-1 during wind up (25%)
+                let swingPhase = max(0, (attackPhase - 0.25) / 0.75) // 0-1 during swing (75%)
+                
+                switch swingType {
+                case .oberhaw:
+                    // Overhead descending cut - arm raises high then chops down
+                    if attackPhase < 0.25 {
+                        let t = windUpPhase
+                        rightElbowPos = rightShoulderPos + simd_float3(0.1, -0.1 + t * 0.35, -0.1 - t * 0.1)
+                        rightHandPos = rightElbowPos + simd_float3(0.05, 0.1 + t * 0.25, -0.1)
+                        swordSwingAngle = t * 0.3
+                    } else {
+                        let t = swingPhase
+                        let downSwing = sin(t * .pi * 0.5)
+                        rightElbowPos = rightShoulderPos + simd_float3(0.1, 0.25 - downSwing * 0.55, -0.2 - t * 0.2)
+                        rightHandPos = rightElbowPos + simd_float3(0.05, 0.35 - downSwing * 0.7, -0.15 - t * 0.25)
+                        swordSwingAngle = 0.3 - t * 0.6
+                    }
+                    
+                case .mittelhaw:
+                    // Horizontal slash - arm sweeps from right to left
+                    if attackPhase < 0.25 {
+                        let t = windUpPhase
+                        rightElbowPos = rightShoulderPos + simd_float3(0.15 + t * 0.1, -0.2, 0.2 + t * 0.15)
+                        rightHandPos = rightElbowPos + simd_float3(0.1 + t * 0.05, -0.15, 0.2 + t * 0.1)
+                        swordSwingAngle = t * 0.5
+                    } else {
+                        let t = swingPhase
+                        let sweep = sin(t * .pi)
+                        rightElbowPos = rightShoulderPos + simd_float3(0.25 - t * 0.4, -0.2 - sweep * 0.05, 0.35 - t * 0.5)
+                        rightHandPos = rightElbowPos + simd_float3(0.15 - t * 0.25, -0.15, 0.3 - t * 0.55)
+                        swordSwingAngle = 0.5 - t * 1.5
+                    }
+                    
+                case .unterhaw:
+                    // Upward cut - arm swings from low to high
+                    if attackPhase < 0.25 {
+                        let t = windUpPhase
+                        rightElbowPos = rightShoulderPos + simd_float3(0.12, -0.35 - t * 0.1, 0.1 + t * 0.1)
+                        rightHandPos = rightElbowPos + simd_float3(0.08, -0.3 - t * 0.05, 0.15)
+                        swordSwingAngle = -0.3 - t * 0.2
+                    } else {
+                        let t = swingPhase
+                        let upSwing = sin(t * .pi * 0.6)
+                        rightElbowPos = rightShoulderPos + simd_float3(0.12 - t * 0.05, -0.45 + upSwing * 0.5, 0.2 - t * 0.35)
+                        rightHandPos = rightElbowPos + simd_float3(0.08, -0.35 + upSwing * 0.55, 0.15 - t * 0.4)
+                        swordSwingAngle = -0.5 + t * 1.2
+                    }
+                    
+                case .zornhaw:
+                    // Diagonal 45-degree cut - powerful angled slash
+                    if attackPhase < 0.25 {
+                        let t = windUpPhase
+                        rightElbowPos = rightShoulderPos + simd_float3(0.2 + t * 0.1, -0.1 + t * 0.2, 0.15 + t * 0.15)
+                        rightHandPos = rightElbowPos + simd_float3(0.12, 0.05 + t * 0.15, 0.2 + t * 0.1)
+                        swordSwingAngle = t * 0.4
+                    } else {
+                        let t = swingPhase
+                        let diagSwing = sin(t * .pi * 0.7)
+                        rightElbowPos = rightShoulderPos + simd_float3(0.3 - t * 0.35, 0.1 - diagSwing * 0.4, 0.3 - t * 0.5)
+                        rightHandPos = rightElbowPos + simd_float3(0.12 - t * 0.15, 0.2 - diagSwing * 0.5, 0.3 - t * 0.55)
+                        swordSwingAngle = 0.4 - t * 1.3
+                    }
+                    
+                case .thrust:
+                    // Forward thrust/pierce - arm extends straight forward
+                    if attackPhase < 0.25 {
+                        let t = windUpPhase
+                        rightElbowPos = rightShoulderPos + simd_float3(0.1, -0.25, 0.15 + t * 0.1)
+                        rightHandPos = rightElbowPos + simd_float3(0.05, -0.2, 0.1 + t * 0.05)
+                        swordSwingAngle = 0
+                    } else {
+                        let t = swingPhase
+                        let thrustExtend = sin(t * .pi)
+                        rightElbowPos = rightShoulderPos + simd_float3(0.08, -0.2 - t * 0.05, 0.25 - thrustExtend * 0.15)
+                        rightHandPos = rightElbowPos + simd_float3(0.03, -0.15, 0.15 - thrustExtend * 0.45)
+                        swordSwingAngle = 0
+                    }
+                }
+            } else {
+                // Normal walking animation
+                rightElbowPos = simd_float3(shoulderWidth + 0.08, shoulderY - 0.35, rightArmSwing * 0.3)
+                rightHandPos = simd_float3(shoulderWidth + 0.05, shoulderY - 0.65, rightArmSwing * 0.5)
+            }
             
             addLimb(from: rightShoulderPos, to: rightElbowPos, radius: 0.07, segments: 6,
                     uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
@@ -116,7 +350,7 @@ class CharacterMesh {
             
             // Sword in right hand (if equipped)
             if hasSwordEquipped {
-                addSword(at: rightHandPos, swingAngle: rightArmSwing, vertices: &vertices)
+                addSword(at: rightHandPos, swingAngle: swordSwingAngle, isAttacking: isAttacking, attackPhase: attackPhase, swingType: swingType, vertices: &vertices)
             }
         }
         
@@ -167,17 +401,82 @@ class CharacterMesh {
             addBox(center: rightFootCenter, size: simd_float3(0.1, 0.06, 0.16),
                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
         } else {
-            // Walking leg animation
-            let leftLegSwing = -sin(walkPhase) * legSwingAmount
-            let rightLegSwing = sin(walkPhase) * legSwingAmount
+            // Walking/attacking leg animation
+            var leftLegSwing = -sin(walkPhase) * legSwingAmount
+            var rightLegSwing = sin(walkPhase) * legSwingAmount
             
-            // Left leg
-            let leftHipPos = simd_float3(-legSeparation, hipY, 0)
+            // Attack stance modifiers
+            var leftHipOffset = simd_float3(0, 0, 0)
+            var rightHipOffset = simd_float3(0, 0, 0)
+            var leftKneeAdjust: Float = 0
+            var rightKneeAdjust: Float = 0
+            var stanceWiden: Float = 0
+            
+            if isAttacking {
+                // Widen stance during attack
+                stanceWiden = 0.04
+                
+                // Weight shift affects legs
+                leftHipOffset.x = hipShiftX * 0.3
+                rightHipOffset.x = hipShiftX * 0.3
+                leftHipOffset.z = hipShiftZ * 0.5
+                rightHipOffset.z = hipShiftZ * 0.5
+                
+                // Dampen leg swing during attack (more stable stance)
+                leftLegSwing *= 0.3
+                rightLegSwing *= 0.3
+                
+                // Bend knees more for power stance
+                leftKneeAdjust = -0.03
+                rightKneeAdjust = -0.03
+                
+                // Specific swing type leg adjustments
+                switch swingType {
+                case .mittelhaw:
+                    // Horizontal slash - pivot on back foot
+                    let swingT = max(0, (attackPhase - 0.25) / 0.75)
+                    leftHipOffset.z -= swingT * 0.08  // Left foot plants
+                    rightHipOffset.z += swingT * 0.05 // Right foot pivots
+                    rightKneeAdjust -= swingT * 0.04  // Deeper knee bend
+                case .thrust:
+                    // Lunge forward
+                    let swingT = max(0, (attackPhase - 0.25) / 0.75)
+                    let lungeT = sin(swingT * .pi)
+                    rightHipOffset.z -= lungeT * 0.15 // Right foot forward (lunge)
+                    leftHipOffset.z += lungeT * 0.05  // Back foot planted
+                    rightKneeAdjust -= lungeT * 0.06
+                case .oberhaw:
+                    // Overhead - rise up then stomp down
+                    let swingT = max(0, (attackPhase - 0.25) / 0.75)
+                    rightHipOffset.z -= swingT * 0.08
+                    rightKneeAdjust -= swingT * 0.05
+                case .unterhaw:
+                    // Upward cut - crouch then rise
+                    let windUpT = min(attackPhase / 0.25, 1.0)
+                    let swingT = max(0, (attackPhase - 0.25) / 0.75)
+                    if attackPhase < 0.25 {
+                        leftKneeAdjust -= windUpT * 0.06  // Crouch
+                        rightKneeAdjust -= windUpT * 0.06
+                    } else {
+                        leftKneeAdjust = -0.06 + swingT * 0.08  // Rise
+                        rightKneeAdjust = -0.06 + swingT * 0.08
+                    }
+                case .zornhaw:
+                    // Diagonal - weight transfer
+                    let swingT = max(0, (attackPhase - 0.25) / 0.75)
+                    rightHipOffset.z -= swingT * 0.06
+                    leftHipOffset.x -= swingT * 0.04
+                    rightKneeAdjust -= swingT * 0.03
+                }
+            }
+            
+            // Left leg with attack adjustments
+            let leftHipPos = simd_float3(-legSeparation - stanceWiden, hipY, 0) + leftHipOffset
             let leftLegForward = max(0, -leftLegSwing / legSwingAmount)
-            let leftKneeHeight = 0.45 + leftLegForward * 0.08
-            let leftKneePos = simd_float3(-legSeparation, leftKneeHeight, leftLegSwing * 0.4)
+            let leftKneeHeight = 0.45 + leftLegForward * 0.08 + leftKneeAdjust
+            let leftKneePos = simd_float3(-legSeparation - stanceWiden, leftKneeHeight, leftLegSwing * 0.4) + leftHipOffset * 0.5
             let leftFootHeight: Float = 0.08 + leftLegForward * 0.12
-            let leftFootPos = simd_float3(-legSeparation, leftFootHeight, leftLegSwing * 0.6)
+            let leftFootPos = simd_float3(-legSeparation - stanceWiden, leftFootHeight, leftLegSwing * 0.6) + leftHipOffset * 0.3
             
             addLimb(from: leftHipPos, to: leftKneePos, radius: 0.09, segments: 6,
                     uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
@@ -186,13 +485,13 @@ class CharacterMesh {
             addBox(center: leftFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
             
-            // Right leg
-            let rightHipPos = simd_float3(legSeparation, hipY, 0)
+            // Right leg with attack adjustments
+            let rightHipPos = simd_float3(legSeparation + stanceWiden, hipY, 0) + rightHipOffset
             let rightLegForward = max(0, -rightLegSwing / legSwingAmount)
-            let rightKneeHeight = 0.45 + rightLegForward * 0.08
-            let rightKneePos = simd_float3(legSeparation, rightKneeHeight, rightLegSwing * 0.4)
+            let rightKneeHeight = 0.45 + rightLegForward * 0.08 + rightKneeAdjust
+            let rightKneePos = simd_float3(legSeparation + stanceWiden, rightKneeHeight, rightLegSwing * 0.4) + rightHipOffset * 0.5
             let rightFootHeight: Float = 0.08 + rightLegForward * 0.12
-            let rightFootPos = simd_float3(legSeparation, rightFootHeight, rightLegSwing * 0.6)
+            let rightFootPos = simd_float3(legSeparation + stanceWiden, rightFootHeight, rightLegSwing * 0.6) + rightHipOffset * 0.3
             
             addLimb(from: rightHipPos, to: rightKneePos, radius: 0.09, segments: 6,
                     uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
@@ -292,67 +591,108 @@ class CharacterMesh {
     
     private func addBox(center: simd_float3, size: simd_float3, uvYStart: Float, uvYEnd: Float,
                         material: UInt32, vertices: inout [TexturedVertex]) {
+        // Delegate to rotated version with no rotation
+        addRotatedBox(center: center, size: size, yaw: 0, pitch: 0, roll: 0,
+                      uvYStart: uvYStart, uvYEnd: uvYEnd, material: material, vertices: &vertices)
+    }
+    
+    /// Add a box with rotation (yaw = Y axis, pitch = X axis, roll = Z axis)
+    private func addRotatedBox(center: simd_float3, size: simd_float3, yaw: Float, pitch: Float, roll: Float,
+                               uvYStart: Float, uvYEnd: Float, material: UInt32, vertices: inout [TexturedVertex]) {
         let hw = size.x / 2
         let hh = size.y / 2
         let hd = size.z / 2
         
-        // Front face
+        // Helper to rotate a point around center
+        func rotatePoint(_ p: simd_float3) -> simd_float3 {
+            var result = p
+            
+            // Apply rotations: yaw (Y), pitch (X), roll (Z)
+            // Yaw rotation (around Y axis)
+            let cosY = cos(yaw)
+            let sinY = sin(yaw)
+            let x1 = result.x * cosY + result.z * sinY
+            let z1 = -result.x * sinY + result.z * cosY
+            result.x = x1
+            result.z = z1
+            
+            // Pitch rotation (around X axis)
+            let cosP = cos(pitch)
+            let sinP = sin(pitch)
+            let y2 = result.y * cosP - result.z * sinP
+            let z2 = result.y * sinP + result.z * cosP
+            result.y = y2
+            result.z = z2
+            
+            // Roll rotation (around Z axis)
+            let cosR = cos(roll)
+            let sinR = sin(roll)
+            let x3 = result.x * cosR - result.y * sinR
+            let y3 = result.x * sinR + result.y * cosR
+            result.x = x3
+            result.y = y3
+            
+            return result
+        }
+        
+        func rotateNormal(_ n: simd_float3) -> simd_float3 {
+            return simd_normalize(rotatePoint(n))
+        }
+        
+        // Define corners in local space
+        let corners: [simd_float3] = [
+            simd_float3(-hw, -hh, -hd),  // 0: back-bottom-left
+            simd_float3(hw, -hh, -hd),   // 1: back-bottom-right
+            simd_float3(hw, hh, -hd),    // 2: back-top-right
+            simd_float3(-hw, hh, -hd),   // 3: back-top-left
+            simd_float3(-hw, -hh, hd),   // 4: front-bottom-left
+            simd_float3(hw, -hh, hd),    // 5: front-bottom-right
+            simd_float3(hw, hh, hd),     // 6: front-top-right
+            simd_float3(-hw, hh, hd),    // 7: front-top-left
+        ]
+        
+        // Rotate and translate corners
+        let rotatedCorners = corners.map { center + rotatePoint($0) }
+        
+        // Front face (Z+)
         addQuad(
-            bl: center + simd_float3(-hw, -hh, hd),
-            br: center + simd_float3(hw, -hh, hd),
-            tl: center + simd_float3(-hw, hh, hd),
-            tr: center + simd_float3(hw, hh, hd),
-            normal: simd_float3(0, 0, 1),
+            bl: rotatedCorners[4], br: rotatedCorners[5], tl: rotatedCorners[7], tr: rotatedCorners[6],
+            normal: rotateNormal(simd_float3(0, 0, 1)),
             uvYStart: uvYStart, uvYEnd: uvYEnd, material: material, vertices: &vertices
         )
         
-        // Back face
+        // Back face (Z-)
         addQuad(
-            bl: center + simd_float3(hw, -hh, -hd),
-            br: center + simd_float3(-hw, -hh, -hd),
-            tl: center + simd_float3(hw, hh, -hd),
-            tr: center + simd_float3(-hw, hh, -hd),
-            normal: simd_float3(0, 0, -1),
+            bl: rotatedCorners[1], br: rotatedCorners[0], tl: rotatedCorners[2], tr: rotatedCorners[3],
+            normal: rotateNormal(simd_float3(0, 0, -1)),
             uvYStart: uvYStart, uvYEnd: uvYEnd, material: material, vertices: &vertices
         )
         
-        // Left face
+        // Left face (X-)
         addQuad(
-            bl: center + simd_float3(-hw, -hh, -hd),
-            br: center + simd_float3(-hw, -hh, hd),
-            tl: center + simd_float3(-hw, hh, -hd),
-            tr: center + simd_float3(-hw, hh, hd),
-            normal: simd_float3(-1, 0, 0),
+            bl: rotatedCorners[0], br: rotatedCorners[4], tl: rotatedCorners[3], tr: rotatedCorners[7],
+            normal: rotateNormal(simd_float3(-1, 0, 0)),
             uvYStart: uvYStart, uvYEnd: uvYEnd, material: material, vertices: &vertices
         )
         
-        // Right face
+        // Right face (X+)
         addQuad(
-            bl: center + simd_float3(hw, -hh, hd),
-            br: center + simd_float3(hw, -hh, -hd),
-            tl: center + simd_float3(hw, hh, hd),
-            tr: center + simd_float3(hw, hh, -hd),
-            normal: simd_float3(1, 0, 0),
+            bl: rotatedCorners[5], br: rotatedCorners[1], tl: rotatedCorners[6], tr: rotatedCorners[2],
+            normal: rotateNormal(simd_float3(1, 0, 0)),
             uvYStart: uvYStart, uvYEnd: uvYEnd, material: material, vertices: &vertices
         )
         
-        // Top face
+        // Top face (Y+)
         addQuad(
-            bl: center + simd_float3(-hw, hh, hd),
-            br: center + simd_float3(hw, hh, hd),
-            tl: center + simd_float3(-hw, hh, -hd),
-            tr: center + simd_float3(hw, hh, -hd),
-            normal: simd_float3(0, 1, 0),
+            bl: rotatedCorners[7], br: rotatedCorners[6], tl: rotatedCorners[3], tr: rotatedCorners[2],
+            normal: rotateNormal(simd_float3(0, 1, 0)),
             uvYStart: uvYStart, uvYEnd: uvYEnd, material: material, vertices: &vertices
         )
         
-        // Bottom face
+        // Bottom face (Y-)
         addQuad(
-            bl: center + simd_float3(-hw, -hh, -hd),
-            br: center + simd_float3(hw, -hh, -hd),
-            tl: center + simd_float3(-hw, -hh, hd),
-            tr: center + simd_float3(hw, -hh, hd),
-            normal: simd_float3(0, -1, 0),
+            bl: rotatedCorners[0], br: rotatedCorners[1], tl: rotatedCorners[4], tr: rotatedCorners[5],
+            normal: rotateNormal(simd_float3(0, -1, 0)),
             uvYStart: uvYStart, uvYEnd: uvYEnd, material: material, vertices: &vertices
         )
     }
@@ -369,7 +709,10 @@ class CharacterMesh {
     }
     
     /// Add a sword mesh at the given hand position
-    private func addSword(at handPos: simd_float3, swingAngle: Float, vertices: inout [TexturedVertex]) {
+    private func addSword(at handPos: simd_float3, swingAngle: Float, 
+                          isAttacking: Bool = false, attackPhase: Float = 0,
+                          swingType: SwingType = .mittelhaw,
+                          vertices: inout [TexturedVertex]) {
         // Sword dimensions
         let handleLength: Float = 0.12
         let handleRadius: Float = 0.025
@@ -382,41 +725,95 @@ class CharacterMesh {
         // Sword material (using pole material for metallic look)
         let matSword: UInt32 = MaterialIndex.pole.rawValue
         
-        // Sword points forward (negative Z in character local space) with slight downward angle
-        // The blade extends forward from the hand, like holding a sword ready to strike
-        let forwardTilt: Float = 0.15  // Slight downward angle
-        let swordDir = simd_normalize(simd_float3(0, -forwardTilt, -1.0))
+        // Calculate sword direction based on attack state and swing type
+        var swordDir: simd_float3
         
-        // Add some swing based on arm movement
-        let swingOffset = swingAngle * 0.3
-        let adjustedDir = simd_normalize(simd_float3(swingOffset * 0.2, swordDir.y, swordDir.z))
+        if isAttacking {
+            let windUpT = min(attackPhase / 0.25, 1.0)
+            let swingT = max(0, (attackPhase - 0.25) / 0.75)
+            
+            switch swingType {
+            case .oberhaw:
+                // Overhead cut - sword points up then chops down
+                if attackPhase < 0.25 {
+                    swordDir = simd_normalize(simd_float3(0, 0.3 + windUpT * 0.7, -0.5 + windUpT * 0.3))
+                } else {
+                    let downAngle = swingT * 2.2
+                    swordDir = simd_normalize(simd_float3(0, 1.0 - downAngle, -0.2 - swingT * 0.6))
+                }
+                
+            case .mittelhaw:
+                // Horizontal slash - sword sweeps left to right
+                if attackPhase < 0.25 {
+                    let yawBack = windUpT * 1.2
+                    swordDir = simd_normalize(simd_float3(sin(yawBack), -0.1, -cos(yawBack)))
+                } else {
+                    let yawAngle = 1.2 - swingT * 2.4
+                    swordDir = simd_normalize(simd_float3(sin(yawAngle), -0.15, -cos(yawAngle) * 0.8))
+                }
+                
+            case .unterhaw:
+                // Upward cut - sword points down then rises up
+                if attackPhase < 0.25 {
+                    swordDir = simd_normalize(simd_float3(0.2, -0.6 - windUpT * 0.3, -0.4))
+                } else {
+                    let upAngle = swingT * 1.8
+                    swordDir = simd_normalize(simd_float3(0.1 - swingT * 0.2, -0.9 + upAngle, -0.3 - swingT * 0.3))
+                }
+                
+            case .zornhaw:
+                // Diagonal 45-degree cut
+                if attackPhase < 0.25 {
+                    let backUp = windUpT
+                    swordDir = simd_normalize(simd_float3(0.5 * backUp, 0.3 + backUp * 0.4, -0.6))
+                } else {
+                    let diagSwing = swingT * 2.0
+                    swordDir = simd_normalize(simd_float3(0.5 - diagSwing * 0.7, 0.7 - diagSwing * 1.0, -0.6 - swingT * 0.2))
+                }
+                
+            case .thrust:
+                // Forward thrust - sword points straight ahead
+                if attackPhase < 0.25 {
+                    swordDir = simd_normalize(simd_float3(0, -0.1, -0.8 + windUpT * 0.3))
+                } else {
+                    let thrustExtend = sin(swingT * .pi)
+                    swordDir = simd_normalize(simd_float3(0, -0.1 - thrustExtend * 0.05, -0.5 - thrustExtend * 0.5))
+                }
+            }
+        } else {
+            // Normal stance - sword points forward with slight downward angle
+            let forwardTilt: Float = 0.15
+            let swingOffset = swingAngle * 0.3
+            swordDir = simd_normalize(simd_float3(swingOffset * 0.2, -forwardTilt, -1.0))
+        }
         
         // Calculate basis vectors for sword orientation
-        // "Up" for the sword is the character's up direction
-        let swordUp = simd_float3(0, 1, 0)
-        let swordRight = simd_normalize(simd_cross(adjustedDir, swordUp))
-        let swordForward = simd_normalize(simd_cross(swordRight, adjustedDir))
+        var swordUp = simd_float3(0, 1, 0)
+        if abs(simd_dot(swordDir, swordUp)) > 0.95 {
+            swordUp = simd_float3(0, 0, 1)
+        }
+        let swordRight = simd_normalize(simd_cross(swordDir, swordUp))
+        let swordForward = simd_normalize(simd_cross(swordRight, swordDir))
         
         // Handle extends back from hand (opposite of blade direction)
         let handleStart = handPos
-        let handleEnd = handleStart - adjustedDir * handleLength  // Handle goes backward
+        let handleEnd = handleStart - swordDir * handleLength
         addLimb(from: handleEnd, to: handleStart, radius: handleRadius, segments: 6,
                 uvYStart: 0.0, uvYEnd: 0.2, material: matSword, vertices: &vertices)
         
         // Guard (cross-piece at the hand position)
         let guardCenter = handPos
-        // Guard is horizontal (along swordRight axis)
         addBox(center: guardCenter,
                size: simd_float3(guardWidth, guardHeight, guardHeight),
                uvYStart: 0.2, uvYEnd: 0.4, material: matSword, vertices: &vertices)
         
         // Blade extends forward from guard
-        let bladeStart = guardCenter + adjustedDir * (guardHeight / 2)
-        let bladeCenter = bladeStart + adjustedDir * (bladeLength / 2)
+        let bladeStart = guardCenter + swordDir * (guardHeight / 2)
+        let bladeCenter = bladeStart + swordDir * (bladeLength / 2)
         
         // Create blade as a flat box aligned with sword direction
         addSwordBlade(center: bladeCenter,
-                      direction: adjustedDir,
+                      direction: swordDir,
                       right: swordRight,
                       forward: swordForward,
                       length: bladeLength,

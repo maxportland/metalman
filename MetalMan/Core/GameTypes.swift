@@ -118,6 +118,7 @@ enum MaterialIndex: UInt32 {
     case woodPlank = 9
     case sky = 10
     case treasureChest = 11
+    case enemy = 12  // Red shirt for bandits
 }
 
 // MARK: - Interactables
@@ -159,6 +160,9 @@ struct Interactable: Identifiable {
 
 /// Terrain height generation using layered noise
 struct Terrain {
+    /// Shared instance for use by enemy AI
+    static let shared = Terrain()
+    
     /// Get terrain height at world position (x, z)
     static func heightAt(x: Float, z: Float) -> Float {
         // Layered noise for natural-looking hills
@@ -193,6 +197,11 @@ struct Terrain {
         
         let normal = simd_float3(hL - hR, 2.0 * eps, hD - hU)
         return simd_normalize(normal)
+    }
+    
+    /// Instance method for enemy AI
+    func heightAt(x: Float, z: Float) -> Float {
+        Terrain.heightAt(x: x, z: z)
     }
 }
 

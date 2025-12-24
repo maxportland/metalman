@@ -53,6 +53,7 @@ A 3D open-world RPG game built with Metal and SwiftUI for macOS. Features a proc
 | Space | Jump |
 | E | Interact (open chests) |
 | I | Toggle inventory |
+| F | Attack (sword swing) |
 
 ### Inventory Controls
 - **Double-click** an item to equip it

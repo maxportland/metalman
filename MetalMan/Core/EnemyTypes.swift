@@ -1,0 +1,429 @@
+import Foundation
+import simd
+
+// MARK: - Enemy Types
+
+/// Types of enemies in the game
+enum EnemyType: String, CaseIterable {
+    case bandit = "Bandit"
+    
+    var maxHP: Int {
+        switch self {
+        case .bandit: return 50
+        }
+    }
+    
+    var damage: Int {
+        switch self {
+        case .bandit: return 8
+        }
+    }
+    
+    var speed: Float {
+        switch self {
+        case .bandit: return 3.0
+        }
+    }
+    
+    var attackRange: Float {
+        switch self {
+        case .bandit: return 1.5
+        }
+    }
+    
+    var detectionRange: Float {
+        switch self {
+        case .bandit: return 12.0
+        }
+    }
+    
+    var attackCooldown: Float {
+        switch self {
+        case .bandit: return 1.2
+        }
+    }
+    
+    var xpReward: Int {
+        switch self {
+        case .bandit: return 25
+        }
+    }
+    
+    var goldDrop: ClosedRange<Int> {
+        switch self {
+        case .bandit: return 5...20
+        }
+    }
+}
+
+// MARK: - Enemy State
+
+/// Current AI state of an enemy
+enum EnemyState {
+    case idle           // Standing still, not aware of player
+    case patrolling     // Walking around patrol area
+    case chasing        // Pursuing the player
+    case attacking      // In attack animation
+    case hurt           // Taking damage (brief stagger)
+    case dead           // Dying/dead
+}
+
+// MARK: - Enemy
+
+/// An enemy entity in the game world
+final class Enemy: Identifiable {
+    let id: UUID
+    let type: EnemyType
+    
+    // Position and movement
+    var position: simd_float3
+    var yaw: Float  // Facing direction (radians)
+    var velocity: simd_float3 = .zero
+    
+    // Stats
+    var currentHP: Int
+    var maxHP: Int
+    
+    // AI State
+    var state: EnemyState = .idle
+    var stateTimer: Float = 0  // Time in current state
+    
+    // Patrol
+    var patrolCenter: simd_float3
+    var patrolRadius: Float = 5.0
+    var patrolTarget: simd_float3?
+    var patrolWaitTime: Float = 0
+    
+    // Combat
+    var attackCooldown: Float = 0
+    var attackPhase: Float = 0  // 0 to 1 during attack animation
+    var isAttacking: Bool { state == .attacking }
+    var lastDamageTime: Float = 0
+    
+    // Animation
+    var walkPhase: Float = 0
+    var hurtTimer: Float = 0
+    
+    // Collider for collision detection
+    var collider: Collider {
+        Collider.circle(x: position.x, z: position.z, radius: 0.4)
+    }
+    
+    init(type: EnemyType, position: simd_float3) {
+        self.id = UUID()
+        self.type = type
+        self.position = position
+        self.patrolCenter = position
+        self.yaw = Float.random(in: 0...(2 * .pi))
+        self.maxHP = type.maxHP
+        self.currentHP = type.maxHP
+    }
+    
+    var isAlive: Bool { currentHP > 0 }
+    var hpPercentage: Float { Float(currentHP) / Float(maxHP) }
+    
+    /// Take damage and return the actual damage dealt
+    @discardableResult
+    func takeDamage(_ amount: Int) -> Int {
+        let actualDamage = min(amount, currentHP)
+        currentHP -= actualDamage
+        
+        if currentHP <= 0 {
+            state = .dead
+            stateTimer = 0
+        } else {
+            // Brief hurt stagger
+            hurtTimer = 0.2
+        }
+        
+        lastDamageTime = 0
+        return actualDamage
+    }
+    
+    /// Update enemy AI and animation
+    func update(deltaTime dt: Float, playerPosition: simd_float3, terrain: Terrain) {
+        stateTimer += dt
+        lastDamageTime += dt
+        
+        // Update cooldowns
+        if attackCooldown > 0 {
+            attackCooldown -= dt
+        }
+        
+        // Update hurt timer
+        if hurtTimer > 0 {
+            hurtTimer -= dt
+        }
+        
+        // Update attack animation
+        if state == .attacking {
+            attackPhase += dt / 0.5  // 0.5 second attack animation
+            if attackPhase >= 1.0 {
+                attackPhase = 0
+                state = .chasing  // Go back to chasing after attack
+                stateTimer = 0
+            }
+        }
+        
+        // Calculate distance to player
+        let toPlayer = playerPosition - position
+        let distanceToPlayer = simd_length(simd_float2(toPlayer.x, toPlayer.z))
+        
+        // State machine
+        switch state {
+        case .idle:
+            updateIdle(dt: dt, distanceToPlayer: distanceToPlayer)
+            
+        case .patrolling:
+            updatePatrol(dt: dt, distanceToPlayer: distanceToPlayer, terrain: terrain)
+            
+        case .chasing:
+            updateChase(dt: dt, playerPosition: playerPosition, distanceToPlayer: distanceToPlayer, terrain: terrain)
+            
+        case .attacking:
+            // Already handled above
+            break
+            
+        case .hurt:
+            // Brief stagger, then resume
+            if stateTimer > 0.3 {
+                state = .chasing
+                stateTimer = 0
+            }
+            
+        case .dead:
+            // Death animation/fade handled elsewhere
+            break
+        }
+        
+        // Update Y position based on terrain
+        position.y = terrain.heightAt(x: position.x, z: position.z)
+    }
+    
+    private func updateIdle(dt: Float, distanceToPlayer: Float) {
+        // Check if player is in detection range
+        if distanceToPlayer < type.detectionRange {
+            state = .chasing
+            stateTimer = 0
+            return
+        }
+        
+        // Randomly start patrolling
+        if stateTimer > 2.0 && Float.random(in: 0...1) < 0.02 {
+            state = .patrolling
+            stateTimer = 0
+            pickNewPatrolTarget()
+        }
+    }
+    
+    private func updatePatrol(dt: Float, distanceToPlayer: Float, terrain: Terrain) {
+        // Check if player is in detection range
+        if distanceToPlayer < type.detectionRange {
+            state = .chasing
+            stateTimer = 0
+            return
+        }
+        
+        // Handle patrol waiting
+        if patrolWaitTime > 0 {
+            patrolWaitTime -= dt
+            return
+        }
+        
+        // Move toward patrol target
+        guard let target = patrolTarget else {
+            pickNewPatrolTarget()
+            return
+        }
+        
+        let toTarget = target - position
+        let distToTarget = simd_length(simd_float2(toTarget.x, toTarget.z))
+        
+        if distToTarget < 0.5 {
+            // Reached patrol target, wait then pick new one
+            patrolWaitTime = Float.random(in: 1.0...3.0)
+            pickNewPatrolTarget()
+        } else {
+            // Move toward target
+            let moveDir = simd_normalize(simd_float2(toTarget.x, toTarget.z))
+            let speed = type.speed * 0.5  // Patrol at half speed
+            
+            position.x += moveDir.x * speed * dt
+            position.z += moveDir.y * speed * dt
+            
+            // Update facing direction
+            yaw = atan2(moveDir.x, -moveDir.y)
+            
+            // Update walk animation
+            walkPhase += speed * dt * 2.0
+        }
+    }
+    
+    private func updateChase(dt: Float, playerPosition: simd_float3, distanceToPlayer: Float, terrain: Terrain) {
+        // Check if player is out of range (give up chase)
+        if distanceToPlayer > type.detectionRange * 1.5 {
+            state = .idle
+            stateTimer = 0
+            return
+        }
+        
+        // Check if in attack range
+        if distanceToPlayer < type.attackRange {
+            if attackCooldown <= 0 {
+                // Start attack
+                state = .attacking
+                stateTimer = 0
+                attackPhase = 0
+                attackCooldown = type.attackCooldown
+            }
+            return
+        }
+        
+        // Move toward player
+        let toPlayer = playerPosition - position
+        let moveDir = simd_normalize(simd_float2(toPlayer.x, toPlayer.z))
+        let speed = type.speed
+        
+        position.x += moveDir.x * speed * dt
+        position.z += moveDir.y * speed * dt
+        
+        // Update facing direction
+        yaw = atan2(moveDir.x, -moveDir.y)
+        
+        // Update walk animation
+        walkPhase += speed * dt * 2.0
+    }
+    
+    private func pickNewPatrolTarget() {
+        let angle = Float.random(in: 0...(2 * .pi))
+        let distance = Float.random(in: 2.0...patrolRadius)
+        patrolTarget = simd_float3(
+            patrolCenter.x + cos(angle) * distance,
+            0,  // Y will be set by terrain
+            patrolCenter.z + sin(angle) * distance
+        )
+    }
+}
+
+// MARK: - Damage Number
+
+/// A floating damage number to display on screen
+struct DamageNumber: Identifiable {
+    let id: UUID
+    let amount: Int
+    let isCritical: Bool
+    let isHeal: Bool
+    var worldPosition: simd_float3
+    var age: Float = 0
+    var velocity: simd_float3
+    
+    static let lifetime: Float = 1.5
+    
+    init(amount: Int, position: simd_float3, isCritical: Bool = false, isHeal: Bool = false) {
+        self.id = UUID()
+        self.amount = amount
+        self.worldPosition = position + simd_float3(0, 2.0, 0)  // Start above target
+        self.isCritical = isCritical
+        self.isHeal = isHeal
+        // Random upward velocity with slight horizontal drift
+        self.velocity = simd_float3(
+            Float.random(in: -0.5...0.5),
+            Float.random(in: 1.5...2.5),
+            Float.random(in: -0.5...0.5)
+        )
+    }
+    
+    var isExpired: Bool { age >= DamageNumber.lifetime }
+    
+    var alpha: Float {
+        if age < 0.2 {
+            return age / 0.2  // Fade in
+        } else if age > DamageNumber.lifetime - 0.5 {
+            return (DamageNumber.lifetime - age) / 0.5  // Fade out
+        }
+        return 1.0
+    }
+    
+    mutating func update(deltaTime dt: Float) {
+        age += dt
+        worldPosition += velocity * dt
+        velocity.y -= 2.0 * dt  // Gravity
+    }
+}
+
+// MARK: - Enemy Manager
+
+/// Manages all enemies in the game world
+final class EnemyManager {
+    private(set) var enemies: [Enemy] = []
+    var damageNumbers: [DamageNumber] = []
+    
+    /// Spawn an enemy at a position
+    func spawnEnemy(type: EnemyType, at position: simd_float3) {
+        let enemy = Enemy(type: type, position: position)
+        enemies.append(enemy)
+    }
+    
+    /// Remove dead enemies after their death animation
+    func removeDeadEnemies() {
+        enemies.removeAll { enemy in
+            enemy.state == .dead && enemy.stateTimer > 2.0
+        }
+    }
+    
+    /// Update all enemies
+    func update(deltaTime dt: Float, playerPosition: simd_float3, terrain: Terrain) {
+        for enemy in enemies where enemy.isAlive {
+            enemy.update(deltaTime: dt, playerPosition: playerPosition, terrain: terrain)
+        }
+        
+        // Update damage numbers
+        for i in damageNumbers.indices.reversed() {
+            damageNumbers[i].update(deltaTime: dt)
+        }
+        damageNumbers.removeAll { $0.isExpired }
+    }
+    
+    /// Add a damage number to display
+    func addDamageNumber(_ amount: Int, at position: simd_float3, isCritical: Bool = false, isHeal: Bool = false) {
+        let damageNum = DamageNumber(amount: amount, position: position, isCritical: isCritical, isHeal: isHeal)
+        damageNumbers.append(damageNum)
+    }
+    
+    /// Get enemies within attack range of a position
+    func enemiesInRange(of position: simd_float3, range: Float) -> [Enemy] {
+        enemies.filter { enemy in
+            guard enemy.isAlive else { return false }
+            let dist = simd_distance(
+                simd_float2(position.x, position.z),
+                simd_float2(enemy.position.x, enemy.position.z)
+            )
+            return dist <= range
+        }
+    }
+    
+    /// Check if any enemy is attacking and in range to hit the player
+    func checkEnemyAttacks(playerPosition: simd_float3) -> [(enemy: Enemy, damage: Int)] {
+        var hits: [(Enemy, Int)] = []
+        
+        for enemy in enemies where enemy.isAlive && enemy.state == .attacking {
+            // Check if attack lands (at peak of attack animation)
+            if enemy.attackPhase > 0.4 && enemy.attackPhase < 0.6 {
+                let dist = simd_distance(
+                    simd_float2(playerPosition.x, playerPosition.z),
+                    simd_float2(enemy.position.x, enemy.position.z)
+                )
+                if dist <= enemy.type.attackRange * 1.2 {
+                    hits.append((enemy, enemy.type.damage))
+                }
+            }
+        }
+        
+        return hits
+    }
+    
+    /// Get enemy count
+    var count: Int { enemies.count }
+    var aliveCount: Int { enemies.filter { $0.isAlive }.count }
+}
+

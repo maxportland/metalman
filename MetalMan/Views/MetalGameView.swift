@@ -273,7 +273,7 @@ struct MetalGameView: NSViewRepresentable {
             
             // Arrow key codes:
             // Left: 123, Right: 124, Down: 125, Up: 126
-            // Spacebar: 49, E: 14, I: 34
+            // Spacebar: 49, E: 14, I: 34, F: 3
             if pressedKeys.contains(123) { x -= 1 } // Left arrow - rotate left
             if pressedKeys.contains(124) { x += 1 } // Right arrow - rotate right
             if pressedKeys.contains(125) { y -= 1 } // Down arrow - walk backward
@@ -284,6 +284,9 @@ struct MetalGameView: NSViewRepresentable {
             
             // Interact with E key (keyCode 14)
             renderer.interactPressed = pressedKeys.contains(14)
+            
+            // Attack with F key (keyCode 3)
+            renderer.attackPressed = pressedKeys.contains(3)
             
             // Toggle inventory with I key (keyCode 34)
             let inventoryKeyPressed = pressedKeys.contains(34)

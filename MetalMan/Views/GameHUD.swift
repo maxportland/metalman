@@ -9,6 +9,17 @@ struct LootNotification: Identifiable {
     var opacity: Double = 1.0
 }
 
+/// Represents a floating damage number on screen
+struct DamageNumberDisplay: Identifiable {
+    let id: UUID
+    let amount: Int
+    let isCritical: Bool
+    let isHeal: Bool
+    var screenPosition: CGPoint
+    var opacity: Double
+    var scale: Double
+}
+
 /// Represents an item slot in the inventory grid
 struct InventorySlot: Identifiable {
     let id: Int
@@ -49,7 +60,22 @@ struct GameHUD: View {
                         removal: .opacity
                     ))
             }
+            
+            // Floating damage numbers
+            ForEach(viewModel.damageNumbers) { dmg in
+                damageNumberView(dmg)
+            }
         }
+    }
+    
+    private func damageNumberView(_ dmg: DamageNumberDisplay) -> some View {
+        Text(dmg.isHeal ? "+\(dmg.amount)" : "-\(dmg.amount)")
+            .font(.system(size: dmg.isCritical ? 28 : 22, weight: .bold, design: .rounded))
+            .foregroundColor(dmg.isHeal ? .green : (dmg.isCritical ? .yellow : .red))
+            .shadow(color: .black, radius: 2, x: 1, y: 1)
+            .scaleEffect(dmg.scale)
+            .opacity(dmg.opacity)
+            .position(dmg.screenPosition)
     }
     
     private var inventoryOverlay: some View {
@@ -486,6 +512,9 @@ final class GameHUDViewModel {
     // Equipment slots display
     var equippedMainHand: InventoryItemDisplay? = nil
     
+    // Damage numbers
+    var damageNumbers: [DamageNumberDisplay] = []
+    
     var hpPercentage: Float {
         guard maxHP > 0 else { return 0 }
         return Float(currentHP) / Float(maxHP)
@@ -534,6 +563,40 @@ final class GameHUDViewModel {
                     currentLoot = nil
                 }
             }
+        }
+    }
+    
+    /// Add a floating damage number at a screen position
+    func addDamageNumber(amount: Int, screenPosition: CGPoint, isCritical: Bool = false, isHeal: Bool = false) {
+        let dmgNum = DamageNumberDisplay(
+            id: UUID(),
+            amount: amount,
+            isCritical: isCritical,
+            isHeal: isHeal,
+            screenPosition: screenPosition,
+            opacity: 1.0,
+            scale: isCritical ? 1.3 : 1.0
+        )
+        
+        withAnimation(.easeOut(duration: 0.1)) {
+            damageNumbers.append(dmgNum)
+        }
+        
+        // Animate and remove after 1.5 seconds
+        Task {
+            // Float up animation
+            for _ in 0..<15 {
+                try? await Task.sleep(nanoseconds: 100_000_000)  // 0.1 seconds
+                if let idx = damageNumbers.firstIndex(where: { $0.id == dmgNum.id }) {
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        damageNumbers[idx].screenPosition.y -= 8
+                        damageNumbers[idx].opacity -= 0.067
+                    }
+                }
+            }
+            
+            // Remove
+            damageNumbers.removeAll { $0.id == dmgNum.id }
         }
     }
     

@@ -435,6 +435,10 @@ final class PlayerCharacter: @unchecked Sendable {
         self.vitals = CharacterVitals(maxHP: maxHP, level: 1)
         self.inventory = Inventory(capacity: inventoryCapacity)
         self.equipment = Equipment()
+        
+        // Set current HP to effective max HP (includes strength bonus)
+        // This ensures the character starts at 100% health
+        self.vitals.currentHP = effectiveMaxHP
     }
     
     // MARK: - Effective Stats (base + equipment)

@@ -47,6 +47,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var chestVertexCount: Int = 0
     private var chestsNeedRebuild: Bool = false
     
+    // MARK: - Enemies
+    
+    private var enemyTexture: MTLTexture!
+    private var enemyManager: EnemyManager!
+    private var enemyMesh: EnemyMesh!
+    
     // MARK: - Textures (Normal Maps)
     
     private var groundNormalMap: MTLTexture!
@@ -60,6 +66,17 @@ final class Renderer: NSObject, MTKViewDelegate {
     var lookDelta: simd_float2 = .zero
     var jumpPressed: Bool = false
     var interactPressed: Bool = false
+    var attackPressed: Bool = false
+    
+    // MARK: - Combat State
+    
+    private var isAttacking: Bool = false
+    private var attackPhase: Float = 0        // 0 to 1, progress through swing
+    private var attackCooldown: Float = 0     // Time until next attack allowed
+    private let attackDuration: Float = 0.4   // How long the swing takes
+    private let attackCooldownTime: Float = 0.3  // Time between attacks
+    private var attackWasPressed: Bool = false
+    private var currentSwingType: SwingType = .mittelhaw
     
     // MARK: - HUD Reference
     
@@ -254,6 +271,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var litUniformBuffer: MTLBuffer
     private var characterUniformBuffer: MTLBuffer
     private var skyboxUniformBuffer: MTLBuffer
+    private var enemyUniformBuffer: MTLBuffer  // Large buffer for all enemies
     
     // Collision
     private var colliders: [Collider] = []
@@ -380,13 +398,24 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Create character mesh
         self.characterMesh = CharacterMesh(device: device)
         
-        // Create uniform buffers
-        uniformBuffer = device.makeBuffer(length: MemoryLayout<simd_float4x4>.stride * 3, options: [])!
-        litUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: [])!
-        characterUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: [])!
-        skyboxUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: [])!
+        // Create enemy mesh and manager
+        self.enemyMesh = EnemyMesh(device: device)
+        self.enemyManager = EnemyManager()
+        
+        // Create uniform buffers with shared storage mode for CPU/GPU access
+        uniformBuffer = device.makeBuffer(length: MemoryLayout<simd_float4x4>.stride * 3, options: .storageModeShared)!
+        litUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
+        characterUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
+        skyboxUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
+        // Enemy uniform buffer - large enough for 100 enemies with proper alignment
+        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255  // 256-byte aligned
+        enemyUniformBuffer = device.makeBuffer(length: uniformStride * 100, options: .storageModeShared)!
         
         super.init()
+        
+        // Spawn enemies (higher chance near treasure chests)
+        // Must be after super.init() to call instance method
+        spawnEnemies(nearChests: self.interactables)
         
         // Create textures
         let textureGen = TextureGenerator(device: device, commandQueue: commandQueue)
@@ -403,6 +432,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         woodPlankTexture = textureGen.createWoodPlankTexture()
         skyTexture = textureGen.createSkyTexture()
         treasureChestTexture = textureGen.createTreasureChestTexture()
+        enemyTexture = textureGen.createEnemyTexture()
         shadowMap = textureGen.createShadowMap(size: shadowMapSize)
         
         // Normal maps
@@ -412,7 +442,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         pathNormalMap = textureGen.createPathNormalMap()
         
         // Initialize character mesh
-        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, hasSwordEquipped: player.equipment.hasSwordEquipped)
+        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
+                            hasSwordEquipped: player.equipment.hasSwordEquipped,
+                            isAttacking: isAttacking, attackPhase: attackPhase,
+                            swingType: currentSwingType)
         
         // Setup view
         view.depthStencilPixelFormat = .depth32Float
@@ -607,6 +640,58 @@ final class Renderer: NSObject, MTKViewDelegate {
         return chests
     }
     
+    /// Spawn enemies throughout the world, with higher density near treasure chests
+    private func spawnEnemies(nearChests chests: [Interactable]) {
+        var seed = 1337
+        
+        // 1. Spawn 1-2 bandits near each chest (70% chance per chest)
+        for chest in chests {
+            let chanceRoll = seededRandom(seed)
+            seed += 1
+            
+            if chanceRoll < 0.7 {
+                // Spawn 1-2 enemies near this chest
+                let enemyCount = chanceRoll < 0.3 ? 2 : 1
+                
+                for _ in 0..<enemyCount {
+                    // Random offset from chest (5-12 units away)
+                    let angle = seededRandom(seed) * 2 * .pi
+                    seed += 1
+                    let distance: Float = 5.0 + seededRandom(seed) * 7.0
+                    seed += 1
+                    
+                    let x = chest.position.x + cos(angle) * distance
+                    let z = chest.position.z + sin(angle) * distance
+                    let y = Terrain.heightAt(x: x, z: z)
+                    
+                    // Don't spawn too close to origin (player spawn)
+                    let distFromOrigin = sqrtf(x * x + z * z)
+                    if distFromOrigin > 15 {
+                        enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z))
+                    }
+                }
+            }
+        }
+        
+        // 2. Spawn additional random bandits throughout the world
+        let randomEnemyCount = 15
+        for _ in 0..<randomEnemyCount {
+            let x: Float = (seededRandom(seed) - 0.5) * 160  // -80 to 80
+            seed += 1
+            let z: Float = (seededRandom(seed) - 0.5) * 160
+            seed += 1
+            
+            // Skip if too close to origin
+            let distFromOrigin = sqrtf(x * x + z * z)
+            if distFromOrigin < 20 { continue }
+            
+            let y = Terrain.heightAt(x: x, z: z)
+            enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z))
+        }
+        
+        print("[Enemies] Spawned \(enemyManager.count) bandits")
+    }
+    
     /// Try to interact with nearby chests
     func tryInteract() {
         for i in 0..<interactables.count {
@@ -700,6 +785,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Rebuild chest meshes if any were opened
         rebuildChestsIfNeeded()
         
+        // Handle combat
+        updateCombat(deltaTime: dt)
+        
         updateCharacter(deltaTime: dt)
         updateCamera(deltaTime: dt)
         viewMatrix = buildViewMatrix()
@@ -711,7 +799,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Update character mesh animation
         let hasSword = player.equipment.hasSwordEquipped
-        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, hasSwordEquipped: hasSword)
+        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
+                            hasSwordEquipped: hasSword,
+                            isAttacking: isAttacking, attackPhase: attackPhase,
+                            swingType: currentSwingType)
+        
+        // Update enemies
+        updateEnemies(deltaTime: dt)
+        enemyMesh.update(enemies: enemyManager.enemies)
+        
+        // Update damage numbers on HUD
+        updateDamageNumbersDisplay()
         
         // Shadow pass
         renderShadowPass(commandBuffer: commandBuffer, viewProjection: vp)
@@ -761,11 +859,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         drawLandscape(encoder: encoder)
         
-        // Character with model matrix
+        // Character with model matrix - use characterUniformBuffer
         let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
-        var charUniforms = shadowUniforms
-        charUniforms.modelMatrix = charModelMatrix
-        memcpy(characterUniformBuffer.contents(), &charUniforms, MemoryLayout<LitUniforms>.stride)
+        let charShadowPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
+        charShadowPtr.pointee = shadowUniforms
+        charShadowPtr.pointee.modelMatrix = charModelMatrix
+        
         encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
@@ -831,15 +930,28 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Draw landscape
         drawLandscape(encoder: encoder)
         
-        // Draw character
-        let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
-        var charUniforms = litUniforms
-        charUniforms.modelMatrix = charModelMatrix
-        memcpy(characterUniformBuffer.contents(), &charUniforms, MemoryLayout<LitUniforms>.stride)
-        encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
-        encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
-        encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
+        // Draw character - use characterUniformBuffer with character's model matrix
+        if characterMesh.vertexCount > 0 {
+            let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
+            
+            // Write directly to characterUniformBuffer
+            let charBufferPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
+            charBufferPtr.pointee = litUniforms
+            charBufferPtr.pointee.modelMatrix = charModelMatrix
+            
+            // Bind character's uniform buffer
+            encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
+            encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
+            
+            // Restore landscape uniform buffer for subsequent draws
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+        }
+        
+        // Draw enemies
+        drawEnemies(encoder: encoder, litUniforms: litUniforms)
         
         // Draw grid lines overlay
         encoder.setRenderPipelineState(wireframePipelineState)
@@ -878,6 +990,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Treasure chest texture (index 16)
         encoder.setFragmentTexture(treasureChestTexture, index: 16)
         
+        // Enemy texture (index 17 - red shirt for bandits)
+        encoder.setFragmentTexture(enemyTexture, index: 17)
+        
         encoder.setFragmentSamplerState(textureSampler, index: 0)
         encoder.setFragmentSamplerState(shadowSampler, index: 1)
     }
@@ -903,6 +1018,54 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.setVertexBuffer(chestVertexBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: chestVertexCount)
         }
+    }
+    
+    /// Draw all enemies
+    private func drawEnemies(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
+        guard enemyMesh.vertexCount > 0 else { return }
+        
+        // Draw each enemy with its own model matrix
+        let enemies = enemyManager.enemies.filter { $0.isAlive || $0.stateTimer < 2.0 }
+        
+        encoder.setVertexBuffer(enemyMesh.vertexBuffer, offset: 0, index: 0)
+        
+        // 256-byte aligned stride for uniform buffer offsets
+        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
+        
+        // First pass: write all enemy uniforms to buffer
+        let bufferBase = enemyUniformBuffer.contents()
+        for (index, enemy) in enemies.enumerated() {
+            guard index < 100 else { break }  // Max 100 enemies
+            
+            let enemyModelMatrix = translation(enemy.position.x, enemy.position.y, enemy.position.z) * rotationY(enemy.yaw)
+            
+            var enemyUniforms = litUniforms
+            enemyUniforms.modelMatrix = enemyModelMatrix
+            
+            // Write to this enemy's slot in the buffer
+            let offset = index * uniformStride
+            let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
+            ptr.pointee = enemyUniforms
+        }
+        
+        // Second pass: draw each enemy using its uniform offset
+        for (index, enemy) in enemies.enumerated() {
+            guard index < enemyMesh.enemyVertexRanges.count else { break }
+            guard index < 100 else { break }
+            
+            let range = enemyMesh.enemyVertexRanges[index]
+            guard range.count > 0 else { continue }
+            
+            let offset = index * uniformStride
+            encoder.setVertexBuffer(enemyUniformBuffer, offset: offset, index: 1)
+            encoder.setFragmentBuffer(enemyUniformBuffer, offset: offset, index: 1)
+            
+            encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
+        }
+        
+        // Restore landscape uniform buffer
+        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
     }
     
     // MARK: - Character & Camera Updates
@@ -1110,6 +1273,161 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Follow terrain height when not jumping
             characterPosition.y = terrainHeight
         }
+    }
+    
+    private func updateCombat(deltaTime dt: Float) {
+        // Update cooldown
+        if attackCooldown > 0 {
+            attackCooldown -= dt
+        }
+        
+        // Check for attack input (only if has sword equipped)
+        if attackPressed && !attackWasPressed && !isAttacking && attackCooldown <= 0 {
+            if player.equipment.hasSwordEquipped {
+                startAttack()
+            }
+        }
+        attackWasPressed = attackPressed
+        
+        // Update attack animation
+        if isAttacking {
+            attackPhase += dt / attackDuration
+            
+            if attackPhase >= 1.0 {
+                // Attack finished
+                isAttacking = false
+                attackPhase = 0
+                attackCooldown = attackCooldownTime
+                
+                // Check for hits (damage enemies in range)
+                performAttackHitCheck()
+            }
+        }
+    }
+    
+    private func startAttack() {
+        isAttacking = true
+        attackPhase = 0
+        
+        // Randomly select swing type
+        let swingTypes = SwingType.allCases
+        currentSwingType = swingTypes[Int.random(in: 0..<swingTypes.count)]
+        
+        print("[Combat] \(currentSwingType.name)!")
+    }
+    
+    private func performAttackHitCheck() {
+        // Calculate attack hitbox position (in front of character)
+        let attackRange: Float = 2.0
+        
+        // Get enemies in range
+        let enemiesInRange = enemyManager.enemiesInRange(of: characterPosition, range: attackRange)
+        
+        // Check each enemy in range for hit (must be in front arc)
+        for enemy in enemiesInRange {
+            let toEnemy = simd_float2(enemy.position.x, enemy.position.z) - simd_float2(characterPosition.x, characterPosition.z)
+            let dirToEnemy = simd_normalize(toEnemy)
+            
+            // Character forward direction
+            let charForward = simd_float2(sin(characterYaw), -cos(characterYaw))
+            
+            // Dot product gives us angle - within 90 degree frontal arc
+            let dot = simd_dot(charForward, dirToEnemy)
+            if dot > 0.3 {  // Roughly 70 degree arc
+                // Hit! Calculate damage
+                let baseDamage = player.effectiveDamage
+                let isCritical = Float.random(in: 0...1) < 0.15  // 15% crit chance
+                let damage = isCritical ? baseDamage * 2 : baseDamage
+                
+                let actualDamage = enemy.takeDamage(damage)
+                
+                // Show damage number
+                enemyManager.addDamageNumber(actualDamage, at: enemy.position, isCritical: isCritical)
+                
+                print("[Combat] Hit \(enemy.type.rawValue) for \(actualDamage) damage\(isCritical ? " (CRITICAL!)" : "")")
+                
+                // Check if enemy died
+                if !enemy.isAlive {
+                    // Give XP and gold
+                    player.gainXP(enemy.type.xpReward)
+                    let goldDrop = Int.random(in: enemy.type.goldDrop)
+                    player.inventory.addGold(goldDrop)
+                    print("[Combat] \(enemy.type.rawValue) defeated! +\(enemy.type.xpReward) XP, +\(goldDrop) gold")
+                    
+                    // Update HUD
+                    Task { @MainActor in
+                        hudViewModel?.update()
+                    }
+                }
+            }
+        }
+    }
+    
+    /// Update all enemies (AI, movement, attacks)
+    private func updateEnemies(deltaTime dt: Float) {
+        // Update enemy AI and animation
+        enemyManager.update(deltaTime: dt, playerPosition: characterPosition, terrain: Terrain.shared)
+        
+        // Check if any enemy is attacking the player
+        let enemyHits = enemyManager.checkEnemyAttacks(playerPosition: characterPosition)
+        for (enemy, damage) in enemyHits {
+            // Player takes damage
+            player.takeDamage(damage)
+            
+            // Show damage number on player
+            enemyManager.addDamageNumber(damage, at: characterPosition)
+            
+            print("[Combat] Player hit by \(enemy.type.rawValue) for \(damage) damage! HP: \(player.vitals.currentHP)/\(player.effectiveMaxHP)")
+            
+            // Update HUD
+            Task { @MainActor in
+                hudViewModel?.update()
+            }
+        }
+        
+        // Clean up dead enemies
+        enemyManager.removeDeadEnemies()
+    }
+    
+    /// Project world position to screen position
+    private func worldToScreen(_ worldPos: simd_float3) -> CGPoint? {
+        let vp = projectionMatrix * viewMatrix
+        let clipPos = vp * simd_float4(worldPos.x, worldPos.y, worldPos.z, 1.0)
+        
+        // Behind camera check
+        if clipPos.w <= 0 { return nil }
+        
+        // Normalized device coordinates
+        let ndcX = clipPos.x / clipPos.w
+        let ndcY = clipPos.y / clipPos.w
+        
+        // Screen coordinates (0,0 is top-left in SwiftUI)
+        let screenX = (ndcX + 1) * 0.5 * Float(viewportSize.width)
+        let screenY = (1 - ndcY) * 0.5 * Float(viewportSize.height)  // Flip Y
+        
+        return CGPoint(x: CGFloat(screenX), y: CGFloat(screenY))
+    }
+    
+    /// Update HUD with damage numbers from enemy manager
+    private func updateDamageNumbersDisplay() {
+        let damageNums = enemyManager.damageNumbers
+        
+        Task { @MainActor in
+            for dmgNum in damageNums {
+                if let screenPos = self.worldToScreen(dmgNum.worldPosition) {
+                    hudViewModel?.addDamageNumber(
+                        amount: dmgNum.amount,
+                        screenPosition: screenPos,
+                        isCritical: dmgNum.isCritical,
+                        isHeal: dmgNum.isHeal
+                    )
+                }
+            }
+        }
+        
+        // Clear damage numbers from manager after sending to HUD
+        // (they're now managed by the HUD)
+        enemyManager.damageNumbers.removeAll()
     }
     
     private func updateCamera(deltaTime dt: Float) {
