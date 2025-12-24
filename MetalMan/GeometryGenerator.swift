@@ -4,6 +4,63 @@ import simd
 /// Generates static world geometry meshes
 class GeometryGenerator {
     
+    // MARK: - Placement Tracking
+    
+    /// Represents an occupied area in the world (XZ plane)
+    struct OccupiedArea {
+        let x: Float
+        let z: Float
+        let radius: Float
+        
+        func overlaps(with other: OccupiedArea) -> Bool {
+            let dx = x - other.x
+            let dz = z - other.z
+            let dist = sqrt(dx * dx + dz * dz)
+            return dist < (radius + other.radius)
+        }
+        
+        func overlaps(x: Float, z: Float, radius: Float) -> Bool {
+            let dx = self.x - x
+            let dz = self.z - z
+            let dist = sqrt(dx * dx + dz * dz)
+            return dist < (self.radius + radius)
+        }
+    }
+    
+    /// Shared list of occupied areas - populated during world generation
+    private static var occupiedAreas: [OccupiedArea] = []
+    
+    /// Character spawn exclusion radius
+    private static let spawnExclusionRadius: Float = 8.0
+    
+    /// Check if a position is available for placement
+    static func isPositionClear(x: Float, z: Float, radius: Float) -> Bool {
+        // Check spawn point exclusion (character starts at origin)
+        let distFromSpawn = sqrt(x * x + z * z)
+        if distFromSpawn < spawnExclusionRadius + radius {
+            return false
+        }
+        
+        // Check against all occupied areas
+        for area in occupiedAreas {
+            if area.overlaps(x: x, z: z, radius: radius) {
+                return false
+            }
+        }
+        
+        return true
+    }
+    
+    /// Mark a position as occupied
+    static func markOccupied(x: Float, z: Float, radius: Float) {
+        occupiedAreas.append(OccupiedArea(x: x, z: z, radius: radius))
+    }
+    
+    /// Clear all occupied areas (call before regenerating world)
+    static func clearOccupiedAreas() {
+        occupiedAreas.removeAll()
+    }
+    
     // MARK: - Tangent Calculation Helper
     
     /// Compute tangent vector for a surface given its normal
@@ -224,32 +281,69 @@ class GeometryGenerator {
     
     // MARK: - Tree Meshes
     
+    /// Tree types for variety
+    enum TreeType: Int, CaseIterable {
+        case oak = 0      // Round, full canopy
+        case pine = 1     // Conical evergreen
+        case birch = 2    // Slender with clusters
+        case willow = 3   // Drooping branches
+        case dead = 4     // Bare branches
+    }
+    
     static func makeTreeMeshes(device: MTLDevice) -> (MTLBuffer, Int, [Collider]) {
         var vertices: [TexturedVertex] = []
         var colliders: [Collider] = []
         
         var seed = 1
-        for gridX in stride(from: -90, through: 90, by: 12) {
-            for gridZ in stride(from: -90, through: 90, by: 12) {
-                if abs(gridX) < 12 && abs(gridZ) < 12 { seed += 5; continue }
+        for gridX in stride(from: -90, through: 90, by: 10) {
+            for gridZ in stride(from: -90, through: 90, by: 10) {
+                if abs(gridX) < 12 && abs(gridZ) < 12 { seed += 6; continue }
                 
-                let offsetX = (seededRandom(seed) - 0.5) * 10
-                let offsetZ = (seededRandom(seed + 1) - 0.5) * 10
+                let offsetX = (seededRandom(seed) - 0.5) * 8
+                let offsetZ = (seededRandom(seed + 1) - 0.5) * 8
                 let x = Float(gridX) + offsetX
                 let z = Float(gridZ) + offsetZ
                 
                 // Skip if on a path
-                if isOnPath(x: x, z: z) { seed += 5; continue }
+                if isOnPath(x: x, z: z) { seed += 6; continue }
                 
-                let height = 3.5 + seededRandom(seed + 2) * 3.0
-                let radius = 1.0 + seededRandom(seed + 3) * 1.0
+                let height = 4.0 + seededRandom(seed + 2) * 4.0
+                let radius = 1.2 + seededRandom(seed + 3) * 1.5
                 
-                if seededRandom(seed + 4) < 0.7 {
+                // Calculate occupied radius (trunk + some buffer)
+                let occupiedRadius = radius * 0.3 + 1.0
+                
+                // Check if position is clear
+                if !isPositionClear(x: x, z: z, radius: occupiedRadius) {
+                    seed += 6
+                    continue
+                }
+                
+                if seededRandom(seed + 4) < 0.75 {
                     let terrainY = Terrain.heightAt(x: x, z: z)
                     let pos = simd_float3(x, terrainY, z)
-                    addTree(at: pos, height: height, radius: radius, vertices: &vertices, colliders: &colliders)
+                    
+                    // Select tree type based on location and randomness
+                    let typeRand = seededRandom(seed + 5)
+                    let treeType: TreeType
+                    if typeRand < 0.35 {
+                        treeType = .oak
+                    } else if typeRand < 0.6 {
+                        treeType = .pine
+                    } else if typeRand < 0.8 {
+                        treeType = .birch
+                    } else if typeRand < 0.95 {
+                        treeType = .willow
+                    } else {
+                        treeType = .dead
+                    }
+                    
+                    // Mark position as occupied
+                    markOccupied(x: x, z: z, radius: occupiedRadius)
+                    
+                    addTree(at: pos, height: height, radius: radius, type: treeType, seed: seed, vertices: &vertices, colliders: &colliders)
                 }
-                seed += 5
+                seed += 6
             }
         }
         
@@ -257,21 +351,325 @@ class GeometryGenerator {
         return (buffer, vertices.count, colliders)
     }
     
-    private static func addTree(at pos: simd_float3, height: Float, radius: Float, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
-        let trunkHeight = height * 0.35
-        let trunkRadius = radius * 0.12
+    private static func addTree(at pos: simd_float3, height: Float, radius: Float, type: TreeType, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
+        switch type {
+        case .oak:
+            addOakTree(at: pos, height: height, radius: radius, seed: seed, vertices: &vertices, colliders: &colliders)
+        case .pine:
+            addPineTree(at: pos, height: height, radius: radius, seed: seed, vertices: &vertices, colliders: &colliders)
+        case .birch:
+            addBirchTree(at: pos, height: height, radius: radius, seed: seed, vertices: &vertices, colliders: &colliders)
+        case .willow:
+            addWillowTree(at: pos, height: height, radius: radius, seed: seed, vertices: &vertices, colliders: &colliders)
+        case .dead:
+            addDeadTree(at: pos, height: height, seed: seed, vertices: &vertices, colliders: &colliders)
+        }
+    }
+    
+    // MARK: - Oak Tree (Round, full canopy)
+    
+    private static func addOakTree(at pos: simd_float3, height: Float, radius: Float, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
+        let trunkHeight = height * 0.4
+        let trunkRadius = radius * 0.15
         
-        addCylinder(at: pos, radius: trunkRadius, height: trunkHeight, segments: 8, material: MaterialIndex.treeTrunk.rawValue, vertices: &vertices)
+        // Main trunk with slight taper
+        addTaperedCylinder(at: pos, radiusBottom: trunkRadius, radiusTop: trunkRadius * 0.7, height: trunkHeight, segments: 8, material: MaterialIndex.treeTrunk.rawValue, vertices: &vertices)
         
-        let layerHeights: [Float] = [trunkHeight * 0.8, trunkHeight + height * 0.2, trunkHeight + height * 0.4]
-        let layerRadii: [Float] = [radius, radius * 0.7, radius * 0.4]
-        let coneHeights: [Float] = [height * 0.35, height * 0.3, height * 0.3]
-        
-        for i in 0..<3 {
-            addCone(at: pos + simd_float3(0, layerHeights[i], 0), radius: layerRadii[i], height: coneHeights[i], segments: 8, material: MaterialIndex.foliage.rawValue, vertices: &vertices)
+        // Add main branches from trunk
+        let branchCount = 3 + Int(seededRandom(seed + 10) * 3)
+        for i in 0..<branchCount {
+            let angle = Float(i) / Float(branchCount) * .pi * 2 + seededRandom(seed + 20 + i) * 0.5
+            let branchY = trunkHeight * (0.6 + seededRandom(seed + 30 + i) * 0.3)
+            let branchLen = radius * (0.4 + seededRandom(seed + 40 + i) * 0.3)
+            let branchDir = simd_float3(cos(angle), 0.4, sin(angle))
+            
+            addBranch(from: pos + simd_float3(0, branchY, 0), direction: branchDir, length: branchLen, radius: trunkRadius * 0.4, vertices: &vertices)
         }
         
-        colliders.append(Collider(position: simd_float2(pos.x, pos.z), radius: trunkRadius + 0.3))
+        // Foliage - multiple overlapping spheres for full canopy
+        let canopyCenter = pos + simd_float3(0, trunkHeight + radius * 0.5, 0)
+        
+        // Main central foliage mass
+        addFoliageSphere(at: canopyCenter, radius: radius * 0.9, segments: 10, vertices: &vertices)
+        
+        // Surrounding foliage clusters
+        let clusterCount = 5 + Int(seededRandom(seed + 50) * 4)
+        for i in 0..<clusterCount {
+            let angle = Float(i) / Float(clusterCount) * .pi * 2 + seededRandom(seed + 60 + i) * 0.8
+            let dist = radius * (0.5 + seededRandom(seed + 70 + i) * 0.4)
+            let yOff = (seededRandom(seed + 80 + i) - 0.5) * radius * 0.6
+            let clusterRadius = radius * (0.4 + seededRandom(seed + 90 + i) * 0.3)
+            
+            let clusterPos = canopyCenter + simd_float3(cos(angle) * dist, yOff, sin(angle) * dist)
+            addFoliageSphere(at: clusterPos, radius: clusterRadius, segments: 8, vertices: &vertices)
+        }
+        
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: trunkRadius + 0.3))
+    }
+    
+    // MARK: - Pine Tree (Conical evergreen)
+    
+    private static func addPineTree(at pos: simd_float3, height: Float, radius: Float, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
+        let trunkHeight = height * 0.85
+        let trunkRadius = radius * 0.1
+        
+        // Tall straight trunk
+        addTaperedCylinder(at: pos, radiusBottom: trunkRadius * 1.2, radiusTop: trunkRadius * 0.3, height: trunkHeight, segments: 6, material: MaterialIndex.treeTrunk.rawValue, vertices: &vertices)
+        
+        // Multiple cone layers for pine needle effect
+        let layerCount = 5 + Int(seededRandom(seed + 10) * 3)
+        for i in 0..<layerCount {
+            let t = Float(i) / Float(layerCount - 1)
+            let layerY = height * (0.15 + t * 0.8)
+            let layerRadius = radius * (1.0 - t * 0.7) * (0.9 + seededRandom(seed + 20 + i) * 0.2)
+            let layerHeight = height * 0.25 * (1.0 - t * 0.5)
+            
+            // Slightly offset each layer for natural look
+            let offsetX = (seededRandom(seed + 30 + i) - 0.5) * radius * 0.1
+            let offsetZ = (seededRandom(seed + 40 + i) - 0.5) * radius * 0.1
+            
+            addCone(at: pos + simd_float3(offsetX, layerY, offsetZ), radius: layerRadius, height: layerHeight, segments: 8, material: MaterialIndex.foliage.rawValue, vertices: &vertices)
+        }
+        
+        // Top spire
+        addCone(at: pos + simd_float3(0, height * 0.9, 0), radius: radius * 0.15, height: height * 0.15, segments: 6, material: MaterialIndex.foliage.rawValue, vertices: &vertices)
+        
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: trunkRadius + 0.2))
+    }
+    
+    // MARK: - Birch Tree (Slender with clusters)
+    
+    private static func addBirchTree(at pos: simd_float3, height: Float, radius: Float, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
+        let trunkHeight = height * 0.7
+        let trunkRadius = radius * 0.08
+        
+        // Slender white trunk (slightly curved)
+        addTaperedCylinder(at: pos, radiusBottom: trunkRadius * 1.1, radiusTop: trunkRadius * 0.6, height: trunkHeight, segments: 6, material: MaterialIndex.treeTrunk.rawValue, vertices: &vertices)
+        
+        // Small branches near top
+        let branchCount = 4 + Int(seededRandom(seed + 10) * 4)
+        for i in 0..<branchCount {
+            let angle = Float(i) / Float(branchCount) * .pi * 2 + seededRandom(seed + 15 + i)
+            let branchY = trunkHeight * (0.5 + seededRandom(seed + 20 + i) * 0.4)
+            let branchLen = radius * (0.3 + seededRandom(seed + 25 + i) * 0.4)
+            let upAngle: Float = 0.3 + seededRandom(seed + 30 + i) * 0.4
+            let branchDir = simd_float3(cos(angle), upAngle, sin(angle))
+            
+            addBranch(from: pos + simd_float3(0, branchY, 0), direction: branchDir, length: branchLen, radius: trunkRadius * 0.3, vertices: &vertices)
+            
+            // Add foliage cluster at end of branch
+            let branchEnd = pos + simd_float3(0, branchY, 0) + simd_normalize(branchDir) * branchLen
+            let clusterRadius = radius * (0.3 + seededRandom(seed + 35 + i) * 0.2)
+            addFoliageSphere(at: branchEnd, radius: clusterRadius, segments: 6, vertices: &vertices)
+        }
+        
+        // Top foliage cluster
+        addFoliageSphere(at: pos + simd_float3(0, trunkHeight, 0), radius: radius * 0.5, segments: 8, vertices: &vertices)
+        
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: trunkRadius + 0.2))
+    }
+    
+    // MARK: - Willow Tree (Drooping branches)
+    
+    private static func addWillowTree(at pos: simd_float3, height: Float, radius: Float, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
+        let trunkHeight = height * 0.45
+        let trunkRadius = radius * 0.12
+        
+        // Thick trunk that splits
+        addTaperedCylinder(at: pos, radiusBottom: trunkRadius * 1.3, radiusTop: trunkRadius * 0.8, height: trunkHeight, segments: 8, material: MaterialIndex.treeTrunk.rawValue, vertices: &vertices)
+        
+        // Main canopy sphere
+        let canopyCenter = pos + simd_float3(0, trunkHeight + radius * 0.3, 0)
+        addFoliageSphere(at: canopyCenter, radius: radius * 0.6, segments: 8, vertices: &vertices)
+        
+        // Drooping branch strands
+        let strandCount = 12 + Int(seededRandom(seed + 10) * 8)
+        for i in 0..<strandCount {
+            let angle = Float(i) / Float(strandCount) * .pi * 2 + seededRandom(seed + 20 + i) * 0.3
+            let startRadius = radius * (0.5 + seededRandom(seed + 30 + i) * 0.3)
+            let startY = trunkHeight + radius * (0.2 + seededRandom(seed + 40 + i) * 0.3)
+            
+            let strandStart = pos + simd_float3(cos(angle) * startRadius, startY, sin(angle) * startRadius)
+            let dropLength = radius * (0.8 + seededRandom(seed + 50 + i) * 0.6)
+            
+            // Create drooping strand as series of small foliage spheres
+            let segments = 4 + Int(seededRandom(seed + 60 + i) * 3)
+            for j in 0..<segments {
+                let t = Float(j) / Float(segments)
+                let dropY = -dropLength * t * t  // Parabolic droop
+                let outward = radius * 0.1 * t
+                let spherePos = strandStart + simd_float3(cos(angle) * outward, dropY, sin(angle) * outward)
+                let sphereRadius = radius * 0.12 * (1.0 - t * 0.5)
+                addFoliageSphere(at: spherePos, radius: sphereRadius, segments: 4, vertices: &vertices)
+            }
+        }
+        
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: trunkRadius + 0.3))
+    }
+    
+    // MARK: - Dead Tree (Bare branches)
+    
+    private static func addDeadTree(at pos: simd_float3, height: Float, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
+        let trunkHeight = height * 0.7
+        let trunkRadius = height * 0.05
+        
+        // Gnarled main trunk
+        addTaperedCylinder(at: pos, radiusBottom: trunkRadius * 1.5, radiusTop: trunkRadius * 0.4, height: trunkHeight, segments: 6, material: MaterialIndex.treeTrunk.rawValue, vertices: &vertices)
+        
+        // Bare branches at various heights
+        let branchCount = 4 + Int(seededRandom(seed + 10) * 4)
+        for i in 0..<branchCount {
+            let angle = Float(i) / Float(branchCount) * .pi * 2 + seededRandom(seed + 20 + i) * 0.8
+            let branchY = trunkHeight * (0.3 + seededRandom(seed + 30 + i) * 0.6)
+            let branchLen = height * (0.15 + seededRandom(seed + 40 + i) * 0.2)
+            let upAngle: Float = -0.1 + seededRandom(seed + 50 + i) * 0.5  // Some droop
+            let branchDir = simd_float3(cos(angle), upAngle, sin(angle))
+            
+            addBranch(from: pos + simd_float3(0, branchY, 0), direction: branchDir, length: branchLen, radius: trunkRadius * 0.4, vertices: &vertices)
+            
+            // Sub-branches
+            if seededRandom(seed + 60 + i) > 0.4 {
+                let subAngle = angle + (seededRandom(seed + 70 + i) - 0.5) * 1.0
+                let subLen = branchLen * 0.5
+                let branchEnd = pos + simd_float3(0, branchY, 0) + simd_normalize(branchDir) * branchLen * 0.7
+                let subDir = simd_float3(cos(subAngle), upAngle - 0.2, sin(subAngle))
+                addBranch(from: branchEnd, direction: subDir, length: subLen, radius: trunkRadius * 0.2, vertices: &vertices)
+            }
+        }
+        
+        // Broken top
+        if seededRandom(seed + 80) > 0.5 {
+            let topPos = pos + simd_float3(0, trunkHeight, 0)
+            let breakAngle = seededRandom(seed + 90) * .pi * 2
+            let breakDir = simd_float3(cos(breakAngle), 0.3, sin(breakAngle))
+            addBranch(from: topPos, direction: breakDir, length: height * 0.1, radius: trunkRadius * 0.5, vertices: &vertices)
+        }
+        
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: trunkRadius + 0.2))
+    }
+    
+    // MARK: - Tree Helper Functions
+    
+    private static func addTaperedCylinder(at pos: simd_float3, radiusBottom: Float, radiusTop: Float, height: Float, segments: Int, material: UInt32, vertices: inout [TexturedVertex]) {
+        let angleStep = Float.pi * 2 / Float(segments)
+        
+        for i in 0..<segments {
+            let angle1 = Float(i) * angleStep
+            let angle2 = Float(i + 1) * angleStep
+            
+            let cos1 = cos(angle1), sin1 = sin(angle1)
+            let cos2 = cos(angle2), sin2 = sin(angle2)
+            
+            let b1 = pos + simd_float3(cos1 * radiusBottom, 0, sin1 * radiusBottom)
+            let b2 = pos + simd_float3(cos2 * radiusBottom, 0, sin2 * radiusBottom)
+            let t1 = pos + simd_float3(cos1 * radiusTop, height, sin1 * radiusTop)
+            let t2 = pos + simd_float3(cos2 * radiusTop, height, sin2 * radiusTop)
+            
+            let n1 = simd_normalize(simd_float3(cos1, (radiusBottom - radiusTop) / height, sin1))
+            let n2 = simd_normalize(simd_float3(cos2, (radiusBottom - radiusTop) / height, sin2))
+            
+            let u1 = Float(i) / Float(segments)
+            let u2 = Float(i + 1) / Float(segments)
+            
+            // Two triangles per segment
+            vertices.append(TexturedVertex(position: b1, normal: n1, texCoord: simd_float2(u1, 0), materialIndex: material))
+            vertices.append(TexturedVertex(position: t1, normal: n1, texCoord: simd_float2(u1, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: t2, normal: n2, texCoord: simd_float2(u2, 1), materialIndex: material))
+            
+            vertices.append(TexturedVertex(position: b1, normal: n1, texCoord: simd_float2(u1, 0), materialIndex: material))
+            vertices.append(TexturedVertex(position: t2, normal: n2, texCoord: simd_float2(u2, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: b2, normal: n2, texCoord: simd_float2(u2, 0), materialIndex: material))
+        }
+    }
+    
+    private static func addBranch(from start: simd_float3, direction: simd_float3, length: Float, radius: Float, vertices: inout [TexturedVertex]) {
+        let dir = simd_normalize(direction)
+        let end = start + dir * length
+        
+        // Create a simple tapered cylinder along the direction
+        let segments = 4
+        let angleStep = Float.pi * 2 / Float(segments)
+        
+        // Find perpendicular vectors for the branch cross-section
+        var up = simd_float3(0, 1, 0)
+        if abs(simd_dot(dir, up)) > 0.9 {
+            up = simd_float3(1, 0, 0)
+        }
+        let right = simd_normalize(simd_cross(dir, up))
+        let forward = simd_normalize(simd_cross(right, dir))
+        
+        for i in 0..<segments {
+            let angle1 = Float(i) * angleStep
+            let angle2 = Float(i + 1) * angleStep
+            
+            let offset1 = right * cos(angle1) + forward * sin(angle1)
+            let offset2 = right * cos(angle2) + forward * sin(angle2)
+            
+            let b1 = start + offset1 * radius
+            let b2 = start + offset2 * radius
+            let t1 = end + offset1 * radius * 0.3
+            let t2 = end + offset2 * radius * 0.3
+            
+            let n1 = simd_normalize(offset1)
+            let n2 = simd_normalize(offset2)
+            
+            vertices.append(TexturedVertex(position: b1, normal: n1, texCoord: simd_float2(0, 0), materialIndex: MaterialIndex.treeTrunk.rawValue))
+            vertices.append(TexturedVertex(position: t1, normal: n1, texCoord: simd_float2(0, 1), materialIndex: MaterialIndex.treeTrunk.rawValue))
+            vertices.append(TexturedVertex(position: t2, normal: n2, texCoord: simd_float2(1, 1), materialIndex: MaterialIndex.treeTrunk.rawValue))
+            
+            vertices.append(TexturedVertex(position: b1, normal: n1, texCoord: simd_float2(0, 0), materialIndex: MaterialIndex.treeTrunk.rawValue))
+            vertices.append(TexturedVertex(position: t2, normal: n2, texCoord: simd_float2(1, 1), materialIndex: MaterialIndex.treeTrunk.rawValue))
+            vertices.append(TexturedVertex(position: b2, normal: n2, texCoord: simd_float2(1, 0), materialIndex: MaterialIndex.treeTrunk.rawValue))
+        }
+    }
+    
+    private static func addFoliageSphere(at center: simd_float3, radius: Float, segments: Int, vertices: inout [TexturedVertex]) {
+        // Create an icosphere-like shape for foliage
+        let latSegments = segments
+        let lonSegments = segments * 2
+        
+        for lat in 0..<latSegments {
+            let theta1 = Float(lat) / Float(latSegments) * .pi
+            let theta2 = Float(lat + 1) / Float(latSegments) * .pi
+            
+            for lon in 0..<lonSegments {
+                let phi1 = Float(lon) / Float(lonSegments) * .pi * 2
+                let phi2 = Float(lon + 1) / Float(lonSegments) * .pi * 2
+                
+                // Four corners of this quad
+                let p1 = spherePoint(center: center, radius: radius, theta: theta1, phi: phi1)
+                let p2 = spherePoint(center: center, radius: radius, theta: theta2, phi: phi1)
+                let p3 = spherePoint(center: center, radius: radius, theta: theta2, phi: phi2)
+                let p4 = spherePoint(center: center, radius: radius, theta: theta1, phi: phi2)
+                
+                let n1 = simd_normalize(p1 - center)
+                let n2 = simd_normalize(p2 - center)
+                let n3 = simd_normalize(p3 - center)
+                let n4 = simd_normalize(p4 - center)
+                
+                let u1 = Float(lon) / Float(lonSegments)
+                let u2 = Float(lon + 1) / Float(lonSegments)
+                let v1 = Float(lat) / Float(latSegments)
+                let v2 = Float(lat + 1) / Float(latSegments)
+                
+                // Two triangles
+                vertices.append(TexturedVertex(position: p1, normal: n1, texCoord: simd_float2(u1, v1), materialIndex: MaterialIndex.foliage.rawValue))
+                vertices.append(TexturedVertex(position: p2, normal: n2, texCoord: simd_float2(u1, v2), materialIndex: MaterialIndex.foliage.rawValue))
+                vertices.append(TexturedVertex(position: p3, normal: n3, texCoord: simd_float2(u2, v2), materialIndex: MaterialIndex.foliage.rawValue))
+                
+                vertices.append(TexturedVertex(position: p1, normal: n1, texCoord: simd_float2(u1, v1), materialIndex: MaterialIndex.foliage.rawValue))
+                vertices.append(TexturedVertex(position: p3, normal: n3, texCoord: simd_float2(u2, v2), materialIndex: MaterialIndex.foliage.rawValue))
+                vertices.append(TexturedVertex(position: p4, normal: n4, texCoord: simd_float2(u2, v1), materialIndex: MaterialIndex.foliage.rawValue))
+            }
+        }
+    }
+    
+    private static func spherePoint(center: simd_float3, radius: Float, theta: Float, phi: Float) -> simd_float3 {
+        return center + simd_float3(
+            radius * sin(theta) * cos(phi),
+            radius * cos(theta),
+            radius * sin(theta) * sin(phi)
+        )
     }
     
     // MARK: - Rock Meshes
@@ -293,17 +691,35 @@ class GeometryGenerator {
                 if isOnPath(x: x, z: z) { seed += 4; continue }
                 
                 let size = 0.6 + seededRandom(seed + 2) * 0.8
+                let occupiedRadius = size * 1.2
+                
+                // Check if position is clear
+                if !isPositionClear(x: x, z: z, radius: occupiedRadius) {
+                    seed += 4
+                    continue
+                }
+                
                 let chance = seededRandom(seed + 3)
                 
                 if chance < 0.5 {
                     let terrainY = Terrain.heightAt(x: x, z: z)
                     let pos = simd_float3(x, terrainY, z)
+                    
+                    // Mark position as occupied
+                    markOccupied(x: x, z: z, radius: occupiedRadius)
+                    
                     addRock(at: pos, size: size, vertices: &vertices, colliders: &colliders)
                     
+                    // Add cluster rock only if that position is also clear
                     if chance < 0.25 {
                         let x2 = pos.x + size * 1.2
                         let z2 = pos.z + size * 0.3
-                        addRock(at: simd_float3(x2, Terrain.heightAt(x: x2, z: z2), z2), size: size * 0.7, vertices: &vertices, colliders: &colliders)
+                        let clusterRadius = size * 0.7 * 1.2
+                        
+                        if isPositionClear(x: x2, z: z2, radius: clusterRadius) {
+                            markOccupied(x: x2, z: z2, radius: clusterRadius)
+                            addRock(at: simd_float3(x2, Terrain.heightAt(x: x2, z: z2), z2), size: size * 0.7, vertices: &vertices, colliders: &colliders)
+                        }
                     }
                 }
                 seed += 4
@@ -348,7 +764,8 @@ class GeometryGenerator {
             vertices.append(TexturedVertex(position: corners[c], normal: normal, texCoord: simd_float2(0.5, 1), materialIndex: MaterialIndex.rock.rawValue))
         }
         
-        colliders.append(Collider(position: simd_float2(pos.x, pos.z), radius: s))
+        // Climbable collider - character can walk on top
+        colliders.append(Collider.climbable(x: pos.x, z: pos.z, radius: s, height: h, baseY: pos.y))
     }
     
     // MARK: - Structure Meshes (Houses, Ruins, Bridges)
@@ -357,21 +774,56 @@ class GeometryGenerator {
         var vertices: [TexturedVertex] = []
         var colliders: [Collider] = []
         
-        // Small houses
-        addHouse(at: simd_float3(25, 0, 30), size: simd_float3(6, 4, 5), roofHeight: 2.5, vertices: &vertices, colliders: &colliders)
-        addHouse(at: simd_float3(-30, 0, 25), size: simd_float3(5, 3.5, 6), roofHeight: 2, vertices: &vertices, colliders: &colliders)
-        addHouse(at: simd_float3(40, 0, -35), size: simd_float3(7, 4.5, 6), roofHeight: 3, vertices: &vertices, colliders: &colliders)
+        // Structure definitions with positions and sizes
+        let houses: [(pos: simd_float3, size: simd_float3, roofHeight: Float)] = [
+            (simd_float3(25, 0, 30), simd_float3(6, 4, 5), 2.5),
+            (simd_float3(-30, 0, 25), simd_float3(5, 3.5, 6), 2),
+            (simd_float3(40, 0, -35), simd_float3(7, 4.5, 6), 3)
+        ]
+        
+        for house in houses {
+            let occupiedRadius = max(house.size.x, house.size.z) / 2 + 1.0
+            if isPositionClear(x: house.pos.x, z: house.pos.z, radius: occupiedRadius) {
+                markOccupied(x: house.pos.x, z: house.pos.z, radius: occupiedRadius)
+                addHouse(at: house.pos, size: house.size, roofHeight: house.roofHeight, vertices: &vertices, colliders: &colliders)
+            }
+        }
         
         // Ruins
-        addRuin(at: simd_float3(-45, 0, -40), size: simd_float3(8, 3, 10), vertices: &vertices, colliders: &colliders)
-        addRuin(at: simd_float3(55, 0, 50), size: simd_float3(6, 2.5, 6), vertices: &vertices, colliders: &colliders)
+        let ruins: [(pos: simd_float3, size: simd_float3)] = [
+            (simd_float3(-45, 0, -40), simd_float3(8, 3, 10)),
+            (simd_float3(55, 0, 50), simd_float3(6, 2.5, 6))
+        ]
         
-        // Bridges over low terrain areas
-        addBridge(from: simd_float3(-5, 0, 35), to: simd_float3(5, 0, 35), width: 3, vertices: &vertices, colliders: &colliders)
-        addBridge(from: simd_float3(35, 0, -5), to: simd_float3(35, 0, 5), width: 2.5, vertices: &vertices, colliders: &colliders)
+        for ruin in ruins {
+            let occupiedRadius = max(ruin.size.x, ruin.size.z) / 2 + 1.0
+            if isPositionClear(x: ruin.pos.x, z: ruin.pos.z, radius: occupiedRadius) {
+                markOccupied(x: ruin.pos.x, z: ruin.pos.z, radius: occupiedRadius)
+                addRuin(at: ruin.pos, size: ruin.size, vertices: &vertices, colliders: &colliders)
+            }
+        }
+        
+        // Bridges over low terrain areas (bridges don't need spawn exclusion check as they're far from origin)
+        let bridges: [(from: simd_float3, to: simd_float3, width: Float)] = [
+            (simd_float3(-5, 0, 35), simd_float3(5, 0, 35), 3),
+            (simd_float3(35, 0, -5), simd_float3(35, 0, 5), 2.5)
+        ]
+        
+        for bridge in bridges {
+            // Mark bridge endpoints as occupied
+            let bridgeRadius = bridge.width / 2 + 0.5
+            markOccupied(x: bridge.from.x, z: bridge.from.z, radius: bridgeRadius)
+            markOccupied(x: bridge.to.x, z: bridge.to.z, radius: bridgeRadius)
+            addBridge(from: bridge.from, to: bridge.to, width: bridge.width, vertices: &vertices, colliders: &colliders)
+        }
         
         // Watchtower
-        addWatchtower(at: simd_float3(-60, 0, 60), vertices: &vertices, colliders: &colliders)
+        let watchtowerPos = simd_float3(-60, 0, 60)
+        let watchtowerRadius: Float = 4.0
+        if isPositionClear(x: watchtowerPos.x, z: watchtowerPos.z, radius: watchtowerRadius) {
+            markOccupied(x: watchtowerPos.x, z: watchtowerPos.z, radius: watchtowerRadius)
+            addWatchtower(at: watchtowerPos, vertices: &vertices, colliders: &colliders)
+        }
         
         let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
         return (buffer, vertices.count, colliders)
@@ -425,8 +877,8 @@ class GeometryGenerator {
         vertices.append(TexturedVertex(position: backPeak, normal: roofNormalRight, texCoord: simd_float2(0.5, 0), materialIndex: MaterialIndex.roof.rawValue))
         vertices.append(TexturedVertex(position: frontPeak, normal: roofNormalRight, texCoord: simd_float2(0.5, 0), materialIndex: MaterialIndex.roof.rawValue))
         
-        // Collision
-        colliders.append(Collider(position: simd_float2(basePos.x, basePos.z), radius: max(hw, hd) + 0.5))
+        // Collision - houses are solid, can't walk inside
+        colliders.append(Collider.circle(x: basePos.x, z: basePos.z, radius: max(hw, hd) + 0.5))
     }
     
     private static func addRuin(at pos: simd_float3, size: simd_float3, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
@@ -440,34 +892,48 @@ class GeometryGenerator {
         // Broken walls - varying heights
         var seed = Int(pos.x * 100 + pos.z * 10)
         
-        // Back wall (mostly intact)
+        // Back wall (mostly intact) - runs along X axis at +Z
         let backHeight = size.y * (0.7 + seededRandom(seed) * 0.3)
-        addBox(at: basePos + simd_float3(0, backHeight / 2, hd - wallThickness / 2), 
+        let backWallPos = basePos + simd_float3(0, backHeight / 2, hd - wallThickness / 2)
+        addBox(at: backWallPos, 
                size: simd_float3(size.x, backHeight, wallThickness), 
                material: MaterialIndex.stoneWall.rawValue, vertices: &vertices)
+        // Box collider for back wall (half extents)
+        colliders.append(Collider.box(x: backWallPos.x, z: backWallPos.z, 
+                                      halfWidth: size.x / 2, halfDepth: wallThickness / 2))
         seed += 1
         
-        // Left wall (broken)
+        // Left wall (broken) - runs along Z axis at -X
         let leftHeight = size.y * (0.3 + seededRandom(seed) * 0.4)
-        addBox(at: basePos + simd_float3(-hw + wallThickness / 2, leftHeight / 2, 0), 
-               size: simd_float3(wallThickness, leftHeight, size.z * 0.6), 
+        let leftWallLength = size.z * 0.6
+        let leftWallPos = basePos + simd_float3(-hw + wallThickness / 2, leftHeight / 2, 0)
+        addBox(at: leftWallPos, 
+               size: simd_float3(wallThickness, leftHeight, leftWallLength), 
                material: MaterialIndex.stoneWall.rawValue, vertices: &vertices)
+        // Box collider for left wall
+        colliders.append(Collider.box(x: leftWallPos.x, z: leftWallPos.z, 
+                                      halfWidth: wallThickness / 2, halfDepth: leftWallLength / 2))
         seed += 1
         
-        // Right wall (partial)
+        // Right wall (partial) - runs along Z axis at +X
         let rightHeight = size.y * (0.5 + seededRandom(seed) * 0.3)
-        addBox(at: basePos + simd_float3(hw - wallThickness / 2, rightHeight / 2, hd * 0.3), 
-               size: simd_float3(wallThickness, rightHeight, size.z * 0.5), 
+        let rightWallLength = size.z * 0.5
+        let rightWallPos = basePos + simd_float3(hw - wallThickness / 2, rightHeight / 2, hd * 0.3)
+        addBox(at: rightWallPos, 
+               size: simd_float3(wallThickness, rightHeight, rightWallLength), 
                material: MaterialIndex.stoneWall.rawValue, vertices: &vertices)
+        // Box collider for right wall
+        colliders.append(Collider.box(x: rightWallPos.x, z: rightWallPos.z, 
+                                      halfWidth: wallThickness / 2, halfDepth: rightWallLength / 2))
         
-        // Some rubble rocks
+        // Some rubble rocks (climbable)
         for i in 0..<4 {
             let rx = basePos.x + (seededRandom(seed + i * 2) - 0.5) * size.x * 0.8
             let rz = basePos.z + (seededRandom(seed + i * 2 + 1) - 0.5) * size.z * 0.8
             addRock(at: simd_float3(rx, terrainY, rz), size: 0.3 + seededRandom(seed + i) * 0.3, vertices: &vertices, colliders: &colliders)
         }
         
-        colliders.append(Collider(position: simd_float2(basePos.x, basePos.z), radius: max(hw, hd)))
+        // No big circular collider - walls have individual colliders so player can walk inside
     }
     
     private static func addBridge(from start: simd_float3, to end: simd_float3, width: Float, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
@@ -538,7 +1004,7 @@ class GeometryGenerator {
         // Roof cone
         addCone(at: simd_float3(basePos.x, basePos.y + towerHeight, basePos.z), radius: towerRadius + 0.3, height: 2.5, segments: 8, material: MaterialIndex.roof.rawValue, vertices: &vertices)
         
-        colliders.append(Collider(position: simd_float2(basePos.x, basePos.z), radius: towerRadius + 0.5))
+        colliders.append(Collider.circle(x: basePos.x, z: basePos.z, radius: towerRadius + 0.5))
     }
     
     // MARK: - Pole Meshes
@@ -547,24 +1013,42 @@ class GeometryGenerator {
         var vertices: [TexturedVertex] = []
         var colliders: [Collider] = []
         
-        // Center marker
-        let centerY = Terrain.heightAt(x: 0, z: 0)
-        addPole(at: simd_float3(0, centerY, 0), height: 5.0, radius: 0.2, vertices: &vertices, colliders: &colliders)
+        // No center marker - keep spawn area clear
         
         // Boundary markers
         let positions: [(Float, Float)] = [(-95, -95), (95, -95), (-95, 95), (95, 95)]
         for (x, z) in positions {
-            let y = Terrain.heightAt(x: x, z: z)
-            addPole(at: simd_float3(x, y, z), height: 4.0, radius: 0.15, vertices: &vertices, colliders: &colliders)
+            let poleRadius: Float = 0.15
+            // Check if position is clear (boundary markers probably won't conflict, but check anyway)
+            if isPositionClear(x: x, z: z, radius: poleRadius + 0.5) {
+                markOccupied(x: x, z: z, radius: poleRadius + 0.5)
+                let y = Terrain.heightAt(x: x, z: z)
+                addPole(at: simd_float3(x, y, z), height: 4.0, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+            }
         }
         
         // Path markers along main paths
         for i in stride(from: -40, through: 40, by: 20) {
             if i != 0 {
-                let y1 = Terrain.heightAt(x: Float(i), z: 0)
-                let y2 = Terrain.heightAt(x: 0, z: Float(i))
-                addPole(at: simd_float3(Float(i), y1, 2.5), height: 2.5, radius: 0.1, vertices: &vertices, colliders: &colliders)
-                addPole(at: simd_float3(2.5, y2, Float(i)), height: 2.5, radius: 0.1, vertices: &vertices, colliders: &colliders)
+                let x1 = Float(i)
+                let z1: Float = 2.5
+                let x2: Float = 2.5
+                let z2 = Float(i)
+                let poleRadius: Float = 0.1
+                
+                // Check first pole position
+                if isPositionClear(x: x1, z: z1, radius: poleRadius + 0.5) {
+                    markOccupied(x: x1, z: z1, radius: poleRadius + 0.5)
+                    let y1 = Terrain.heightAt(x: x1, z: z1)
+                    addPole(at: simd_float3(x1, y1, z1), height: 2.5, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                }
+                
+                // Check second pole position
+                if isPositionClear(x: x2, z: z2, radius: poleRadius + 0.5) {
+                    markOccupied(x: x2, z: z2, radius: poleRadius + 0.5)
+                    let y2 = Terrain.heightAt(x: x2, z: z2)
+                    addPole(at: simd_float3(x2, y2, z2), height: 2.5, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                }
             }
         }
         
@@ -590,7 +1074,7 @@ class GeometryGenerator {
             vertices.append(TexturedVertex(position: p2, normal: topNormal, texCoord: simd_float2(1, 0), materialIndex: MaterialIndex.pole.rawValue))
         }
         
-        colliders.append(Collider(position: simd_float2(pos.x, pos.z), radius: radius + 0.1))
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: radius + 0.1))
     }
     
     // MARK: - Primitive Helpers

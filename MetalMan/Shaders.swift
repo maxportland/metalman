@@ -59,6 +59,13 @@ struct LitUniforms {
     float3 cameraPosition;
     float ambientIntensity;
     float diffuseIntensity;
+    
+    // Sky colors for day/night cycle
+    float3 skyColorTop;
+    float3 skyColorHorizon;
+    float3 sunColor;
+    float timeOfDay;          // 0-24 hours
+    float3 padding2;          // Alignment padding
 };
 
 vertex LitVertexOut vertex_lit(TexturedVertexIn in [[stage_in]],
@@ -136,9 +143,67 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
         default: texColor = float4(1, 0, 1, 1); break;
     }
     
-    // Skybox doesn't receive lighting or shadows
+    // Skybox - dynamic sky colors with stars at night
     if (in.materialIndex == 10) {
-        return texColor;
+        // Calculate sky gradient based on vertical position
+        float3 viewDir = normalize(in.worldPosition - uniforms.cameraPosition);
+        float heightFactor = viewDir.y * 0.5 + 0.5; // 0 at horizon, 1 at zenith
+        heightFactor = clamp(heightFactor, 0.0, 1.0);
+        
+        // Interpolate between horizon and top colors
+        float3 skyColor = mix(uniforms.skyColorHorizon, uniforms.skyColorTop, heightFactor);
+        
+        // Add sun/moon glow near light direction
+        float3 lightDir = normalize(-uniforms.lightDirection);
+        float sunAlignment = dot(viewDir, lightDir);
+        if (sunAlignment > 0.0) {
+            // Sun disc
+            float sunDisc = smoothstep(0.995, 0.999, sunAlignment);
+            skyColor = mix(skyColor, uniforms.sunColor, sunDisc);
+            
+            // Sun glow/halo
+            float sunGlow = pow(max(0.0, sunAlignment), 8.0) * 0.3;
+            skyColor += uniforms.sunColor * sunGlow;
+        }
+        
+        // Add stars at night (when sun intensity is low)
+        float nightFactor = 1.0 - smoothstep(5.0, 7.0, uniforms.timeOfDay) + smoothstep(18.0, 20.0, uniforms.timeOfDay);
+        nightFactor = clamp(nightFactor, 0.0, 1.0);
+        
+        if (nightFactor > 0.1) {
+            // Procedural stars using noise
+            float2 starUV = in.texCoord * 200.0;
+            float starNoise = fract(sin(dot(floor(starUV), float2(12.9898, 78.233))) * 43758.5453);
+            
+            // Only show some as stars (threshold)
+            if (starNoise > 0.98) {
+                // Twinkle effect based on time
+                float twinkle = sin(uniforms.timeOfDay * 50.0 + starNoise * 100.0) * 0.5 + 0.5;
+                float starBrightness = (starNoise - 0.98) * 50.0 * (0.5 + twinkle * 0.5);
+                starBrightness *= nightFactor * heightFactor; // Fade near horizon
+                skyColor += float3(starBrightness);
+            }
+            
+            // Add moon (opposite side from sun at night)
+            if (uniforms.timeOfDay < 6.0 || uniforms.timeOfDay > 18.0) {
+                float3 moonDir = normalize(float3(-lightDir.x, abs(lightDir.y), -lightDir.z));
+                float moonAlignment = dot(viewDir, moonDir);
+                if (moonAlignment > 0.99) {
+                    float moonDisc = smoothstep(0.99, 0.995, moonAlignment);
+                    skyColor = mix(skyColor, float3(0.9, 0.92, 1.0), moonDisc * nightFactor);
+                }
+                // Moon glow
+                float moonGlow = pow(max(0.0, moonAlignment), 16.0) * 0.15 * nightFactor;
+                skyColor += float3(0.6, 0.65, 0.8) * moonGlow;
+            }
+        }
+        
+        // Add some clouds (from procedural texture, modulated)
+        float4 cloudTex = skyTex.sample(texSampler, in.texCoord);
+        float cloudAmount = cloudTex.r * 0.3 * (1.0 - nightFactor * 0.7); // Less visible at night
+        skyColor = mix(skyColor, float3(1.0), cloudAmount * heightFactor);
+        
+        return float4(skyColor, 1.0);
     }
     
     // Build TBN (Tangent-Bitangent-Normal) matrix for normal mapping

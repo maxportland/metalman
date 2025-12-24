@@ -86,9 +86,117 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let cameraHeight: Float = 8.0
     private let cameraDistance: Float = 10.0
     
-    private let lightDirection = simd_normalize(simd_float3(-0.5, -0.8, -0.3))
-    private let ambientIntensity: Float = 0.35
-    private let diffuseIntensity: Float = 0.65
+    // MARK: - Day/Night Cycle
+    
+    /// Time of day in hours (0-24), cycles continuously
+    private var timeOfDay: Float = 10.0  // Start at 10 AM
+    
+    /// Speed of day/night cycle (1.0 = 24 minutes per full day, higher = faster)
+    private let dayNightSpeed: Float = 0.5
+    
+    /// Computed sun direction based on time of day
+    private var sunDirection: simd_float3 {
+        // Sun rises at 6:00 (east), peaks at 12:00 (overhead), sets at 18:00 (west)
+        let sunAngle = (timeOfDay - 6.0) / 12.0 * .pi  // 0 at sunrise, pi at sunset
+        
+        // Sun path: rises in east (+X), travels overhead, sets in west (-X)
+        let x = -cos(sunAngle)  // East to west
+        let y = -abs(sin(sunAngle))  // Always pointing down from above
+        let z: Float = -0.3  // Slight offset for interesting shadows
+        
+        return simd_normalize(simd_float3(x, y, z))
+    }
+    
+    /// Is it currently daytime?
+    private var isDaytime: Bool {
+        return timeOfDay >= 6.0 && timeOfDay < 18.0
+    }
+    
+    /// Sun intensity based on time (0 at night, 1 at noon)
+    private var sunIntensity: Float {
+        if timeOfDay < 5.0 || timeOfDay > 19.0 {
+            return 0.0  // Full night
+        } else if timeOfDay < 6.0 {
+            return (timeOfDay - 5.0)  // Dawn
+        } else if timeOfDay > 18.0 {
+            return 1.0 - (timeOfDay - 18.0)  // Dusk
+        } else {
+            // Day - peak at noon
+            let noonDistance = abs(timeOfDay - 12.0) / 6.0
+            return 1.0 - noonDistance * 0.3
+        }
+    }
+    
+    /// Ambient intensity based on time of day
+    private var ambientIntensity: Float {
+        let baseAmbient: Float = 0.15
+        let dayAmbient: Float = 0.35
+        return baseAmbient + (dayAmbient - baseAmbient) * sunIntensity
+    }
+    
+    /// Diffuse (sun) intensity based on time of day
+    private var diffuseIntensity: Float {
+        return 0.65 * sunIntensity
+    }
+    
+    /// Sky color parameters for current time
+    private var skyColors: (top: simd_float3, horizon: simd_float3, sun: simd_float3) {
+        if timeOfDay < 5.0 || timeOfDay >= 20.0 {
+            // Night
+            return (
+                top: simd_float3(0.02, 0.02, 0.08),      // Deep blue-black
+                horizon: simd_float3(0.05, 0.05, 0.12),  // Slightly lighter
+                sun: simd_float3(0.8, 0.85, 1.0)         // Moonlight color
+            )
+        } else if timeOfDay < 6.0 {
+            // Dawn (5-6)
+            let t = timeOfDay - 5.0
+            return (
+                top: simd_mix(simd_float3(0.02, 0.02, 0.08), simd_float3(0.2, 0.3, 0.5), simd_float3(repeating: t)),
+                horizon: simd_mix(simd_float3(0.05, 0.05, 0.12), simd_float3(0.9, 0.5, 0.3), simd_float3(repeating: t)),
+                sun: simd_float3(1.0, 0.6, 0.3)  // Orange sunrise
+            )
+        } else if timeOfDay < 8.0 {
+            // Early morning (6-8)
+            let t = (timeOfDay - 6.0) / 2.0
+            return (
+                top: simd_mix(simd_float3(0.2, 0.3, 0.5), simd_float3(0.3, 0.5, 0.9), simd_float3(repeating: t)),
+                horizon: simd_mix(simd_float3(0.9, 0.5, 0.3), simd_float3(0.6, 0.7, 0.9), simd_float3(repeating: t)),
+                sun: simd_mix(simd_float3(1.0, 0.6, 0.3), simd_float3(1.0, 0.95, 0.8), simd_float3(repeating: t))
+            )
+        } else if timeOfDay < 17.0 {
+            // Day (8-17)
+            return (
+                top: simd_float3(0.3, 0.5, 0.9),         // Blue sky
+                horizon: simd_float3(0.6, 0.7, 0.9),     // Pale blue
+                sun: simd_float3(1.0, 0.95, 0.85)        // Warm white sunlight
+            )
+        } else if timeOfDay < 18.0 {
+            // Late afternoon (17-18)
+            let t = timeOfDay - 17.0
+            return (
+                top: simd_mix(simd_float3(0.3, 0.5, 0.9), simd_float3(0.4, 0.3, 0.5), simd_float3(repeating: t)),
+                horizon: simd_mix(simd_float3(0.6, 0.7, 0.9), simd_float3(0.95, 0.6, 0.4), simd_float3(repeating: t)),
+                sun: simd_float3(1.0, 0.5, 0.2)  // Orange sunset
+            )
+        } else if timeOfDay < 19.0 {
+            // Dusk (18-19)
+            let t = timeOfDay - 18.0
+            return (
+                top: simd_mix(simd_float3(0.4, 0.3, 0.5), simd_float3(0.1, 0.08, 0.2), simd_float3(repeating: t)),
+                horizon: simd_mix(simd_float3(0.95, 0.6, 0.4), simd_float3(0.3, 0.15, 0.2), simd_float3(repeating: t)),
+                sun: simd_float3(0.9, 0.3, 0.2)  // Deep red sunset
+            )
+        } else {
+            // Twilight (19-20)
+            let t = timeOfDay - 19.0
+            return (
+                top: simd_mix(simd_float3(0.1, 0.08, 0.2), simd_float3(0.02, 0.02, 0.08), simd_float3(repeating: t)),
+                horizon: simd_mix(simd_float3(0.3, 0.15, 0.2), simd_float3(0.05, 0.05, 0.12), simd_float3(repeating: t)),
+                sun: simd_float3(0.8, 0.85, 1.0)  // Moonlight
+            )
+        }
+    }
     
     // MARK: - Matrices & Viewport
     
@@ -192,29 +300,37 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Create geometry
         var allColliders: [Collider] = []
         
+        // Clear any previous placement tracking
+        GeometryGenerator.clearOccupiedAreas()
+        
         (gridLineBuffer, gridLineCount) = GeometryGenerator.makeGridLines(device: device)
         (groundVertexBuffer, groundVertexCount) = GeometryGenerator.makeGroundMesh(device: device)
         (skyboxVertexBuffer, skyboxVertexCount) = GeometryGenerator.makeSkybox(device: device)
         
+        // Generate objects in order of priority (largest first to ensure they get placed)
+        // 1. Structures first (houses, ruins, towers)
+        let structureResult = GeometryGenerator.makeStructureMeshes(device: device)
+        structureVertexBuffer = structureResult.0
+        structureVertexCount = structureResult.1
+        allColliders.append(contentsOf: structureResult.2)
+        
+        // 2. Trees second (medium-large objects)
         let treeResult = GeometryGenerator.makeTreeMeshes(device: device)
         treeVertexBuffer = treeResult.0
         treeVertexCount = treeResult.1
         allColliders.append(contentsOf: treeResult.2)
         
+        // 3. Rocks third (medium objects)
         let rockResult = GeometryGenerator.makeRockMeshes(device: device)
         rockVertexBuffer = rockResult.0
         rockVertexCount = rockResult.1
         allColliders.append(contentsOf: rockResult.2)
         
+        // 4. Poles last (smallest objects)
         let poleResult = GeometryGenerator.makePoleMeshes(device: device)
         poleVertexBuffer = poleResult.0
         poleVertexCount = poleResult.1
         allColliders.append(contentsOf: poleResult.2)
-        
-        let structureResult = GeometryGenerator.makeStructureMeshes(device: device)
-        structureVertexBuffer = structureResult.0
-        structureVertexCount = structureResult.1
-        allColliders.append(contentsOf: structureResult.2)
         
         self.colliders = allColliders
         
@@ -343,7 +459,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     private func updateLightMatrix() {
-        let lightPos = -lightDirection * 80
+        // Use sun direction for daytime, fixed moon direction for nighttime
+        let lightDir = isDaytime ? sunDirection : simd_normalize(simd_float3(0.3, -0.8, 0.2))
+        let lightPos = -lightDir * 80
         let lightTarget = simd_float3(0, 0, 0)
         let lightUp = simd_float3(0, 1, 0)
         
@@ -351,6 +469,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         let lightProj = orthographicRH(left: -120, right: 120, bottom: -120, top: 120, near: 1, far: 200)
         
         lightViewProjectionMatrix = lightProj * lightView
+    }
+    
+    private func updateTimeOfDay(deltaTime: Float) {
+        // Advance time (dayNightSpeed controls how fast the cycle is)
+        // At speed 1.0, full day takes 24 minutes real time
+        timeOfDay += deltaTime * dayNightSpeed / 60.0
+        
+        // Wrap around at 24 hours
+        if timeOfDay >= 24.0 {
+            timeOfDay -= 24.0
+        }
     }
     
     // MARK: - MTKViewDelegate
@@ -380,9 +509,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         var dt = Float(now - lastFrameTime)
         dt = min(max(dt, 0.0), 0.1)
         
+        // Update day/night cycle
+        updateTimeOfDay(deltaTime: dt)
+        
         updateCharacter(deltaTime: dt)
         updateCamera(deltaTime: dt)
         viewMatrix = buildViewMatrix()
+        updateLightMatrix()  // Update shadows for current sun position
         
         let vp = projectionMatrix * viewMatrix
         
@@ -419,14 +552,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setCullMode(.front)
         
         // Landscape with identity matrix
+        let currentLightDir = isDaytime ? sunDirection : simd_normalize(simd_float3(0.3, -0.8, 0.2))
+        let currentSkyColors = skyColors
         var shadowUniforms = LitUniforms(
             modelMatrix: matrix_identity_float4x4,
             viewProjectionMatrix: vp,
             lightViewProjectionMatrix: lightViewProjectionMatrix,
-            lightDirection: lightDirection,
+            lightDirection: currentLightDir,
             cameraPosition: cameraPosition,
             ambientIntensity: ambientIntensity,
-            diffuseIntensity: diffuseIntensity
+            diffuseIntensity: diffuseIntensity,
+            skyColorTop: currentSkyColors.top,
+            skyColorHorizon: currentSkyColors.horizon,
+            sunColor: currentSkyColors.sun,
+            timeOfDay: timeOfDay
         )
         memcpy(litUniformBuffer.contents(), &shadowUniforms, MemoryLayout<LitUniforms>.stride)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
@@ -457,14 +596,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setDepthStencilState(depthStencilStateSkybox)
         
         // Skybox follows camera position
+        let currentLightDir = isDaytime ? sunDirection : simd_normalize(simd_float3(0.3, -0.8, 0.2))
+        let currentSkyColors = skyColors
         var skyboxUniforms = LitUniforms(
             modelMatrix: translation(cameraPosition.x, cameraPosition.y, cameraPosition.z),
             viewProjectionMatrix: vp,
             lightViewProjectionMatrix: lightViewProjectionMatrix,
-            lightDirection: lightDirection,
+            lightDirection: currentLightDir,
             cameraPosition: cameraPosition,
             ambientIntensity: 1.0,  // Full brightness for sky
-            diffuseIntensity: 0.0
+            diffuseIntensity: 0.0,
+            skyColorTop: currentSkyColors.top,
+            skyColorHorizon: currentSkyColors.horizon,
+            sunColor: currentSkyColors.sun,
+            timeOfDay: timeOfDay
         )
         memcpy(skyboxUniformBuffer.contents(), &skyboxUniforms, MemoryLayout<LitUniforms>.stride)
         encoder.setVertexBuffer(skyboxUniformBuffer, offset: 0, index: 1)
@@ -481,10 +626,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             modelMatrix: matrix_identity_float4x4,
             viewProjectionMatrix: vp,
             lightViewProjectionMatrix: lightViewProjectionMatrix,
-            lightDirection: lightDirection,
+            lightDirection: currentLightDir,
             cameraPosition: cameraPosition,
             ambientIntensity: ambientIntensity,
-            diffuseIntensity: diffuseIntensity
+            diffuseIntensity: diffuseIntensity,
+            skyColorTop: currentSkyColors.top,
+            skyColorHorizon: currentSkyColors.horizon,
+            sunColor: currentSkyColors.sun,
+            timeOfDay: timeOfDay
         )
         memcpy(litUniformBuffer.contents(), &litUniforms, MemoryLayout<LitUniforms>.stride)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
@@ -598,21 +747,99 @@ final class Renderer: NSObject, MTKViewDelegate {
         let newPosition = characterPosition + characterVelocity * dt
         var finalPosition = newPosition
         var collisionOccurred = false
+        var standingSurfaceHeight: Float? = nil  // Height of surface character is standing on (if climbable)
         
+        // Multiple iterations to resolve overlapping collisions
         for _ in 0..<3 {
             let charPos2D = simd_float2(finalPosition.x, finalPosition.z)
+            let charFeetY = finalPosition.y  // Current character base Y position
             
             for collider in colliders {
-                let toChar = charPos2D - collider.position
-                let distance = simd_length(toChar)
-                let minDist = collider.radius + characterRadius
-                
-                if distance < minDist && distance > 0.001 {
-                    let pushDirection = simd_normalize(toChar)
-                    let pushAmount = minDist - distance + 0.01
-                    finalPosition.x += pushDirection.x * pushAmount
-                    finalPosition.z += pushDirection.y * pushAmount
-                    collisionOccurred = true
+                switch collider.type {
+                case .circle:
+                    // Simple circle collision
+                    let toChar = charPos2D - collider.position
+                    let distance = simd_length(toChar)
+                    let minDist = collider.radius + characterRadius
+                    
+                    if distance < minDist && distance > 0.001 {
+                        let pushDirection = simd_normalize(toChar)
+                        let pushAmount = minDist - distance + 0.01
+                        finalPosition.x += pushDirection.x * pushAmount
+                        finalPosition.z += pushDirection.y * pushAmount
+                        collisionOccurred = true
+                    }
+                    
+                case .box:
+                    // Box collision (axis-aligned for now)
+                    let localX = charPos2D.x - collider.position.x
+                    let localZ = charPos2D.y - collider.position.y
+                    
+                    // Check if character is within box + character radius
+                    let expandedHalfW = collider.halfExtents.x + characterRadius
+                    let expandedHalfD = collider.halfExtents.y + characterRadius
+                    
+                    if abs(localX) < expandedHalfW && abs(localZ) < expandedHalfD {
+                        // Inside the box - push out along shortest axis
+                        let overlapX = expandedHalfW - abs(localX)
+                        let overlapZ = expandedHalfD - abs(localZ)
+                        
+                        if overlapX < overlapZ {
+                            // Push out along X
+                            finalPosition.x += (localX > 0 ? 1 : -1) * (overlapX + 0.01)
+                        } else {
+                            // Push out along Z
+                            finalPosition.z += (localZ > 0 ? 1 : -1) * (overlapZ + 0.01)
+                        }
+                        collisionOccurred = true
+                    }
+                    
+                case .climbable:
+                    // Climbable objects (like rocks) - can walk on top
+                    let toChar = charPos2D - collider.position
+                    let distance = simd_length(toChar)
+                    let collisionRadius = collider.radius + characterRadius
+                    
+                    // Check horizontal proximity
+                    if distance < collider.radius {
+                        // Character is directly above/on the object
+                        let surfaceY = collider.baseY + collider.height
+                        
+                        // If character's feet are at or above surface, they can stand on it
+                        if charFeetY >= surfaceY - 0.5 {
+                            // Standing on top - record this surface height
+                            if standingSurfaceHeight == nil || surfaceY > standingSurfaceHeight! {
+                                standingSurfaceHeight = surfaceY
+                            }
+                        } else {
+                            // Below surface level - push out horizontally
+                            if distance > 0.001 {
+                                let pushDirection = simd_normalize(toChar)
+                                let pushAmount = collider.radius - distance + characterRadius + 0.01
+                                finalPosition.x += pushDirection.x * pushAmount
+                                finalPosition.z += pushDirection.y * pushAmount
+                                collisionOccurred = true
+                            }
+                        }
+                    } else if distance < collisionRadius {
+                        // Near the edge - check if we should collide or can climb
+                        let surfaceY = collider.baseY + collider.height
+                        let stepUpThreshold: Float = 0.5  // Can step up this high
+                        
+                        if charFeetY >= surfaceY - stepUpThreshold {
+                            // Can step up onto the object
+                            if standingSurfaceHeight == nil || surfaceY > standingSurfaceHeight! {
+                                standingSurfaceHeight = surfaceY
+                            }
+                        } else {
+                            // Too low - push out
+                            let pushDirection = simd_normalize(toChar)
+                            let pushAmount = collisionRadius - distance + 0.01
+                            finalPosition.x += pushDirection.x * pushAmount
+                            finalPosition.z += pushDirection.y * pushAmount
+                            collisionOccurred = true
+                        }
+                    }
                 }
             }
         }
@@ -625,7 +852,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         characterPosition.z = max(-95, min(95, finalPosition.z))
         
         // Get terrain height at character position
-        let terrainHeight = Terrain.heightAt(x: characterPosition.x, z: characterPosition.z)
+        var terrainHeight = Terrain.heightAt(x: characterPosition.x, z: characterPosition.z)
+        
+        // If standing on a climbable surface, use that height instead
+        if let surfaceHeight = standingSurfaceHeight, surfaceHeight > terrainHeight {
+            terrainHeight = surfaceHeight
+        }
         
         // Smooth turning
         var yawDiff = targetYaw - characterYaw

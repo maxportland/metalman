@@ -55,14 +55,50 @@ struct LitUniforms {
     var cameraPosition: simd_float3
     var ambientIntensity: Float
     var diffuseIntensity: Float
+    
+    // Sky colors for day/night cycle
+    var skyColorTop: simd_float3
+    var skyColorHorizon: simd_float3
+    var sunColor: simd_float3
+    var timeOfDay: Float          // 0-24 hours
+    var padding2: simd_float3 = .zero  // Alignment padding
 }
 
 // MARK: - Collision Types
 
-/// Collision circle for simple 2D collision detection (on XZ plane)
+/// Type of collision shape
+enum ColliderType {
+    case circle              // Simple 2D circle (trees, poles)
+    case box                 // 2D box for walls (ruins)
+    case climbable           // 3D object that can be walked on top of (rocks)
+}
+
+/// Collision shape for physics detection
 struct Collider {
-    var position: simd_float2  // X, Z position
-    var radius: Float
+    var type: ColliderType
+    var position: simd_float2  // X, Z position (center)
+    var radius: Float          // For circle colliders
+    var halfExtents: simd_float2 = .zero  // For box colliders (half width, half depth)
+    var rotation: Float = 0    // Y-axis rotation in radians (for boxes)
+    var height: Float = 0      // Height of the object (for climbable)
+    var baseY: Float = 0       // Base terrain Y position (for climbable)
+    
+    /// Create a simple circle collider
+    static func circle(x: Float, z: Float, radius: Float) -> Collider {
+        return Collider(type: .circle, position: simd_float2(x, z), radius: radius)
+    }
+    
+    /// Create a box collider for walls
+    static func box(x: Float, z: Float, halfWidth: Float, halfDepth: Float, rotation: Float = 0) -> Collider {
+        return Collider(type: .box, position: simd_float2(x, z), radius: 0, 
+                       halfExtents: simd_float2(halfWidth, halfDepth), rotation: rotation)
+    }
+    
+    /// Create a climbable collider (can walk on top)
+    static func climbable(x: Float, z: Float, radius: Float, height: Float, baseY: Float) -> Collider {
+        return Collider(type: .climbable, position: simd_float2(x, z), radius: radius,
+                       height: height, baseY: baseY)
+    }
 }
 
 // MARK: - Material Indices
