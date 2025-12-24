@@ -3,107 +3,133 @@ import MetalKit
 import simd
 
 final class Renderer: NSObject, MTKViewDelegate {
+    // Simple vertex for wireframe (stick figure)
     struct Vertex {
         var position: simd_float3
         var color: simd_float4
     }
     
-    // MARK: - Isometric 3rd Person Camera System
-    // 
-    // For isometric games, movement is typically relative to SCREEN direction:
-    // - Up arrow = move towards top of screen (negative Z in world)
-    // - Down arrow = move towards bottom of screen (positive Z in world)
-    // - Left arrow = move towards left of screen (negative X in world)
-    // - Right arrow = move towards right of screen (positive X in world)
-    //
-    // The camera maintains a fixed offset from the character and always looks at them.
+    // Textured vertex for solid geometry with lighting
+    struct TexturedVertex {
+        var position: simd_float3
+        var normal: simd_float3
+        var texCoord: simd_float2
+        var materialIndex: UInt32  // 0=ground, 1=tree trunk, 2=foliage, 3=rock, 4=pole
+        var padding: UInt32 = 0
+    }
+    
+    // Uniforms for lit rendering
+    struct LitUniforms {
+        var modelMatrix: simd_float4x4
+        var viewProjectionMatrix: simd_float4x4
+        var lightViewProjectionMatrix: simd_float4x4
+        var lightDirection: simd_float3
+        var cameraPosition: simd_float3
+        var ambientIntensity: Float
+        var diffuseIntensity: Float
+    }
     
     // MARK: - Properties
     
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
-    let pipelineState: MTLRenderPipelineState
+    
+    // Pipeline states
+    let wireframePipelineState: MTLRenderPipelineState
+    let litPipelineState: MTLRenderPipelineState
+    let shadowPipelineState: MTLRenderPipelineState
     let depthStencilState: MTLDepthStencilState
     let depthStencilStateNoWrite: MTLDepthStencilState
-    let depthStencilStateAlways: MTLDepthStencilState
+    let shadowDepthStencilState: MTLDepthStencilState
     var library: MTLLibrary
     
+    // Textures
+    var groundTexture: MTLTexture!
+    var trunkTexture: MTLTexture!
+    var foliageTexture: MTLTexture!
+    var rockTexture: MTLTexture!
+    var poleTexture: MTLTexture!
+    var shadowMap: MTLTexture!
+    let shadowMapSize: Int = 2048
+    let textureSampler: MTLSamplerState
+    let shadowSampler: MTLSamplerState
+    
     // Input from keyboard/touch
-    var movementVector: simd_float2 = .zero  // x = left/right, y = forward/back
-    var lookDelta: simd_float2 = .zero       // unused for isometric, but kept for future
+    var movementVector: simd_float2 = .zero
+    var lookDelta: simd_float2 = .zero
     
     // Character state
     private var characterPosition: simd_float3 = .zero
-    private var characterVelocity: simd_float3 = .zero  // Current velocity for smooth movement
-    private var characterYaw: Float = 0  // Character facing direction (radians)
-    private var targetYaw: Float = 0     // Target facing direction for smooth turning
+    private var characterVelocity: simd_float3 = .zero
+    private var characterYaw: Float = 0
+    private var targetYaw: Float = 0
     
     // Walking animation state
-    private var walkPhase: Float = 0     // 0 to 2π, cycles during walking
-    private var walkSpeed: Float = 12.0  // How fast the legs cycle (radians per unit distance)
-    private var isMoving: Bool = false   // Track if character is currently moving
+    private var walkPhase: Float = 0
+    private var walkSpeed: Float = 12.0
+    private var isMoving: Bool = false
     
     // Movement configuration
-    private let characterSpeed: Float = 6.0    // Max speed (units per second)
-    private let acceleration: Float = 40.0     // How fast to reach max speed (snappier)
-    private let deceleration: Float = 25.0     // How fast to stop
-    private let turnSpeed: Float = 15.0        // How fast to turn (radians per second)
+    private let characterSpeed: Float = 6.0
+    private let acceleration: Float = 40.0
+    private let deceleration: Float = 25.0
+    private let turnSpeed: Float = 15.0
     
-    // Camera configuration for isometric view
-    // Camera sits at a fixed offset relative to world axes (not character facing)
+    // Camera configuration
     private var cameraPosition: simd_float3 = simd_float3(0, 8, 10)
-    private let cameraHeight: Float = 8.0      // How high above character
-    private let cameraDistance: Float = 10.0   // How far behind (in Z)
-    private let cameraDamping: Float = 0.03    // Slower follow so landscape movement is visible
+    private let cameraHeight: Float = 8.0
+    private let cameraDistance: Float = 10.0
+    
+    // Lighting
+    private let lightDirection = simd_normalize(simd_float3(-0.5, -0.8, -0.3))
+    private let ambientIntensity: Float = 0.35
+    private let diffuseIntensity: Float = 0.65
     
     private var viewportSize: CGSize = .zero
     
-    // Projection and view matrices
+    // Matrices
     private var projectionMatrix = matrix_identity_float4x4
     private var viewMatrix = matrix_identity_float4x4
+    private var lightViewProjectionMatrix = matrix_identity_float4x4
     
-    // Buffers
-    private var gridVertexBuffer: MTLBuffer
-    private var gridVertexCount: Int = 0
-    
+    // Wireframe buffers (stick figure, grid overlay)
     private var stickFigureVertexBuffer: MTLBuffer
     private var stickFigureVertexCount: Int = 0
+    private var gridLineBuffer: MTLBuffer
+    private var gridLineCount: Int = 0
     
-    // Landscape elements for visual reference
-    private var landscapeVertexBuffer: MTLBuffer
-    private var landscapeVertexCount: Int = 0
+    // Solid geometry buffers
+    private var groundVertexBuffer: MTLBuffer
+    private var groundVertexCount: Int = 0
+    private var treeVertexBuffer: MTLBuffer
+    private var treeVertexCount: Int = 0
+    private var rockVertexBuffer: MTLBuffer
+    private var rockVertexCount: Int = 0
+    private var poleVertexBuffer: MTLBuffer
+    private var poleVertexCount: Int = 0
     
-    // Splash cube (startup spinner) - disabled for testing
-    private var cubeVertexBuffer: MTLBuffer?
-    private var cubeVertexCount: Int = 0
-    private var showSplashCube: Bool = false  // Disabled for now
-    private var cubeAngle: Float = 0 // radians
-    private var cubeSpinsRemaining: Int = 3 // spin count
-    private var lastFrameTime: CFTimeInterval = CACurrentMediaTime()
-    
-    // Uniform buffer for MVP matrix
+    // Uniform buffers
     private var uniformBuffer: MTLBuffer
-
-    private var forceTriangleTest: Bool = false
+    private var litUniformBuffer: MTLBuffer
     
-    private static var didLogViewConfig = false
+    private var lastFrameTime: CFTimeInterval = CACurrentMediaTime()
     
     // MARK: - Init
     
     init(device: MTLDevice, view: MTKView) {
         self.device = device
         
-        // Create command queue
         guard let commandQueue = device.makeCommandQueue() else {
             fatalError("Failed to create command queue")
         }
         self.commandQueue = commandQueue
         
-        // Create library from source
+        // Shader source with lighting, textures, and shadows
         let shaderSource = """
         #include <metal_stdlib>
         using namespace metal;
         
+        // Simple wireframe vertex
         struct VertexIn {
             float3 position [[attribute(0)]];
             float4 color [[attribute(1)]];
@@ -129,6 +155,117 @@ final class Renderer: NSObject, MTKViewDelegate {
         fragment float4 fragment_main(VertexOut in [[stage_in]]) {
             return in.color;
         }
+        
+        // Textured lit vertex
+        struct TexturedVertexIn {
+            float3 position [[attribute(0)]];
+            float3 normal [[attribute(1)]];
+            float2 texCoord [[attribute(2)]];
+            uint materialIndex [[attribute(3)]];
+        };
+        
+        struct LitVertexOut {
+            float4 position [[position]];
+            float3 worldPosition;
+            float3 normal;
+            float2 texCoord;
+            float4 lightSpacePosition;
+            uint materialIndex;
+        };
+        
+        struct LitUniforms {
+            float4x4 modelMatrix;
+            float4x4 viewProjectionMatrix;
+            float4x4 lightViewProjectionMatrix;
+            float3 lightDirection;
+            float3 cameraPosition;
+            float ambientIntensity;
+            float diffuseIntensity;
+        };
+        
+        vertex LitVertexOut vertex_lit(TexturedVertexIn in [[stage_in]],
+                                       constant LitUniforms &uniforms [[buffer(1)]]) {
+            LitVertexOut out;
+            float4 worldPos = uniforms.modelMatrix * float4(in.position, 1.0);
+            out.worldPosition = worldPos.xyz;
+            out.position = uniforms.viewProjectionMatrix * worldPos;
+            out.normal = normalize((uniforms.modelMatrix * float4(in.normal, 0.0)).xyz);
+            out.texCoord = in.texCoord;
+            out.lightSpacePosition = uniforms.lightViewProjectionMatrix * worldPos;
+            out.materialIndex = in.materialIndex;
+            return out;
+        }
+        
+        float calculateShadow(float4 lightSpacePos, depth2d<float> shadowMap, sampler shadowSampler) {
+            float3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
+            projCoords.xy = projCoords.xy * 0.5 + 0.5;
+            projCoords.y = 1.0 - projCoords.y;
+            
+            if (projCoords.x < 0 || projCoords.x > 1 || projCoords.y < 0 || projCoords.y > 1 || projCoords.z > 1) {
+                return 1.0;
+            }
+            
+            float currentDepth = projCoords.z;
+            float bias = 0.005;
+            
+            // PCF soft shadows
+            float shadow = 0.0;
+            float2 texelSize = 1.0 / float2(shadowMap.get_width(), shadowMap.get_height());
+            for (int x = -1; x <= 1; x++) {
+                for (int y = -1; y <= 1; y++) {
+                    float pcfDepth = shadowMap.sample(shadowSampler, projCoords.xy + float2(x, y) * texelSize);
+                    shadow += currentDepth - bias > pcfDepth ? 0.4 : 1.0;
+                }
+            }
+            return shadow / 9.0;
+        }
+        
+        fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
+                                     texture2d<float> groundTex [[texture(0)]],
+                                     texture2d<float> trunkTex [[texture(1)]],
+                                     texture2d<float> foliageTex [[texture(2)]],
+                                     texture2d<float> rockTex [[texture(3)]],
+                                     texture2d<float> poleTex [[texture(4)]],
+                                     depth2d<float> shadowMap [[texture(5)]],
+                                     sampler texSampler [[sampler(0)]],
+                                     sampler shadowSampler [[sampler(1)]],
+                                     constant LitUniforms &uniforms [[buffer(1)]]) {
+            // Sample texture based on material
+            float4 texColor;
+            switch (in.materialIndex) {
+                case 0: texColor = groundTex.sample(texSampler, in.texCoord); break;
+                case 1: texColor = trunkTex.sample(texSampler, in.texCoord); break;
+                case 2: texColor = foliageTex.sample(texSampler, in.texCoord); break;
+                case 3: texColor = rockTex.sample(texSampler, in.texCoord); break;
+                case 4: texColor = poleTex.sample(texSampler, in.texCoord); break;
+                default: texColor = float4(1, 0, 1, 1); break;
+            }
+            
+            // Lighting
+            float3 normal = normalize(in.normal);
+            float3 lightDir = normalize(-uniforms.lightDirection);
+            float NdotL = max(dot(normal, lightDir), 0.0);
+            
+            // Shadow
+            float shadow = calculateShadow(in.lightSpacePosition, shadowMap, shadowSampler);
+            
+            // Final color
+            float lighting = uniforms.ambientIntensity + uniforms.diffuseIntensity * NdotL * shadow;
+            float3 finalColor = texColor.rgb * lighting;
+            
+            return float4(finalColor, texColor.a);
+        }
+        
+        // Shadow pass vertex shader
+        vertex float4 vertex_shadow(TexturedVertexIn in [[stage_in]],
+                                    constant LitUniforms &uniforms [[buffer(1)]]) {
+            float4 worldPos = uniforms.modelMatrix * float4(in.position, 1.0);
+            return uniforms.lightViewProjectionMatrix * worldPos;
+        }
+        
+        fragment void fragment_shadow() {
+            // Depth-only pass, no color output
+        }
         """
         
         do {
@@ -137,88 +274,303 @@ final class Renderer: NSObject, MTKViewDelegate {
             fatalError("Failed to create library: \(error)")
         }
         
-        // Create pipeline state
-        let pipelineDescriptor = MTLRenderPipelineDescriptor()
-        pipelineDescriptor.vertexFunction = library.makeFunction(name: "vertex_main")
-        pipelineDescriptor.fragmentFunction = library.makeFunction(name: "fragment_main")
-        pipelineDescriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
-        pipelineDescriptor.depthAttachmentPixelFormat = .depth32Float
+        // Wireframe pipeline
+        let wireframePipelineDesc = MTLRenderPipelineDescriptor()
+        wireframePipelineDesc.vertexFunction = library.makeFunction(name: "vertex_main")
+        wireframePipelineDesc.fragmentFunction = library.makeFunction(name: "fragment_main")
+        wireframePipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        wireframePipelineDesc.depthAttachmentPixelFormat = .depth32Float
         
-        let vertexDescriptor = MTLVertexDescriptor()
-        // position attribute 0 (float3) at offset 0
-        vertexDescriptor.attributes[0].format = .float3
-        vertexDescriptor.attributes[0].offset = 0
-        vertexDescriptor.attributes[0].bufferIndex = 0
-        // color attribute 1 (float4) at offset 12
-        vertexDescriptor.attributes[1].format = .float4
-        vertexDescriptor.attributes[1].offset = 12
-        vertexDescriptor.attributes[1].bufferIndex = 0
-        // layout for buffer 0
-        vertexDescriptor.layouts[0].stride = MemoryLayout<Renderer.Vertex>.stride
-        vertexDescriptor.layouts[0].stepRate = 1
-        vertexDescriptor.layouts[0].stepFunction = .perVertex
-        pipelineDescriptor.vertexDescriptor = vertexDescriptor
+        let wireframeVertexDesc = MTLVertexDescriptor()
+        wireframeVertexDesc.attributes[0].format = .float3
+        wireframeVertexDesc.attributes[0].offset = 0
+        wireframeVertexDesc.attributes[0].bufferIndex = 0
+        wireframeVertexDesc.attributes[1].format = .float4
+        wireframeVertexDesc.attributes[1].offset = 12
+        wireframeVertexDesc.attributes[1].bufferIndex = 0
+        wireframeVertexDesc.layouts[0].stride = MemoryLayout<Vertex>.stride
+        wireframePipelineDesc.vertexDescriptor = wireframeVertexDesc
         
         do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+            wireframePipelineState = try device.makeRenderPipelineState(descriptor: wireframePipelineDesc)
         } catch {
-            fatalError("Failed to create pipeline state: \(error)")
+            fatalError("Failed to create wireframe pipeline: \(error)")
         }
         
-        // Depth stencil state
-        let depthStencilDesc = MTLDepthStencilDescriptor()
-        depthStencilDesc.depthCompareFunction = .less
-        depthStencilDesc.isDepthWriteEnabled = true
-        guard let depthState = device.makeDepthStencilState(descriptor: depthStencilDesc) else {
-            fatalError("Failed to create depth stencil state")
-        }
-        depthStencilState = depthState
+        // Lit textured pipeline
+        let litPipelineDesc = MTLRenderPipelineDescriptor()
+        litPipelineDesc.vertexFunction = library.makeFunction(name: "vertex_lit")
+        litPipelineDesc.fragmentFunction = library.makeFunction(name: "fragment_lit")
+        litPipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        litPipelineDesc.depthAttachmentPixelFormat = .depth32Float
         
-        let depthStencilDescNoWrite = MTLDepthStencilDescriptor()
-        depthStencilDescNoWrite.depthCompareFunction = .less
-        depthStencilDescNoWrite.isDepthWriteEnabled = false
-        guard let depthStateNoWrite = device.makeDepthStencilState(descriptor: depthStencilDescNoWrite) else {
-            fatalError("Failed to create depth stencil state (no write)")
+        let litVertexDesc = MTLVertexDescriptor()
+        litVertexDesc.attributes[0].format = .float3  // position
+        litVertexDesc.attributes[0].offset = 0
+        litVertexDesc.attributes[0].bufferIndex = 0
+        litVertexDesc.attributes[1].format = .float3  // normal
+        litVertexDesc.attributes[1].offset = 12
+        litVertexDesc.attributes[1].bufferIndex = 0
+        litVertexDesc.attributes[2].format = .float2  // texCoord
+        litVertexDesc.attributes[2].offset = 24
+        litVertexDesc.attributes[2].bufferIndex = 0
+        litVertexDesc.attributes[3].format = .uint    // materialIndex
+        litVertexDesc.attributes[3].offset = 32
+        litVertexDesc.attributes[3].bufferIndex = 0
+        litVertexDesc.layouts[0].stride = MemoryLayout<TexturedVertex>.stride
+        litPipelineDesc.vertexDescriptor = litVertexDesc
+        
+        do {
+            litPipelineState = try device.makeRenderPipelineState(descriptor: litPipelineDesc)
+        } catch {
+            fatalError("Failed to create lit pipeline: \(error)")
         }
-        depthStencilStateNoWrite = depthStateNoWrite
-
-        let depthAlwaysDesc = MTLDepthStencilDescriptor()
-        depthAlwaysDesc.depthCompareFunction = .always
-        depthAlwaysDesc.isDepthWriteEnabled = false
-        guard let depthAlways = device.makeDepthStencilState(descriptor: depthAlwaysDesc) else {
-            fatalError("Failed to create depth stencil state (always)")
+        
+        // Shadow pipeline (depth only)
+        let shadowPipelineDesc = MTLRenderPipelineDescriptor()
+        shadowPipelineDesc.vertexFunction = library.makeFunction(name: "vertex_shadow")
+        shadowPipelineDesc.fragmentFunction = library.makeFunction(name: "fragment_shadow")
+        shadowPipelineDesc.colorAttachments[0].pixelFormat = .invalid
+        shadowPipelineDesc.depthAttachmentPixelFormat = .depth32Float
+        shadowPipelineDesc.vertexDescriptor = litVertexDesc
+        
+        do {
+            shadowPipelineState = try device.makeRenderPipelineState(descriptor: shadowPipelineDesc)
+        } catch {
+            fatalError("Failed to create shadow pipeline: \(error)")
         }
-        depthStencilStateAlways = depthAlways
+        
+        // Depth stencil states
+        let depthDesc = MTLDepthStencilDescriptor()
+        depthDesc.depthCompareFunction = .less
+        depthDesc.isDepthWriteEnabled = true
+        depthStencilState = device.makeDepthStencilState(descriptor: depthDesc)!
+        
+        let depthDescNoWrite = MTLDepthStencilDescriptor()
+        depthDescNoWrite.depthCompareFunction = .less
+        depthDescNoWrite.isDepthWriteEnabled = false
+        depthStencilStateNoWrite = device.makeDepthStencilState(descriptor: depthDescNoWrite)!
+        
+        let shadowDepthDesc = MTLDepthStencilDescriptor()
+        shadowDepthDesc.depthCompareFunction = .less
+        shadowDepthDesc.isDepthWriteEnabled = true
+        shadowDepthStencilState = device.makeDepthStencilState(descriptor: shadowDepthDesc)!
+        
+        // Create texture sampler
+        let samplerDesc = MTLSamplerDescriptor()
+        samplerDesc.minFilter = .linear
+        samplerDesc.magFilter = .linear
+        samplerDesc.mipFilter = .linear
+        samplerDesc.sAddressMode = .repeat
+        samplerDesc.tAddressMode = .repeat
+        textureSampler = device.makeSamplerState(descriptor: samplerDesc)!
+        
+        let shadowSamplerDesc = MTLSamplerDescriptor()
+        shadowSamplerDesc.minFilter = .linear
+        shadowSamplerDesc.magFilter = .linear
+        shadowSamplerDesc.compareFunction = .less
+        shadowSampler = device.makeSamplerState(descriptor: shadowSamplerDesc)!
         
         // Create buffers
-        (gridVertexBuffer, gridVertexCount) = Renderer.makeGridVertices(device: device)
         (stickFigureVertexBuffer, stickFigureVertexCount) = Renderer.makeStickFigureVertices(device: device)
-        (cubeVertexBuffer, cubeVertexCount) = Renderer.makeCubeVertices(device: device)
-        (landscapeVertexBuffer, landscapeVertexCount) = Renderer.makeLandscapeVertices(device: device)
+        (gridLineBuffer, gridLineCount) = Renderer.makeGridLines(device: device)
+        (groundVertexBuffer, groundVertexCount) = Renderer.makeGroundMesh(device: device)
+        (treeVertexBuffer, treeVertexCount) = Renderer.makeTreeMeshes(device: device)
+        (rockVertexBuffer, rockVertexCount) = Renderer.makeRockMeshes(device: device)
+        (poleVertexBuffer, poleVertexCount) = Renderer.makePoleMeshes(device: device)
         
-        // Create uniform buffer large enough for 3 MVP matrices (grid, landscape, stick figure)
         uniformBuffer = device.makeBuffer(length: MemoryLayout<simd_float4x4>.stride * 3, options: [])!
+        litUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: [])!
         
         super.init()
         
-        // Initialize stick figure animation (sets initial vertex data)
+        // Create textures
+        groundTexture = createGroundTexture()
+        trunkTexture = createTrunkTexture()
+        foliageTexture = createFoliageTexture()
+        rockTexture = createRockTexture()
+        poleTexture = createPoleTexture()
+        shadowMap = createShadowMap()
+        
+        // Initialize stick figure
         updateStickFigureAnimation()
         
-        // Setup view properties
+        // Setup view
         view.depthStencilPixelFormat = .depth32Float
-        view.clearColor = MTLClearColor(red: 0.15, green: 0.17, blue: 0.2, alpha: 1.0)
+        view.clearColor = MTLClearColor(red: 0.5, green: 0.7, blue: 0.9, alpha: 1.0)  // Sky blue
         view.isPaused = false
         view.enableSetNeedsDisplay = false
-        // Note: delegate is set by the Coordinator in MetalGameView
         
         viewportSize = view.drawableSize
-        
-        // If viewport size is zero, use a default and wait for size change callback
         if viewportSize.width == 0 || viewportSize.height == 0 {
-            viewportSize = CGSize(width: 1024, height: 768) // Default fallback
+            viewportSize = CGSize(width: 1024, height: 768)
         }
         
         updateProjection(size: viewportSize)
+        updateLightMatrix()
+    }
+    
+    // MARK: - Texture Creation
+    
+    private func createGroundTexture() -> MTLTexture {
+        let size = 256
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                // Grass texture with variation
+                let noise = Float(((x * 13 + y * 7) % 23)) / 23.0
+                let grass = 0.35 + noise * 0.15
+                let variation = Float(((x * 31 + y * 17) % 37)) / 37.0 * 0.1
+                
+                pixels[i] = UInt8(min(255, (0.2 + variation) * 255))      // R
+                pixels[i + 1] = UInt8(min(255, (grass + variation) * 255)) // G
+                pixels[i + 2] = UInt8(min(255, (0.15 + variation * 0.5) * 255)) // B
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    private func createTrunkTexture() -> MTLTexture {
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                // Bark texture
+                let stripe = abs(sin(Float(y) * 0.5 + Float(x) * 0.1)) * 0.15
+                let noise = Float((x * 7 + y * 13) % 11) / 11.0 * 0.1
+                
+                pixels[i] = UInt8((0.35 + stripe + noise) * 255)     // R
+                pixels[i + 1] = UInt8((0.22 + stripe * 0.5 + noise) * 255) // G
+                pixels[i + 2] = UInt8((0.12 + noise) * 255)          // B
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    private func createFoliageTexture() -> MTLTexture {
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                // Leafy texture with clusters
+                let cluster = sin(Float(x) * 0.4) * sin(Float(y) * 0.4) * 0.15
+                let noise = Float((x * 17 + y * 23) % 19) / 19.0 * 0.15
+                
+                pixels[i] = UInt8((0.15 + noise) * 255)               // R
+                pixels[i + 1] = UInt8((0.45 + cluster + noise) * 255) // G
+                pixels[i + 2] = UInt8((0.18 + noise * 0.5) * 255)     // B
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    private func createRockTexture() -> MTLTexture {
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                // Rocky texture with speckles
+                let base: Float = 0.45
+                let noise1 = Float((x * 11 + y * 7) % 13) / 13.0 * 0.15
+                let noise2 = Float((x * 23 + y * 31) % 17) / 17.0 * 0.1
+                let gray = base + noise1 - noise2
+                
+                pixels[i] = UInt8(min(255, gray * 255))
+                pixels[i + 1] = UInt8(min(255, (gray - 0.02) * 255))
+                pixels[i + 2] = UInt8(min(255, (gray + 0.02) * 255))
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    private func createPoleTexture() -> MTLTexture {
+        let size = 32
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                // Wooden pole with grain
+                let grain = abs(sin(Float(y) * 0.8)) * 0.1
+                let base: Float = 0.5
+                
+                pixels[i] = UInt8((base + grain + 0.1) * 255)     // R
+                pixels[i + 1] = UInt8((base * 0.6 + grain) * 255) // G
+                pixels[i + 2] = UInt8((base * 0.3) * 255)         // B
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
+    private func createTexture(from pixels: [UInt8], size: Int) -> MTLTexture {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: size,
+            height: size,
+            mipmapped: true
+        )
+        descriptor.usage = [.shaderRead]
+        
+        let texture = device.makeTexture(descriptor: descriptor)!
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, size, size),
+            mipmapLevel: 0,
+            withBytes: pixels,
+            bytesPerRow: size * 4
+        )
+        
+        // Generate mipmaps
+        if let commandBuffer = commandQueue.makeCommandBuffer(),
+           let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
+            blitEncoder.generateMipmaps(for: texture)
+            blitEncoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+        
+        return texture
+    }
+    
+    private func createShadowMap() -> MTLTexture {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .depth32Float,
+            width: shadowMapSize,
+            height: shadowMapSize,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.storageMode = .private
+        return device.makeTexture(descriptor: descriptor)!
+    }
+    
+    private func updateLightMatrix() {
+        // Orthographic projection for directional light shadow map
+        let lightPos = -lightDirection * 80  // Position light far from scene
+        let lightTarget = simd_float3(0, 0, 0)
+        let lightUp = simd_float3(0, 1, 0)
+        
+        let lightView = lookAt(eye: lightPos, center: lightTarget, up: lightUp)
+        let lightProj = orthographicRH(left: -120, right: 120, bottom: -120, top: 120, near: 1, far: 200)
+        
+        lightViewProjectionMatrix = lightProj * lightView
     }
     
     // MARK: - MTKViewDelegate
@@ -229,244 +581,259 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     func draw(in view: MTKView) {
-        // Update viewport size if it changed
         let currentSize = view.drawableSize
-        if currentSize.width > 0 && currentSize.height > 0 && (viewportSize.width != currentSize.width || viewportSize.height != currentSize.height) {
+        if currentSize.width > 0 && currentSize.height > 0 &&
+           (viewportSize.width != currentSize.width || viewportSize.height != currentSize.height) {
             viewportSize = currentSize
             updateProjection(size: currentSize)
         }
         
-        guard let drawable = view.currentDrawable else { return }
-        guard let descriptor = view.currentRenderPassDescriptor else { return }
+        guard let drawable = view.currentDrawable,
+              let mainDescriptor = view.currentRenderPassDescriptor else { return }
         
-        // Time delta for animations
         let now = CACurrentMediaTime()
-        
-        // Ensure we have a valid projection matrix
         if viewportSize.width == 0 || viewportSize.height == 0 {
             lastFrameTime = now
             return
         }
         
-        // Calculate delta time for frame-rate independent movement
-        // Clamp to reasonable range to prevent huge jumps on first frame or after pause
         var dt = Float(now - lastFrameTime)
-        dt = min(max(dt, 0.0), 0.1)  // Clamp between 0 and 100ms
+        dt = min(max(dt, 0.0), 0.1)
         
-        // Update character position from input
         updateCharacter(deltaTime: dt)
-        
-        // Update camera to follow character
         updateCamera(deltaTime: dt)
-        
-        // Build view matrix (camera looks at character)
         viewMatrix = buildViewMatrix()
         
-        // VP matrix (view-projection)
         let vp = projectionMatrix * viewMatrix
         
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            return
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        
+        // === SHADOW PASS ===
+        let shadowPassDesc = MTLRenderPassDescriptor()
+        shadowPassDesc.depthAttachment.texture = shadowMap
+        shadowPassDesc.depthAttachment.loadAction = .clear
+        shadowPassDesc.depthAttachment.storeAction = .store
+        shadowPassDesc.depthAttachment.clearDepth = 1.0
+        
+        if let shadowEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: shadowPassDesc) {
+            shadowEncoder.setRenderPipelineState(shadowPipelineState)
+            shadowEncoder.setDepthStencilState(shadowDepthStencilState)
+            shadowEncoder.setCullMode(.front)  // Reduce shadow acne
+            
+            // Render all solid geometry to shadow map
+            var shadowUniforms = LitUniforms(
+                modelMatrix: matrix_identity_float4x4,
+                viewProjectionMatrix: vp,
+                lightViewProjectionMatrix: lightViewProjectionMatrix,
+                lightDirection: lightDirection,
+                cameraPosition: cameraPosition,
+                ambientIntensity: ambientIntensity,
+                diffuseIntensity: diffuseIntensity
+            )
+            memcpy(litUniformBuffer.contents(), &shadowUniforms, MemoryLayout<LitUniforms>.stride)
+            shadowEncoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            
+            // Ground
+            shadowEncoder.setVertexBuffer(groundVertexBuffer, offset: 0, index: 0)
+            shadowEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: groundVertexCount)
+            
+            // Trees
+            shadowEncoder.setVertexBuffer(treeVertexBuffer, offset: 0, index: 0)
+            shadowEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: treeVertexCount)
+            
+            // Rocks
+            shadowEncoder.setVertexBuffer(rockVertexBuffer, offset: 0, index: 0)
+            shadowEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: rockVertexCount)
+            
+            // Poles
+            shadowEncoder.setVertexBuffer(poleVertexBuffer, offset: 0, index: 0)
+            shadowEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: poleVertexCount)
+            
+            shadowEncoder.endEncoding()
         }
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
-            return
+        
+        // === MAIN PASS ===
+        if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: mainDescriptor) {
+            encoder.setCullMode(.back)
+            
+            // Draw solid lit geometry
+            encoder.setRenderPipelineState(litPipelineState)
+            encoder.setDepthStencilState(depthStencilState)
+            
+            var litUniforms = LitUniforms(
+                modelMatrix: matrix_identity_float4x4,
+                viewProjectionMatrix: vp,
+                lightViewProjectionMatrix: lightViewProjectionMatrix,
+                lightDirection: lightDirection,
+                cameraPosition: cameraPosition,
+                ambientIntensity: ambientIntensity,
+                diffuseIntensity: diffuseIntensity
+            )
+            memcpy(litUniformBuffer.contents(), &litUniforms, MemoryLayout<LitUniforms>.stride)
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+            
+            // Bind textures
+            encoder.setFragmentTexture(groundTexture, index: 0)
+            encoder.setFragmentTexture(trunkTexture, index: 1)
+            encoder.setFragmentTexture(foliageTexture, index: 2)
+            encoder.setFragmentTexture(rockTexture, index: 3)
+            encoder.setFragmentTexture(poleTexture, index: 4)
+            encoder.setFragmentTexture(shadowMap, index: 5)
+            encoder.setFragmentSamplerState(textureSampler, index: 0)
+            encoder.setFragmentSamplerState(shadowSampler, index: 1)
+            
+            // Draw ground
+            encoder.setVertexBuffer(groundVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: groundVertexCount)
+            
+            // Draw trees
+            encoder.setVertexBuffer(treeVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: treeVertexCount)
+            
+            // Draw rocks
+            encoder.setVertexBuffer(rockVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: rockVertexCount)
+            
+            // Draw poles
+            encoder.setVertexBuffer(poleVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: poleVertexCount)
+            
+            // Draw grid lines on top
+            encoder.setRenderPipelineState(wireframePipelineState)
+            encoder.setDepthStencilState(depthStencilStateNoWrite)
+            
+            var gridMVP = vp
+            let matrixStride = MemoryLayout<simd_float4x4>.stride
+            memcpy(uniformBuffer.contents(), &gridMVP, matrixStride)
+            encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+            encoder.setVertexBuffer(gridLineBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridLineCount)
+            
+            // Draw stick figure
+            updateStickFigureAnimation()
+            let modelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
+            var stickMVP = vp * modelMatrix
+            memcpy(uniformBuffer.contents() + matrixStride, &stickMVP, matrixStride)
+            encoder.setVertexBuffer(uniformBuffer, offset: matrixStride, index: 1)
+            encoder.setVertexBuffer(stickFigureVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: stickFigureVertexCount)
+            
+            encoder.endEncoding()
         }
-        
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setDepthStencilState(depthStencilState)
-        
-        let matrixStride = MemoryLayout<simd_float4x4>.stride
-        
-        // Write all MVP matrices to uniform buffer at different offsets
-        var gridMVP = vp  // Grid uses just view-projection (no model transform)
-        var landscapeMVP = vp  // Landscape also uses just view-projection
-        
-        // Stick figure uses model transform (translate + rotate)
-        let modelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
-        var stickFigureMVP = projectionMatrix * viewMatrix * modelMatrix
-        
-        // Copy matrices to buffer at different offsets
-        memcpy(uniformBuffer.contents(), &gridMVP, matrixStride)
-        memcpy(uniformBuffer.contents() + matrixStride, &landscapeMVP, matrixStride)
-        memcpy(uniformBuffer.contents() + matrixStride * 2, &stickFigureMVP, matrixStride)
-        
-        // Draw grid (offset 0)
-        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
-        encoder.setVertexBuffer(gridVertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: gridVertexCount)
-        
-        // Draw landscape elements (offset 1)
-        encoder.setVertexBuffer(uniformBuffer, offset: matrixStride, index: 1)
-        encoder.setVertexBuffer(landscapeVertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: landscapeVertexCount)
-        
-        // Update animated stick figure vertices based on walk phase
-        updateStickFigureAnimation()
-        
-        // Draw stick figure (offset 2)
-        encoder.setVertexBuffer(uniformBuffer, offset: matrixStride * 2, index: 1)
-        encoder.setDepthStencilState(depthStencilStateNoWrite)
-        encoder.setVertexBuffer(stickFigureVertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: stickFigureVertexCount)
-        encoder.setDepthStencilState(depthStencilState)
-        
-        encoder.endEncoding()
         
         commandBuffer.present(drawable)
         commandBuffer.commit()
         
-        // Update last frame time for next frame's delta calculation
         lastFrameTime = now
     }
     
-    // MARK: - Character & Camera Update
+    // MARK: - Character & Camera
     
-    /// Update character position based on input with smooth acceleration/deceleration
-    /// Movement is relative to SCREEN/WORLD axes for isometric feel:
-    /// - movementVector.x: left/right on screen = -X/+X in world
-    /// - movementVector.y: up/down on screen = -Z/+Z in world
     private func updateCharacter(deltaTime dt: Float) {
-        let inputLength = simd_length(movementVector)
+        // Target velocity based on input
+        let targetVelocity = simd_float3(
+            movementVector.x * characterSpeed,
+            0,
+            -movementVector.y * characterSpeed
+        )
         
-        if inputLength > 0.001 {
-            // Has input - accelerate towards target velocity
-            isMoving = true
+        let targetSpeed = simd_length(targetVelocity)
+        isMoving = targetSpeed > 0.1
+        
+        // Smooth acceleration/deceleration
+        if isMoving {
+            let currentSpeed = simd_length(characterVelocity)
+            let speedDiff = targetSpeed - currentSpeed
+            let accelThisFrame = acceleration * dt
             
-            // Convert screen-relative input to world movement direction
-            let worldMoveDir = simd_float3(
-                movementVector.x,   // Left/right maps to X
-                0,                   // No vertical movement
-                -movementVector.y    // Forward/back maps to -Z (up = forward = -Z)
-            )
-            
-            // Normalize to prevent faster diagonal movement
-            let dirLength = simd_length(worldMoveDir)
-            let normalizedDir = dirLength > 0 ? worldMoveDir / dirLength : worldMoveDir
-            
-            // Target velocity at max speed
-            let targetVelocity = normalizedDir * characterSpeed
-            
-            // Smoothly accelerate towards target velocity
-            let velocityDiff = targetVelocity - characterVelocity
-            let accelerationStep = acceleration * dt
-            if simd_length(velocityDiff) < accelerationStep {
-                characterVelocity = targetVelocity
+            if speedDiff > 0 {
+                let newSpeed = min(currentSpeed + accelThisFrame, targetSpeed)
+                let direction = simd_normalize(targetVelocity)
+                characterVelocity = direction * newSpeed
             } else {
-                characterVelocity += simd_normalize(velocityDiff) * accelerationStep
+                characterVelocity = targetVelocity
             }
             
-            // Update target facing direction
-            targetYaw = atan2f(normalizedDir.x, -normalizedDir.z)
-            
+            // Update facing direction
+            targetYaw = atan2(targetVelocity.x, targetVelocity.z)
         } else {
-            // No input - decelerate to stop
+            // Decelerate to stop
             let currentSpeed = simd_length(characterVelocity)
             if currentSpeed > 0.01 {
-                let decelerationStep = deceleration * dt
-                if currentSpeed < decelerationStep {
-                    characterVelocity = .zero
-                    isMoving = false
-                } else {
-                    characterVelocity -= simd_normalize(characterVelocity) * decelerationStep
-                }
+                let newSpeed = max(currentSpeed - deceleration * dt, 0)
+                characterVelocity = simd_normalize(characterVelocity) * newSpeed
             } else {
                 characterVelocity = .zero
-                isMoving = false
             }
         }
         
-        // Apply velocity to position
+        // Update position
         characterPosition += characterVelocity * dt
         
-        // Keep character within the grid bounds (-95 to +95 to stay inside the posts)
-        let boundMin: Float = -95.0
-        let boundMax: Float = 95.0
-        characterPosition.x = max(boundMin, min(boundMax, characterPosition.x))
-        characterPosition.z = max(boundMin, min(boundMax, characterPosition.z))
+        // World bounds
+        characterPosition.x = max(-95, min(95, characterPosition.x))
+        characterPosition.z = max(-95, min(95, characterPosition.z))
         
-        // Smoothly interpolate facing direction
+        // Smooth turning
         var yawDiff = targetYaw - characterYaw
-        // Normalize angle difference to [-π, π]
         while yawDiff > .pi { yawDiff -= 2 * .pi }
         while yawDiff < -.pi { yawDiff += 2 * .pi }
         
-        let maxTurnThisFrame = turnSpeed * dt
-        if abs(yawDiff) < maxTurnThisFrame {
+        let maxTurn = turnSpeed * dt
+        if abs(yawDiff) < maxTurn {
             characterYaw = targetYaw
         } else {
-            characterYaw += (yawDiff > 0 ? 1 : -1) * maxTurnThisFrame
+            characterYaw += (yawDiff > 0 ? 1 : -1) * maxTurn
         }
         
-        // Update walk animation phase based on distance traveled
-        let distanceThisFrame = simd_length(characterVelocity) * dt
+        // Walk animation
         if isMoving {
-            walkPhase += distanceThisFrame * walkSpeed
-            // Keep phase in [0, 2π]
+            walkPhase += simd_length(characterVelocity) * dt * walkSpeed
             while walkPhase > 2 * .pi { walkPhase -= 2 * .pi }
-        } else {
-            // Gradually return walk phase to neutral (legs together)
-            // Neutral is at phase 0 or π (legs vertical)
-            let neutralPhase: Float = 0
-            let phaseDiff = neutralPhase - walkPhase
-            let returnSpeed: Float = 8.0 * dt
-            if abs(phaseDiff) < returnSpeed || abs(phaseDiff) > 2 * .pi - returnSpeed {
-                walkPhase = neutralPhase
-            } else if walkPhase < .pi {
-                walkPhase -= returnSpeed
-                if walkPhase < 0 { walkPhase = 0 }
-            } else {
-                walkPhase += returnSpeed
-                if walkPhase > 2 * .pi { walkPhase = 0 }
-            }
         }
     }
     
-    /// Update camera to smoothly follow the character
-    /// Camera maintains a fixed offset behind/above the character
     private func updateCamera(deltaTime dt: Float) {
-        // Target camera position: fixed offset from character in world space
-        let targetPosition = simd_float3(
-            characterPosition.x,                    // Follow character X
-            characterPosition.y + cameraHeight,    // Above character
-            characterPosition.z + cameraDistance   // Behind character (positive Z)
+        cameraPosition = simd_float3(
+            characterPosition.x,
+            characterPosition.y + cameraHeight,
+            characterPosition.z + cameraDistance
         )
-        
-        // Smoothly interpolate camera position for fluid following
-        let smoothSpeed: Float = 5.0  // How quickly camera catches up
-        let t = min(smoothSpeed * dt, 1.0)
-        cameraPosition = simd_mix(cameraPosition, targetPosition, simd_float3(repeating: t))
     }
     
-    /// Build view matrix: camera looks at character
     private func buildViewMatrix() -> simd_float4x4 {
-        // Look at the character's center (slightly above feet)
         let lookTarget = characterPosition + simd_float3(0, 1.0, 0)
         return lookAt(eye: cameraPosition, center: lookTarget, up: simd_float3(0, 1, 0))
     }
     
-    /// Update stick figure vertices with walking animation
+    private func updateProjection(size: CGSize) {
+        guard size.width > 0 && size.height > 0 else {
+            projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: 16.0/9.0, nearZ: 0.1, farZ: 500)
+            return
+        }
+        let aspect = Float(size.width / size.height)
+        projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: aspect, nearZ: 0.1, farZ: 500)
+    }
+    
+    // MARK: - Stick Figure Animation
+    
     private func updateStickFigureAnimation() {
         var vertices: [Vertex] = []
-        
         let bodyColor = simd_float4(1, 0.85, 0.1, 1)
         let circleColor = simd_float4(1, 0.6, 0.1, 1)
         
-        // Walk animation parameters
-        // Legs swing forward/back based on walkPhase
-        // Left leg: sin(walkPhase), Right leg: sin(walkPhase + π) = -sin(walkPhase)
-        let legSwingAmount: Float = 0.4  // How far legs swing forward/back
-        let armSwingAmount: Float = 0.25 // How far arms swing (opposite to legs)
+        let legSwingAmount: Float = 0.4
+        let armSwingAmount: Float = 0.25
         
         let leftLegSwing = sin(walkPhase) * legSwingAmount
-        let rightLegSwing = -sin(walkPhase) * legSwingAmount  // Opposite phase
-        let leftArmSwing = -sin(walkPhase) * armSwingAmount   // Arms opposite to legs
+        let rightLegSwing = -sin(walkPhase) * legSwingAmount
+        let leftArmSwing = -sin(walkPhase) * armSwingAmount
         let rightArmSwing = sin(walkPhase) * armSwingAmount
-        
-        // Slight body bob while walking
         let bodyBob = abs(sin(walkPhase * 2)) * 0.05
         let bodyOffset = simd_float3(0, bodyBob, 0)
         
-        // Head circle (static, just offset by body bob)
+        // Head
         let headRadius: Float = 0.3
         let headCenter = simd_float3(0, 1.8, 0) + bodyOffset
         let segments = 16
@@ -474,12 +841,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         var firstPoint = simd_float3(0, 0, 0)
         for i in 0...segments {
             let angle = Float(i) / Float(segments) * 2 * .pi
-            let x = cos(angle) * headRadius
-            let y = sin(angle) * headRadius
-            let point = simd_float3(x, y, 0) + headCenter
-            if i == 0 {
-                firstPoint = point
-            } else {
+            let point = simd_float3(cos(angle) * headRadius, sin(angle) * headRadius, 0) + headCenter
+            if i == 0 { firstPoint = point }
+            else {
                 vertices.append(Vertex(position: lastPoint, color: circleColor))
                 vertices.append(Vertex(position: point, color: circleColor))
             }
@@ -488,394 +852,366 @@ final class Renderer: NSObject, MTKViewDelegate {
         vertices.append(Vertex(position: lastPoint, color: circleColor))
         vertices.append(Vertex(position: firstPoint, color: circleColor))
         
-        // Spine: from hip (0, 0.7, 0) to neck (0, 1.5, 0)
+        // Spine
         let hip = simd_float3(0, 0.7, 0) + bodyOffset
         let neck = simd_float3(0, 1.5, 0) + bodyOffset
         vertices.append(Vertex(position: hip, color: bodyColor))
         vertices.append(Vertex(position: neck, color: bodyColor))
         
-        // Arms with swing animation
+        // Arms
         let leftShoulder = simd_float3(0, 1.4, 0) + bodyOffset
         let rightShoulder = simd_float3(0, 1.4, 0) + bodyOffset
-        
-        // Left arm swings forward/back in Z
         let leftElbow = simd_float3(-0.35, 1.15, leftArmSwing * 0.5) + bodyOffset
         let leftHand = simd_float3(-0.5, 0.9, leftArmSwing) + bodyOffset
+        let rightElbow = simd_float3(0.35, 1.15, rightArmSwing * 0.5) + bodyOffset
+        let rightHand = simd_float3(0.5, 0.9, rightArmSwing) + bodyOffset
+        
         vertices.append(Vertex(position: leftShoulder, color: bodyColor))
         vertices.append(Vertex(position: leftElbow, color: bodyColor))
         vertices.append(Vertex(position: leftElbow, color: bodyColor))
         vertices.append(Vertex(position: leftHand, color: bodyColor))
-        
-        // Right arm
-        let rightElbow = simd_float3(0.35, 1.15, rightArmSwing * 0.5) + bodyOffset
-        let rightHand = simd_float3(0.5, 0.9, rightArmSwing) + bodyOffset
         vertices.append(Vertex(position: rightShoulder, color: bodyColor))
         vertices.append(Vertex(position: rightElbow, color: bodyColor))
         vertices.append(Vertex(position: rightElbow, color: bodyColor))
         vertices.append(Vertex(position: rightHand, color: bodyColor))
         
-        // Legs with walking animation
-        // Each leg has: hip -> knee -> foot
-        // The leg swings from the hip, knee bends during stride
-        
-        // Left leg
+        // Legs
         let leftHip = simd_float3(-0.15, 0.7, 0) + bodyOffset
-        // Knee position: forward/back based on swing, height varies with bend
-        let leftKneeBend = max(0, sin(walkPhase)) * 0.15  // Knee bends when leg is forward
+        let leftKneeBend = max(0, sin(walkPhase)) * 0.15
         let leftKnee = simd_float3(-0.15, 0.35 + leftKneeBend, leftLegSwing * 0.6)
-        // Foot position: follows the swing arc
-        let leftFootHeight = max(0, sin(walkPhase)) * 0.1  // Foot lifts when swinging forward
+        let leftFootHeight = max(0, sin(walkPhase)) * 0.1
         let leftFoot = simd_float3(-0.15, leftFootHeight, leftLegSwing)
+        
+        let rightHip = simd_float3(0.15, 0.7, 0) + bodyOffset
+        let rightKneeBend = max(0, -sin(walkPhase)) * 0.15
+        let rightKnee = simd_float3(0.15, 0.35 + rightKneeBend, rightLegSwing * 0.6)
+        let rightFootHeight = max(0, -sin(walkPhase)) * 0.1
+        let rightFoot = simd_float3(0.15, rightFootHeight, rightLegSwing)
         
         vertices.append(Vertex(position: leftHip, color: bodyColor))
         vertices.append(Vertex(position: leftKnee, color: bodyColor))
         vertices.append(Vertex(position: leftKnee, color: bodyColor))
         vertices.append(Vertex(position: leftFoot, color: bodyColor))
-        
-        // Right leg (opposite phase)
-        let rightHip = simd_float3(0.15, 0.7, 0) + bodyOffset
-        let rightKneeBend = max(0, -sin(walkPhase)) * 0.15  // Opposite phase
-        let rightKnee = simd_float3(0.15, 0.35 + rightKneeBend, rightLegSwing * 0.6)
-        let rightFootHeight = max(0, -sin(walkPhase)) * 0.1
-        let rightFoot = simd_float3(0.15, rightFootHeight, rightLegSwing)
-        
         vertices.append(Vertex(position: rightHip, color: bodyColor))
         vertices.append(Vertex(position: rightKnee, color: bodyColor))
         vertices.append(Vertex(position: rightKnee, color: bodyColor))
         vertices.append(Vertex(position: rightFoot, color: bodyColor))
         
-        // Update the buffer
         stickFigureVertexCount = vertices.count
         vertices.withUnsafeBytes { ptr in
             memcpy(stickFigureVertexBuffer.contents(), ptr.baseAddress!, ptr.count)
         }
     }
     
-    private func updateProjection(size: CGSize) {
-        // Handle zero or invalid size
-        guard size.width > 0 && size.height > 0 else {
-            let defaultAspect: Float = 16.0 / 9.0
-            projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: defaultAspect, nearZ: 0.1, farZ: 500)
-            return
-        }
-        
-        let aspect = Float(size.width / size.height)
-        
-        // Use a narrower FOV for more isometric feel, extended far plane for larger world
-        projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: aspect, nearZ: 0.1, farZ: 500)
+    // MARK: - Geometry Generation
+    
+    private static func makeStickFigureVertices(device: MTLDevice) -> (MTLBuffer, Int) {
+        let buffer = device.makeBuffer(length: MemoryLayout<Vertex>.stride * 100, options: .storageModeShared)!
+        return (buffer, 0)
     }
     
-    // MARK: - Static helpers for geometry
-    
-    private static func makeGridVertices(device: MTLDevice) -> (MTLBuffer, Int) {
-        // Grid of lines from -100 to 100 on X and Z axes, Y=0 plane
-        // Major lines every 10 units, minor lines every 5 units
+    private static func makeGridLines(device: MTLDevice) -> (MTLBuffer, Int) {
         var vertices: [Vertex] = []
-        
         let gridMin: Float = -100
         let gridMax: Float = 100
-        let majorColor = simd_float4(0.45, 0.45, 0.45, 1)  // Brighter for major lines
-        let minorColor = simd_float4(0.3, 0.3, 0.3, 1)     // Dimmer for minor lines
+        let majorColor = simd_float4(0.3, 0.35, 0.25, 0.6)
+        let minorColor = simd_float4(0.25, 0.3, 0.2, 0.4)
         
-        // Draw grid lines every 5 units
         var i: Float = gridMin
         while i <= gridMax {
             let isMajor = Int(i) % 10 == 0
             let color = isMajor ? majorColor : minorColor
+            let y: Float = 0.01  // Slightly above ground
             
-            // Lines parallel to X axis (varying Z)
-            vertices.append(Vertex(position: simd_float3(gridMin, 0, i), color: color))
-            vertices.append(Vertex(position: simd_float3(gridMax, 0, i), color: color))
-            
-            // Lines parallel to Z axis (varying X)
-            vertices.append(Vertex(position: simd_float3(i, 0, gridMin), color: color))
-            vertices.append(Vertex(position: simd_float3(i, 0, gridMax), color: color))
-            
+            vertices.append(Vertex(position: simd_float3(gridMin, y, i), color: color))
+            vertices.append(Vertex(position: simd_float3(gridMax, y, i), color: color))
+            vertices.append(Vertex(position: simd_float3(i, y, gridMin), color: color))
+            vertices.append(Vertex(position: simd_float3(i, y, gridMax), color: color))
             i += 5
         }
         
-        let vertexCount = vertices.count
-        let buffer = device.makeBuffer(bytes: vertices,
-                                       length: MemoryLayout<Vertex>.stride * vertexCount,
-                                       options: [])!
-        return (buffer, vertexCount)
+        let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<Vertex>.stride * vertices.count, options: [])!
+        return (buffer, vertices.count)
     }
     
-    private static func makeStickFigureVertices(device: MTLDevice) -> (MTLBuffer, Int) {
-        // Create a buffer large enough for the animated stick figure
-        // The animated figure has: head (34), spine (2), arms (8), legs (8) = ~52 vertices
-        // Allocate extra space for safety
-        let maxVertices = 100
-        let bufferSize = MemoryLayout<Vertex>.stride * maxVertices
-        let buffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)!
+    private static func makeGroundMesh(device: MTLDevice) -> (MTLBuffer, Int) {
+        var vertices: [TexturedVertex] = []
+        let size: Float = 100
+        let normal = simd_float3(0, 1, 0)
+        let texScale: Float = 20  // Repeat texture
         
-        // Initial vertex count will be set by updateStickFigureAnimation()
-        return (buffer, 0)
+        // Two triangles for ground quad
+        let corners = [
+            (simd_float3(-size, 0, -size), simd_float2(0, 0)),
+            (simd_float3( size, 0, -size), simd_float2(texScale, 0)),
+            (simd_float3( size, 0,  size), simd_float2(texScale, texScale)),
+            (simd_float3(-size, 0,  size), simd_float2(0, texScale))
+        ]
+        
+        // Triangle 1
+        vertices.append(TexturedVertex(position: corners[0].0, normal: normal, texCoord: corners[0].1, materialIndex: 0))
+        vertices.append(TexturedVertex(position: corners[1].0, normal: normal, texCoord: corners[1].1, materialIndex: 0))
+        vertices.append(TexturedVertex(position: corners[2].0, normal: normal, texCoord: corners[2].1, materialIndex: 0))
+        // Triangle 2
+        vertices.append(TexturedVertex(position: corners[0].0, normal: normal, texCoord: corners[0].1, materialIndex: 0))
+        vertices.append(TexturedVertex(position: corners[2].0, normal: normal, texCoord: corners[2].1, materialIndex: 0))
+        vertices.append(TexturedVertex(position: corners[3].0, normal: normal, texCoord: corners[3].1, materialIndex: 0))
+        
+        let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
+        return (buffer, vertices.count)
     }
     
-    private static func makeLandscapeVertices(device: MTLDevice) -> (MTLBuffer, Int) {
-        var vertices: [Vertex] = []
+    private static func makeTreeMeshes(device: MTLDevice) -> (MTLBuffer, Int) {
+        var vertices: [TexturedVertex] = []
         
-        // Colors for different elements
-        let treeTrunk = simd_float4(0.45, 0.25, 0.1, 1)
-        let treeGreenDark = simd_float4(0.15, 0.5, 0.2, 1)
-        let treeGreenLight = simd_float4(0.25, 0.7, 0.35, 1)
-        let treeGreenMid = simd_float4(0.2, 0.6, 0.28, 1)
-        let rockDark = simd_float4(0.4, 0.38, 0.42, 1)
-        let rockLight = simd_float4(0.6, 0.58, 0.62, 1)
-        let rockMid = simd_float4(0.5, 0.48, 0.52, 1)
-        let postRed = simd_float4(0.9, 0.2, 0.2, 1)
-        let postBlue = simd_float4(0.2, 0.4, 0.9, 1)
-        let postYellow = simd_float4(0.9, 0.8, 0.2, 1)
-        let postPurple = simd_float4(0.7, 0.2, 0.8, 1)
-        let postGreen = simd_float4(0.2, 0.8, 0.3, 1)
-        
-        // Helper to add a detailed pine tree with multiple foliage layers
-        func addDetailedTree(at pos: simd_float3, height: Float = 4.0, baseRadius: Float = 1.5) {
-            let trunkHeight = height * 0.35
-            let trunkRadius: Float = 0.15
-            
-            // Trunk with thickness (4 vertical lines forming a square)
-            let trunkOffsets: [simd_float3] = [
-                simd_float3(-trunkRadius, 0, -trunkRadius),
-                simd_float3( trunkRadius, 0, -trunkRadius),
-                simd_float3( trunkRadius, 0,  trunkRadius),
-                simd_float3(-trunkRadius, 0,  trunkRadius)
-            ]
-            for offset in trunkOffsets {
-                vertices.append(Vertex(position: pos + offset, color: treeTrunk))
-                vertices.append(Vertex(position: pos + offset + simd_float3(0, trunkHeight, 0), color: treeTrunk))
-            }
-            // Trunk horizontal braces
-            for i in 0..<4 {
-                let p1 = pos + trunkOffsets[i]
-                let p2 = pos + trunkOffsets[(i + 1) % 4]
-                vertices.append(Vertex(position: p1, color: treeTrunk))
-                vertices.append(Vertex(position: p2, color: treeTrunk))
-            }
-            
-            // Three layers of foliage (cones)
-            let layerHeights: [Float] = [trunkHeight, trunkHeight + height * 0.25, trunkHeight + height * 0.5]
-            let layerRadii: [Float] = [baseRadius, baseRadius * 0.7, baseRadius * 0.4]
-            let layerTops: [Float] = [trunkHeight + height * 0.35, trunkHeight + height * 0.55, height]
-            let layerColors = [treeGreenDark, treeGreenMid, treeGreenLight]
-            
-            let segments = 8
-            for layer in 0..<3 {
-                let baseY = layerHeights[layer]
-                let topY = layerTops[layer]
-                let radius = layerRadii[layer]
-                let color = layerColors[layer]
-                let apex = pos + simd_float3(0, topY, 0)
-                
-                for i in 0..<segments {
-                    let angle1 = Float(i) / Float(segments) * 2 * .pi
-                    let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
-                    
-                    let p1 = pos + simd_float3(cos(angle1) * radius, baseY, sin(angle1) * radius)
-                    let p2 = pos + simd_float3(cos(angle2) * radius, baseY, sin(angle2) * radius)
-                    
-                    // Base edge
-                    vertices.append(Vertex(position: p1, color: color))
-                    vertices.append(Vertex(position: p2, color: color))
-                    
-                    // Edge to apex
-                    vertices.append(Vertex(position: p1, color: color))
-                    vertices.append(Vertex(position: apex, color: color))
-                }
-            }
-        }
-        
-        // Helper to add a detailed rock formation with multiple faces
-        func addDetailedRock(at pos: simd_float3, size: Float = 0.8) {
-            // Create an irregular rock shape with multiple vertices
-            let s = size
-            let h = size * 1.2
-            
-            // Irregular top with offset peak
-            let peakOffset = simd_float3(s * 0.2, 0, s * 0.15)
-            
-            let corners: [simd_float3] = [
-                pos + simd_float3(-s, 0, -s * 0.8),
-                pos + simd_float3(s * 0.9, 0, -s),
-                pos + simd_float3(s, 0, s * 0.7),
-                pos + simd_float3(-s * 0.7, 0, s),
-                pos + simd_float3(-s * 0.6, h * 0.8, -s * 0.5) + peakOffset,
-                pos + simd_float3(s * 0.5, h, -s * 0.6) + peakOffset,
-                pos + simd_float3(s * 0.6, h * 0.9, s * 0.4) + peakOffset,
-                pos + simd_float3(-s * 0.4, h * 0.7, s * 0.5) + peakOffset,
-            ]
-            
-            // Bottom edges
-            let bottomEdges = [(0, 1), (1, 2), (2, 3), (3, 0)]
-            // Top edges
-            let topEdges = [(4, 5), (5, 6), (6, 7), (7, 4)]
-            // Vertical edges
-            let vertEdges = [(0, 4), (1, 5), (2, 6), (3, 7)]
-            // Cross braces for detail
-            let crossEdges = [(0, 5), (1, 6), (2, 7), (3, 4)]
-            
-            for (a, b) in bottomEdges {
-                vertices.append(Vertex(position: corners[a], color: rockDark))
-                vertices.append(Vertex(position: corners[b], color: rockDark))
-            }
-            for (a, b) in topEdges {
-                vertices.append(Vertex(position: corners[a], color: rockLight))
-                vertices.append(Vertex(position: corners[b], color: rockLight))
-            }
-            for (a, b) in vertEdges {
-                vertices.append(Vertex(position: corners[a], color: rockMid))
-                vertices.append(Vertex(position: corners[b], color: rockMid))
-            }
-            for (a, b) in crossEdges {
-                vertices.append(Vertex(position: corners[a], color: rockDark))
-                vertices.append(Vertex(position: corners[b], color: rockDark))
-            }
-        }
-        
-        // Helper to add a boulder cluster (3-4 rocks together)
-        func addBoulderCluster(at pos: simd_float3, baseSize: Float = 1.0) {
-            addDetailedRock(at: pos, size: baseSize)
-            addDetailedRock(at: pos + simd_float3(baseSize * 1.2, 0, baseSize * 0.3), size: baseSize * 0.7)
-            addDetailedRock(at: pos + simd_float3(-baseSize * 0.4, 0, baseSize * 1.0), size: baseSize * 0.5)
-        }
-        
-        // Helper to add a vertical post/pole with color
-        func addPost(at pos: simd_float3, height: Float = 3.0, color: simd_float4) {
-            let top = pos + simd_float3(0, height, 0)
-            vertices.append(Vertex(position: pos, color: color))
-            vertices.append(Vertex(position: top, color: color))
-            
-            // Add a larger cross at top for visibility at distance
-            let crossSize: Float = 0.4
-            vertices.append(Vertex(position: top + simd_float3(-crossSize, 0, 0), color: color))
-            vertices.append(Vertex(position: top + simd_float3( crossSize, 0, 0), color: color))
-            vertices.append(Vertex(position: top + simd_float3(0, 0, -crossSize), color: color))
-            vertices.append(Vertex(position: top + simd_float3(0, 0,  crossSize), color: color))
-            // Vertical marker
-            vertices.append(Vertex(position: top, color: color))
-            vertices.append(Vertex(position: top + simd_float3(0, crossSize, 0), color: color))
-        }
-        
-        // Simple seeded random for reproducible placement
         func seededRandom(_ seed: Int) -> Float {
             let x = sin(Float(seed) * 12.9898 + Float(seed) * 78.233) * 43758.5453
             return x - floor(x)
         }
         
-        // Place trees across the larger grid (approximately every 15-25 units with variation)
-        var treeSeed = 1
+        func addCylinder(at pos: simd_float3, radius: Float, height: Float, segments: Int, material: UInt32) {
+            for i in 0..<segments {
+                let angle1 = Float(i) / Float(segments) * 2 * .pi
+                let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+                
+                let x1 = cos(angle1) * radius
+                let z1 = sin(angle1) * radius
+                let x2 = cos(angle2) * radius
+                let z2 = sin(angle2) * radius
+                
+                let n1 = simd_normalize(simd_float3(cos(angle1), 0, sin(angle1)))
+                let n2 = simd_normalize(simd_float3(cos(angle2), 0, sin(angle2)))
+                
+                let u1 = Float(i) / Float(segments)
+                let u2 = Float(i + 1) / Float(segments)
+                
+                let bl = pos + simd_float3(x1, 0, z1)
+                let br = pos + simd_float3(x2, 0, z2)
+                let tl = pos + simd_float3(x1, height, z1)
+                let tr = pos + simd_float3(x2, height, z2)
+                
+                vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(u1, 1), materialIndex: material))
+                vertices.append(TexturedVertex(position: br, normal: n2, texCoord: simd_float2(u2, 1), materialIndex: material))
+                vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(u2, 0), materialIndex: material))
+                
+                vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(u1, 1), materialIndex: material))
+                vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(u2, 0), materialIndex: material))
+                vertices.append(TexturedVertex(position: tl, normal: n1, texCoord: simd_float2(u1, 0), materialIndex: material))
+            }
+        }
+        
+        func addCone(at pos: simd_float3, radius: Float, height: Float, segments: Int, material: UInt32) {
+            let apex = pos + simd_float3(0, height, 0)
+            
+            for i in 0..<segments {
+                let angle1 = Float(i) / Float(segments) * 2 * .pi
+                let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+                
+                let x1 = cos(angle1) * radius
+                let z1 = sin(angle1) * radius
+                let x2 = cos(angle2) * radius
+                let z2 = sin(angle2) * radius
+                
+                let p1 = pos + simd_float3(x1, 0, z1)
+                let p2 = pos + simd_float3(x2, 0, z2)
+                
+                // Calculate face normal
+                let edge1 = p2 - p1
+                let edge2 = apex - p1
+                let normal = simd_normalize(simd_cross(edge1, edge2))
+                
+                let u1 = Float(i) / Float(segments)
+                let u2 = Float(i + 1) / Float(segments)
+                
+                vertices.append(TexturedVertex(position: p1, normal: normal, texCoord: simd_float2(u1, 1), materialIndex: material))
+                vertices.append(TexturedVertex(position: p2, normal: normal, texCoord: simd_float2(u2, 1), materialIndex: material))
+                vertices.append(TexturedVertex(position: apex, normal: normal, texCoord: simd_float2((u1 + u2) / 2, 0), materialIndex: material))
+            }
+        }
+        
+        func addTree(at pos: simd_float3, height: Float, radius: Float) {
+            let trunkHeight = height * 0.35
+            let trunkRadius = radius * 0.12
+            
+            addCylinder(at: pos, radius: trunkRadius, height: trunkHeight, segments: 8, material: 1)
+            
+            // Three cone layers for foliage
+            let layerHeights: [Float] = [trunkHeight * 0.8, trunkHeight + height * 0.2, trunkHeight + height * 0.4]
+            let layerRadii: [Float] = [radius, radius * 0.7, radius * 0.4]
+            let coneHeights: [Float] = [height * 0.35, height * 0.3, height * 0.3]
+            
+            for i in 0..<3 {
+                addCone(at: pos + simd_float3(0, layerHeights[i], 0), radius: layerRadii[i], height: coneHeights[i], segments: 8, material: 2)
+            }
+        }
+        
+        var seed = 1
         for gridX in stride(from: -90, through: 90, by: 12) {
             for gridZ in stride(from: -90, through: 90, by: 12) {
-                // Skip area near origin for visibility
-                if abs(gridX) < 8 && abs(gridZ) < 8 { continue }
+                if abs(gridX) < 8 && abs(gridZ) < 8 { seed += 5; continue }
                 
-                // Random offset within cell
-                let offsetX = (seededRandom(treeSeed) - 0.5) * 10
-                let offsetZ = (seededRandom(treeSeed + 1) - 0.5) * 10
-                let height = 3.5 + seededRandom(treeSeed + 2) * 3.0  // 3.5 to 6.5
-                let radius = 1.0 + seededRandom(treeSeed + 3) * 1.0  // 1.0 to 2.0
+                let offsetX = (seededRandom(seed) - 0.5) * 10
+                let offsetZ = (seededRandom(seed + 1) - 0.5) * 10
+                let height = 3.5 + seededRandom(seed + 2) * 3.0
+                let radius = 1.0 + seededRandom(seed + 3) * 1.0
                 
-                // 70% chance to place a tree
-                if seededRandom(treeSeed + 4) < 0.7 {
-                    addDetailedTree(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), 
-                                   height: height, baseRadius: radius)
+                if seededRandom(seed + 4) < 0.7 {
+                    addTree(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), height: height, radius: radius)
                 }
-                treeSeed += 5
+                seed += 5
             }
         }
         
-        // Place rocks and boulder clusters
-        var rockSeed = 1000
-        for gridX in stride(from: -85, through: 85, by: 18) {
-            for gridZ in stride(from: -85, through: 85, by: 18) {
-                // Skip area near origin
-                if abs(gridX) < 10 && abs(gridZ) < 10 { continue }
-                
-                let offsetX = (seededRandom(rockSeed) - 0.5) * 12
-                let offsetZ = (seededRandom(rockSeed + 1) - 0.5) * 12
-                let size = 0.6 + seededRandom(rockSeed + 2) * 0.8  // 0.6 to 1.4
-                
-                // 50% chance for cluster, 30% for single rock
-                let chance = seededRandom(rockSeed + 3)
-                if chance < 0.3 {
-                    addDetailedRock(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), size: size)
-                } else if chance < 0.6 {
-                    addBoulderCluster(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), baseSize: size)
-                }
-                rockSeed += 4
-            }
-        }
-        
-        // Place colored posts at corners and key positions for orientation (scaled up)
-        addPost(at: simd_float3(0, 0, 0), height: 5.0, color: postYellow)         // Origin marker (tall yellow)
-        addPost(at: simd_float3(-95, 0, -95), height: 4.0, color: postRed)        // Corner 1
-        addPost(at: simd_float3( 95, 0, -95), height: 4.0, color: postBlue)       // Corner 2
-        addPost(at: simd_float3(-95, 0,  95), height: 4.0, color: postPurple)     // Corner 3
-        addPost(at: simd_float3( 95, 0,  95), height: 4.0, color: postGreen)      // Corner 4
-        
-        // Posts along edges every 50 units for navigation
-        for i in stride(from: -50, through: 50, by: 50) {
-            if i != 0 {  // Skip origin
-                addPost(at: simd_float3(Float(i), 0, -95), height: 3.0, color: postBlue)
-                addPost(at: simd_float3(Float(i), 0,  95), height: 3.0, color: postPurple)
-                addPost(at: simd_float3(-95, 0, Float(i)), height: 3.0, color: postRed)
-                addPost(at: simd_float3( 95, 0, Float(i)), height: 3.0, color: postGreen)
-            }
-        }
-        
-        let vertexCount = vertices.count
-        let buffer = device.makeBuffer(bytes: vertices,
-                                       length: MemoryLayout<Vertex>.stride * vertexCount,
-                                       options: [])!
-        return (buffer, vertexCount)
+        let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
+        return (buffer, vertices.count)
     }
     
-    private static func makeCubeVertices(device: MTLDevice) -> (MTLBuffer?, Int) {
-        // 12 triangles, 36 vertices, each with position and color
-        struct V { var p: simd_float3; var c: simd_float4 }
-        let cRed = simd_float4(1,0,0,1)
-        let cGreen = simd_float4(0,1,0,1)
-        let cBlue = simd_float4(0,0,1,1)
-        let cYellow = simd_float4(1,1,0,1)
-        let cCyan = simd_float4(0,1,1,1)
-        let cMagenta = simd_float4(1,0,1,1)
-        let s: Float = 1.5 // size (increased from 0.8)
-        // Define 6 faces, two triangles each
-        var verts: [Vertex] = []
-        func addTri(_ a: simd_float3, _ b: simd_float3, _ c: simd_float3, _ color: simd_float4) {
-            verts.append(Vertex(position: a, color: color))
-            verts.append(Vertex(position: b, color: color))
-            verts.append(Vertex(position: c, color: color))
+    private static func makeRockMeshes(device: MTLDevice) -> (MTLBuffer, Int) {
+        var vertices: [TexturedVertex] = []
+        
+        func seededRandom(_ seed: Int) -> Float {
+            let x = sin(Float(seed) * 12.9898 + Float(seed) * 78.233) * 43758.5453
+            return x - floor(x)
         }
-        // Front (z = +s)
-        addTri(simd_float3(-s,-s, s), simd_float3( s,-s, s), simd_float3( s, s, s), cRed)
-        addTri(simd_float3(-s,-s, s), simd_float3( s, s, s), simd_float3(-s, s, s), cRed)
-        // Back (z = -s)
-        addTri(simd_float3( s,-s,-s), simd_float3(-s,-s,-s), simd_float3(-s, s,-s), cGreen)
-        addTri(simd_float3( s,-s,-s), simd_float3(-s, s,-s), simd_float3( s, s,-s), cGreen)
-        // Left (x = -s)
-        addTri(simd_float3(-s,-s,-s), simd_float3(-s,-s, s), simd_float3(-s, s, s), cBlue)
-        addTri(simd_float3(-s,-s,-s), simd_float3(-s, s, s), simd_float3(-s, s,-s), cBlue)
-        // Right (x = +s)
-        addTri(simd_float3( s,-s, s), simd_float3( s,-s,-s), simd_float3( s, s,-s), cYellow)
-        addTri(simd_float3( s,-s, s), simd_float3( s, s,-s), simd_float3( s, s, s), cYellow)
-        // Top (y = +s)
-        addTri(simd_float3(-s, s, s), simd_float3( s, s, s), simd_float3( s, s,-s), cCyan)
-        addTri(simd_float3(-s, s, s), simd_float3( s, s,-s), simd_float3(-s, s,-s), cCyan)
-        // Bottom (y = -s)
-        addTri(simd_float3(-s,-s,-s), simd_float3( s,-s,-s), simd_float3( s,-s, s), cMagenta)
-        addTri(simd_float3(-s,-s,-s), simd_float3( s,-s, s), simd_float3(-s,-s, s), cMagenta)
-        let count = verts.count
-        let buf = device.makeBuffer(bytes: verts, length: MemoryLayout<Vertex>.stride * count, options: [])
-        return (buf, count)
+        
+        func addRock(at pos: simd_float3, size: Float) {
+            let s = size
+            let h = size * 1.2
+            
+            // Irregular rock vertices
+            let corners: [simd_float3] = [
+                pos + simd_float3(-s * 0.9, 0, -s * 0.8),
+                pos + simd_float3(s * 0.85, 0, -s * 0.95),
+                pos + simd_float3(s * 0.9, 0, s * 0.75),
+                pos + simd_float3(-s * 0.75, 0, s * 0.9),
+                pos + simd_float3(-s * 0.5, h * 0.9, -s * 0.4),
+                pos + simd_float3(s * 0.45, h, -s * 0.5),
+                pos + simd_float3(s * 0.5, h * 0.85, s * 0.35),
+                pos + simd_float3(-s * 0.4, h * 0.8, s * 0.45)
+            ]
+            
+            // Define faces (as triangles)
+            let faces: [(Int, Int, Int)] = [
+                // Bottom
+                (0, 2, 1), (0, 3, 2),
+                // Top
+                (4, 5, 6), (4, 6, 7),
+                // Sides
+                (0, 1, 5), (0, 5, 4),
+                (1, 2, 6), (1, 6, 5),
+                (2, 3, 7), (2, 7, 6),
+                (3, 0, 4), (3, 4, 7)
+            ]
+            
+            for (a, b, c) in faces {
+                let edge1 = corners[b] - corners[a]
+                let edge2 = corners[c] - corners[a]
+                let normal = simd_normalize(simd_cross(edge1, edge2))
+                
+                vertices.append(TexturedVertex(position: corners[a], normal: normal, texCoord: simd_float2(0, 0), materialIndex: 3))
+                vertices.append(TexturedVertex(position: corners[b], normal: normal, texCoord: simd_float2(1, 0), materialIndex: 3))
+                vertices.append(TexturedVertex(position: corners[c], normal: normal, texCoord: simd_float2(0.5, 1), materialIndex: 3))
+            }
+        }
+        
+        var seed = 1000
+        for gridX in stride(from: -85, through: 85, by: 18) {
+            for gridZ in stride(from: -85, through: 85, by: 18) {
+                if abs(gridX) < 10 && abs(gridZ) < 10 { seed += 4; continue }
+                
+                let offsetX = (seededRandom(seed) - 0.5) * 12
+                let offsetZ = (seededRandom(seed + 1) - 0.5) * 12
+                let size = 0.6 + seededRandom(seed + 2) * 0.8
+                
+                let chance = seededRandom(seed + 3)
+                if chance < 0.5 {
+                    addRock(at: simd_float3(Float(gridX) + offsetX, 0, Float(gridZ) + offsetZ), size: size)
+                    // Add cluster
+                    if chance < 0.25 {
+                        addRock(at: simd_float3(Float(gridX) + offsetX + size * 1.2, 0, Float(gridZ) + offsetZ + size * 0.3), size: size * 0.7)
+                        addRock(at: simd_float3(Float(gridX) + offsetX - size * 0.4, 0, Float(gridZ) + offsetZ + size * 1.0), size: size * 0.5)
+                    }
+                }
+                seed += 4
+            }
+        }
+        
+        let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
+        return (buffer, vertices.count)
+    }
+    
+    private static func makePoleMeshes(device: MTLDevice) -> (MTLBuffer, Int) {
+        var vertices: [TexturedVertex] = []
+        
+        func addPole(at pos: simd_float3, height: Float, radius: Float = 0.15) {
+            let segments = 6
+            for i in 0..<segments {
+                let angle1 = Float(i) / Float(segments) * 2 * .pi
+                let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+                
+                let x1 = cos(angle1) * radius
+                let z1 = sin(angle1) * radius
+                let x2 = cos(angle2) * radius
+                let z2 = sin(angle2) * radius
+                
+                let n1 = simd_normalize(simd_float3(cos(angle1), 0, sin(angle1)))
+                let n2 = simd_normalize(simd_float3(cos(angle2), 0, sin(angle2)))
+                
+                let bl = pos + simd_float3(x1, 0, z1)
+                let br = pos + simd_float3(x2, 0, z2)
+                let tl = pos + simd_float3(x1, height, z1)
+                let tr = pos + simd_float3(x2, height, z2)
+                
+                vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(0, 1), materialIndex: 4))
+                vertices.append(TexturedVertex(position: br, normal: n2, texCoord: simd_float2(1, 1), materialIndex: 4))
+                vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(1, 0), materialIndex: 4))
+                
+                vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(0, 1), materialIndex: 4))
+                vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(1, 0), materialIndex: 4))
+                vertices.append(TexturedVertex(position: tl, normal: n1, texCoord: simd_float2(0, 0), materialIndex: 4))
+            }
+            
+            // Top cap
+            let topCenter = pos + simd_float3(0, height, 0)
+            let topNormal = simd_float3(0, 1, 0)
+            for i in 0..<segments {
+                let angle1 = Float(i) / Float(segments) * 2 * .pi
+                let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+                
+                let p1 = pos + simd_float3(cos(angle1) * radius, height, sin(angle1) * radius)
+                let p2 = pos + simd_float3(cos(angle2) * radius, height, sin(angle2) * radius)
+                
+                vertices.append(TexturedVertex(position: topCenter, normal: topNormal, texCoord: simd_float2(0.5, 0.5), materialIndex: 4))
+                vertices.append(TexturedVertex(position: p1, normal: topNormal, texCoord: simd_float2(0, 0), materialIndex: 4))
+                vertices.append(TexturedVertex(position: p2, normal: topNormal, texCoord: simd_float2(1, 0), materialIndex: 4))
+            }
+        }
+        
+        // Corner posts
+        addPole(at: simd_float3(0, 0, 0), height: 5.0, radius: 0.2)
+        addPole(at: simd_float3(-95, 0, -95), height: 4.0)
+        addPole(at: simd_float3(95, 0, -95), height: 4.0)
+        addPole(at: simd_float3(-95, 0, 95), height: 4.0)
+        addPole(at: simd_float3(95, 0, 95), height: 4.0)
+        
+        // Edge posts
+        for i in stride(from: -50, through: 50, by: 50) {
+            if i != 0 {
+                addPole(at: simd_float3(Float(i), 0, -95), height: 3.0)
+                addPole(at: simd_float3(Float(i), 0, 95), height: 3.0)
+                addPole(at: simd_float3(-95, 0, Float(i)), height: 3.0)
+                addPole(at: simd_float3(95, 0, Float(i)), height: 3.0)
+            }
+        }
+        
+        let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
+        return (buffer, vertices.count)
     }
 }
 
-// MARK: - Math helpers
+// MARK: - Math Helpers
 
 func perspectiveFovRH(fovYRadians fovY: Float, aspectRatio aspect: Float, nearZ near: Float, farZ far: Float) -> simd_float4x4 {
-    // Right handed coordinate system
     let yScale = 1 / tan(fovY * 0.5)
     let xScale = yScale / aspect
     let zRange = far - near
@@ -883,55 +1219,46 @@ func perspectiveFovRH(fovYRadians fovY: Float, aspectRatio aspect: Float, nearZ 
     let wzScale = -2 * far * near / zRange
     
     return simd_float4x4(
-        simd_float4(xScale,    0,       0,     0),
-        simd_float4(0,       yScale,    0,     0),
-        simd_float4(0,         0,    zScale,  -1),
-        simd_float4(0,         0,   wzScale,  0)
+        simd_float4(xScale, 0, 0, 0),
+        simd_float4(0, yScale, 0, 0),
+        simd_float4(0, 0, zScale, -1),
+        simd_float4(0, 0, wzScale, 0)
     )
 }
 
 func lookAt(eye: simd_float3, center: simd_float3, up: simd_float3) -> simd_float4x4 {
-    let z = simd_normalize(eye - center) // forward
+    let z = simd_normalize(eye - center)
     let x = simd_normalize(simd_cross(up, z))
     let y = simd_cross(z, x)
     
-    let col0 = simd_float4(x.x, y.x, z.x, 0)
-    let col1 = simd_float4(x.y, y.y, z.y, 0)
-    let col2 = simd_float4(x.z, y.z, z.z, 0)
-    let col3 = simd_float4(-simd_dot(x, eye), -simd_dot(y, eye), -simd_dot(z, eye), 1)
-    
-    return simd_float4x4(columns: (col0, col1, col2, col3))
+    return simd_float4x4(columns: (
+        simd_float4(x.x, y.x, z.x, 0),
+        simd_float4(x.y, y.y, z.y, 0),
+        simd_float4(x.z, y.z, z.z, 0),
+        simd_float4(-simd_dot(x, eye), -simd_dot(y, eye), -simd_dot(z, eye), 1)
+    ))
 }
+
 func rotationY(_ angle: Float) -> simd_float4x4 {
     let c = cos(angle)
     let s = sin(angle)
     return simd_float4x4(
-        simd_float4( c, 0,  s, 0),
-        simd_float4( 0, 1,  0, 0),
-        simd_float4(-s, 0,  c, 0),
-        simd_float4( 0, 0,  0, 1)
-    )
-}
-
-func rotationX(_ angle: Float) -> simd_float4x4 {
-    let c = cos(angle)
-    let s = sin(angle)
-    return simd_float4x4(
-        simd_float4(1,  0, 0, 0),
-        simd_float4(0,  c, -s, 0),
-        simd_float4(0,  s,  c, 0),
-        simd_float4(0,  0, 0, 1)
+        simd_float4(c, 0, s, 0),
+        simd_float4(0, 1, 0, 0),
+        simd_float4(-s, 0, c, 0),
+        simd_float4(0, 0, 0, 1)
     )
 }
 
 func translation(_ x: Float, _ y: Float, _ z: Float) -> simd_float4x4 {
     return simd_float4x4(
-        simd_float4(1,0,0,0),
-        simd_float4(0,1,0,0),
-        simd_float4(0,0,1,0),
-        simd_float4(x,y,z,1)
+        simd_float4(1, 0, 0, 0),
+        simd_float4(0, 1, 0, 0),
+        simd_float4(0, 0, 1, 0),
+        simd_float4(x, y, z, 1)
     )
 }
+
 func orthographicRH(left: Float, right: Float, bottom: Float, top: Float, near: Float, far: Float) -> simd_float4x4 {
     let rml = right - left
     let tmb = top - bottom
@@ -943,4 +1270,3 @@ func orthographicRH(left: Float, right: Float, bottom: Float, top: Float, near: 
         simd_float4(-(right + left) / rml, -(top + bottom) / tmb, -near / fmn, 1)
     )
 }
-
