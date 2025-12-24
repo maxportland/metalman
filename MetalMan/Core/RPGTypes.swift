@@ -483,8 +483,13 @@ final class PlayerCharacter: @unchecked Sendable {
     }
     
     /// Heal HP
-    func heal(_ amount: Int) {
+    /// Heal the character by a specified amount
+    /// - Returns: The actual amount healed
+    @discardableResult
+    func heal(_ amount: Int) -> Int {
+        let previousHP = vitals.currentHP
         vitals.currentHP = min(effectiveMaxHP, vitals.currentHP + amount)
+        return vitals.currentHP - previousHP
     }
     
     /// Gain XP and check for level up
@@ -600,9 +605,10 @@ enum ItemTemplates {
             rarity: size,
             stackable: true,
             maxStackSize: 10,
-            value: 25 * (size.rawValue + 1)
+            value: 20 * (size.rawValue + 1)
         )
-        item.healAmount = 25 * (size.rawValue + 1)
+        // Base heal: 20 HP, scales with rarity
+        item.healAmount = 20 * (size.rawValue + 1)
         return item
     }
     

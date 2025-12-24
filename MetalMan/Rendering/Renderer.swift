@@ -294,8 +294,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Give starter items
         player.inventory.addItem(ItemTemplates.healthPotion(size: .common), quantity: 3)
-        player.inventory.addItem(ItemTemplates.sword(rarity: .common))
         player.inventory.addGold(50)
+        
+        // Equip starting sword
+        player.equipment.equip(ItemTemplates.sword(rarity: .common))
         
         guard let commandQueue = device.makeCommandQueue() else {
             fatalError("Failed to create command queue")
@@ -692,14 +694,52 @@ final class Renderer: NSObject, MTKViewDelegate {
         print("[Enemies] Spawned \(enemyManager.count) bandits")
     }
     
-    /// Try to interact with nearby chests
+    /// Try to interact with nearby chests or corpses
     func tryInteract() {
+        // Check for treasure chests first
         for i in 0..<interactables.count {
             if interactables[i].canInteract(playerPosition: characterPosition) {
                 openChest(at: i)
-                break
+                return
             }
         }
+        
+        // Check for lootable corpses
+        if let corpse = enemyManager.findLootableCorpse(near: characterPosition) {
+            lootCorpse(corpse)
+        }
+    }
+    
+    /// Loot a dead enemy's corpse
+    private func lootCorpse(_ enemy: Enemy) {
+        guard !enemy.isLooted else { return }
+        
+        enemy.isLooted = true
+        
+        // Collect gold
+        if enemy.lootGold > 0 {
+            player.inventory.addGold(enemy.lootGold)
+        }
+        
+        // Collect items
+        var itemName: String? = nil
+        var itemRarity: String? = nil
+        
+        for item in enemy.lootItems {
+            player.inventory.addItem(item)
+            itemName = item.name
+            itemRarity = item.rarity.name
+        }
+        
+        // Show loot notification
+        if enemy.lootGold > 0 || !enemy.lootItems.isEmpty {
+            hudViewModel?.showLoot(gold: enemy.lootGold, itemName: itemName, itemRarity: itemRarity, title: "💀 Looted \(enemy.type.rawValue)!")
+        }
+        
+        // Give XP for kill
+        player.gainXP(enemy.type.xpReward)
+        
+        hudViewModel?.update()
     }
     
     /// Open a chest and give loot to player
@@ -1025,7 +1065,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard enemyMesh.vertexCount > 0 else { return }
         
         // Draw each enemy with its own model matrix
-        let enemies = enemyManager.enemies.filter { $0.isAlive || $0.stateTimer < 2.0 }
+        let enemies = enemyManager.enemies.filter { $0.isAlive || $0.stateTimer < 60.0 }
         
         encoder.setVertexBuffer(enemyMesh.vertexBuffer, offset: 0, index: 0)
         

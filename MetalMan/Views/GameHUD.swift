@@ -1,12 +1,22 @@
 import SwiftUI
 
-/// Represents loot found in a chest
+/// Represents a notification (loot, heal, etc.)
 struct LootNotification: Identifiable {
     let id = UUID()
     let gold: Int
     let itemName: String?
     let itemRarity: String?
+    let title: String
+    let icon: String
     var opacity: Double = 1.0
+    
+    init(gold: Int, itemName: String?, itemRarity: String?, title: String = "🎁 Treasure Found!", icon: String = "circle.fill") {
+        self.gold = gold
+        self.itemName = itemName
+        self.itemRarity = itemRarity
+        self.title = title
+        self.icon = icon
+    }
 }
 
 /// Represents a floating damage number on screen
@@ -355,7 +365,7 @@ struct GameHUD: View {
     
     private func lootNotificationView(loot: LootNotification) -> some View {
         VStack(spacing: 8) {
-            Text("🎁 Treasure Found!")
+            Text(loot.title)
                 .font(.system(size: 18, weight: .bold, design: .rounded))
                 .foregroundColor(.yellow)
             
@@ -528,6 +538,8 @@ final class GameHUDViewModel {
     func bind(to player: PlayerCharacter) {
         self.player = player
         update()
+        updateInventorySlots()
+        updateEquipmentDisplay()
     }
     
     func update() {
@@ -546,13 +558,13 @@ final class GameHUDViewModel {
     }
     
     /// Show a loot notification for the given gold and item
-    func showLoot(gold: Int, itemName: String?, itemRarity: String?) {
+    func showLoot(gold: Int, itemName: String?, itemRarity: String?, title: String = "🎁 Treasure Found!", icon: String = "circle.fill") {
         // Cancel any existing dismiss task
         lootDismissTask?.cancel()
         
         // Show the new loot
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-            currentLoot = LootNotification(gold: gold, itemName: itemName, itemRarity: itemRarity)
+            currentLoot = LootNotification(gold: gold, itemName: itemName, itemRarity: itemRarity, title: title, icon: icon)
         }
         
         // Auto-dismiss after 3 seconds
@@ -630,6 +642,12 @@ final class GameHUDViewModel {
         
         let item = stack.item
         
+        // Handle consumables (potions, etc.)
+        if item.category == .consumable {
+            consumeItem(at: slotIndex)
+            return
+        }
+        
         // Only equip if it has an equipment slot
         guard item.equipSlot != nil else {
             print("[Inventory] Item '\(item.name)' is not equippable")
@@ -651,6 +669,41 @@ final class GameHUDViewModel {
         // Update display
         updateInventorySlots()
         updateEquipmentDisplay()
+    }
+    
+    /// Consume an item (potions, etc.)
+    func consumeItem(at slotIndex: Int) {
+        print("[Inventory] consumeItem called for slot \(slotIndex)")
+        
+        guard let player = player else {
+            print("[Inventory] ERROR: player is nil")
+            return
+        }
+        guard slotIndex >= 0 && slotIndex < player.inventory.slots.count else {
+            print("[Inventory] ERROR: slotIndex out of range")
+            return
+        }
+        guard let stack = player.inventory.slots[slotIndex] else {
+            print("[Inventory] ERROR: no item in slot")
+            return
+        }
+        
+        let item = stack.item
+        
+        // Apply the consumable's effect
+        if item.healAmount > 0 {
+            let healed = player.heal(item.healAmount)
+            print("[Inventory] Consumed '\(item.name)', healed \(healed) HP")
+            // Show heal notification
+            showLoot(gold: 0, itemName: "+\(healed) HP", itemRarity: "common", title: "💚 Healed!", icon: "heart.fill")
+        }
+        
+        // Remove one from the stack
+        player.inventory.removeItem(at: slotIndex, quantity: 1)
+        
+        // Update display
+        updateInventorySlots()
+        update()
     }
     
     /// Unequip item from main hand and return to inventory

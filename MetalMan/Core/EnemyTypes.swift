@@ -104,6 +104,11 @@ final class Enemy: Identifiable {
     var walkPhase: Float = 0
     var hurtTimer: Float = 0
     
+    // Loot
+    var isLooted: Bool = false
+    var lootGold: Int = 0
+    var lootItems: [Item] = []
+    
     // Collider for collision detection
     var collider: Collider {
         Collider.circle(x: position.x, z: position.z, radius: 0.4)
@@ -119,6 +124,27 @@ final class Enemy: Identifiable {
         self.currentHP = type.maxHP
     }
     
+    /// Generate loot when killed
+    func generateLoot() {
+        guard !isLooted else { return }
+        
+        // Gold based on enemy type
+        lootGold = Int.random(in: type.goldDrop)
+        
+        // Random chance for items
+        let roll = Float.random(in: 0...1)
+        
+        if roll < 0.15 {
+            // 15% chance for a sword
+            let rarities: [ItemRarity] = [.common, .common, .common, .uncommon]
+            lootItems.append(ItemTemplates.sword(rarity: rarities.randomElement()!))
+        } else if roll < 0.40 {
+            // 25% chance for a potion
+            lootItems.append(ItemTemplates.healthPotion(size: .common))
+        }
+        // 60% chance for just gold
+    }
+    
     var isAlive: Bool { currentHP > 0 }
     var hpPercentage: Float { Float(currentHP) / Float(maxHP) }
     
@@ -131,6 +157,7 @@ final class Enemy: Identifiable {
         if currentHP <= 0 {
             state = .dead
             stateTimer = 0
+            generateLoot()  // Generate loot on death
         } else {
             // Brief hurt stagger
             hurtTimer = 0.2
@@ -364,18 +391,26 @@ final class EnemyManager {
         enemies.append(enemy)
     }
     
-    /// Remove dead enemies after their death animation
+    /// Remove dead enemies after corpse despawn time (60 seconds)
     func removeDeadEnemies() {
         enemies.removeAll { enemy in
-            enemy.state == .dead && enemy.stateTimer > 2.0
+            enemy.state == .dead && enemy.stateTimer > 60.0
         }
     }
     
     /// Update all enemies
     func update(deltaTime dt: Float, playerPosition: simd_float3, terrain: Terrain) {
-        for enemy in enemies where enemy.isAlive {
-            enemy.update(deltaTime: dt, playerPosition: playerPosition, terrain: terrain)
+        for enemy in enemies {
+            if enemy.isAlive {
+                enemy.update(deltaTime: dt, playerPosition: playerPosition, terrain: terrain)
+            } else {
+                // Update dead enemies' state timer for death animation
+                enemy.stateTimer += dt
+            }
         }
+        
+        // Remove enemies that have been dead for too long (1 minute after death)
+        enemies.removeAll { $0.state == .dead && $0.stateTimer > 60.0 }
         
         // Update damage numbers
         for i in damageNumbers.indices.reversed() {
@@ -425,5 +460,22 @@ final class EnemyManager {
     /// Get enemy count
     var count: Int { enemies.count }
     var aliveCount: Int { enemies.filter { $0.isAlive }.count }
+    
+    /// Find a lootable corpse near the player
+    func findLootableCorpse(near position: simd_float3, range: Float = 2.0) -> Enemy? {
+        for enemy in enemies {
+            guard enemy.state == .dead && !enemy.isLooted else { continue }
+            
+            let dist = simd_distance(
+                simd_float2(position.x, position.z),
+                simd_float2(enemy.position.x, enemy.position.z)
+            )
+            
+            if dist <= range {
+                return enemy
+            }
+        }
+        return nil
+    }
 }
 

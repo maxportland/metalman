@@ -24,7 +24,7 @@ class EnemyMesh {
         vertices.reserveCapacity(min(enemies.count * 600, maxTotalVertices))
         enemyVertexRanges = []
         
-        for enemy in enemies where enemy.isAlive || enemy.stateTimer < 2.0 {
+        for enemy in enemies where enemy.isAlive || enemy.stateTimer < 60.0 {
             // Stop if we're approaching buffer limit
             if vertices.count > maxTotalVertices - maxVerticesPerEnemy {
                 print("[EnemyMesh] Warning: Too many enemies, some not rendered")
@@ -63,9 +63,9 @@ class EnemyMesh {
         let legSwingAmount: Float = enemy.state == .chasing ? 0.6 : 0.4
         let armSwingAmount: Float = 0.35
         
-        // Death animation - fall over
+        // Death animation - fall backwards with pivot at feet
         let deathProgress = isDead ? min(enemy.stateTimer / 1.0, 1.0) : 0
-        let fallAngle = deathProgress * (.pi / 2)  // Fall forward
+        let fallAngle = deathProgress * (.pi / 2)  // Fall backwards (positive angle rotates head to +Z)
         
         // Body bob during walking
         let isMoving = enemy.state == .patrolling || enemy.state == .chasing
@@ -85,13 +85,19 @@ class EnemyMesh {
         // Apply death rotation transform to all positions
         func applyDeathTransform(_ pos: simd_float3) -> simd_float3 {
             if !isDead { return pos }
-            // Rotate around hip point, falling forward
-            let pivotY = hipY
+            // Rotate around feet (ground level), falling backwards
+            let pivotY: Float = 0.0  // Pivot at feet/ground level
             let relY = pos.y - pivotY
             let relZ = pos.z
-            let newY = pivotY + relY * cos(fallAngle) - relZ * sin(fallAngle)
+            var newY = pivotY + relY * cos(fallAngle) - relZ * sin(fallAngle)
             let newZ = relZ * cos(fallAngle) + relY * sin(fallAngle)
-            return simd_float3(pos.x, max(0.1, newY), newZ)
+            
+            // Add offset so body rests ON the ground, not in it
+            // When fully fallen (deathProgress = 1), add ~0.15 units to lift body above ground
+            let groundOffset: Float = 0.15 * deathProgress
+            newY += groundOffset
+            
+            return simd_float3(pos.x, max(groundOffset, newY), newZ)
         }
         
         // HEAD
