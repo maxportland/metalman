@@ -64,6 +64,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Input from keyboard/touch
     var movementVector: simd_float2 = .zero
     var lookDelta: simd_float2 = .zero
+    var jumpPressed: Bool = false
     
     // Character state
     private var characterPosition: simd_float3 = .zero
@@ -73,8 +74,33 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     // Walking animation state
     private var walkPhase: Float = 0
-    private var walkSpeed: Float = 12.0
     private var isMoving: Bool = false
+    
+    // ============================================
+    // WALK ANIMATION CONFIGURATION
+    // ============================================
+    // stepsPerUnitDistance: How many full leg swings (steps) per unit of distance traveled
+    // - Lower values = slower animation (legs move less frequently)
+    // - Higher values = faster animation (legs move more frequently)
+    // - Recommended range: 0.5 to 3.0
+    // - 1.0 means one complete step cycle per unit distance
+    // - 0.5 means one step every 2 units
+    // - 2.0 means two steps per unit
+    private let stepsPerUnitDistance: Float = 0.5  // <-- ADJUST THIS VALUE
+    // ============================================
+    
+    // Jump state
+    private var isJumping: Bool = false
+    private var verticalVelocity: Float = 0
+    private var jumpRequested: Bool = false  // Tracks if jump was just pressed (for single jump)
+    
+    // ============================================
+    // JUMP CONFIGURATION
+    // ============================================
+    private let jumpVelocity: Float = 8.0      // Initial upward velocity when jumping
+    private let gravity: Float = 20.0           // Downward acceleration
+    private let groundLevel: Float = 0.0        // Y position of the ground
+    // ============================================
     
     // Movement configuration
     private let characterSpeed: Float = 6.0
@@ -874,7 +900,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             
             // Update facing direction
-            targetYaw = atan2(targetVelocity.x, targetVelocity.z)
+            // Character's local forward is -Z, so we use -targetVelocity.z
+            // This makes the character face the direction they're moving
+            targetYaw = atan2(targetVelocity.x, -targetVelocity.z)
         } else {
             // Decelerate to stop
             let currentSpeed = simd_length(characterVelocity)
@@ -937,9 +965,42 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         
         // Walk animation
-        if isMoving {
-            walkPhase += simd_length(characterVelocity) * dt * walkSpeed
+        // Convert stepsPerUnitDistance to radians: one full cycle = 2π radians
+        if isMoving && !isJumping {
+            let distanceThisFrame = simd_length(characterVelocity) * dt
+            let radiansPerStep: Float = 2 * .pi  // One full leg swing cycle
+            walkPhase += distanceThisFrame * stepsPerUnitDistance * radiansPerStep
             while walkPhase > 2 * .pi { walkPhase -= 2 * .pi }
+        }
+        
+        // ============================================
+        // JUMP PHYSICS
+        // ============================================
+        
+        // Detect jump input (only trigger on initial press, not hold)
+        if jumpPressed && !jumpRequested && !isJumping {
+            // Start jump
+            isJumping = true
+            verticalVelocity = jumpVelocity
+            jumpRequested = true
+        }
+        
+        // Reset jump request when spacebar released
+        if !jumpPressed {
+            jumpRequested = false
+        }
+        
+        // Apply gravity and update vertical position
+        if isJumping {
+            verticalVelocity -= gravity * dt
+            characterPosition.y += verticalVelocity * dt
+            
+            // Check if landed
+            if characterPosition.y <= groundLevel {
+                characterPosition.y = groundLevel
+                isJumping = false
+                verticalVelocity = 0
+            }
         }
     }
     
@@ -976,11 +1037,27 @@ final class Renderer: NSObject, MTKViewDelegate {
         let legSwingAmount: Float = 0.5
         let armSwingAmount: Float = 0.35
         
-        let leftLegSwing = sin(walkPhase) * legSwingAmount
-        let rightLegSwing = -sin(walkPhase) * legSwingAmount
-        let leftArmSwing = -sin(walkPhase) * armSwingAmount
-        let rightArmSwing = sin(walkPhase) * armSwingAmount
-        let bodyBob = abs(sin(walkPhase * 2)) * 0.03
+        // Jump animation modifiers
+        let jumpLegTuck: Float = isJumping ? 0.3 : 0.0      // Legs tuck forward when jumping
+        let jumpArmRaise: Float = isJumping ? 0.4 : 0.0     // Arms raise when jumping
+        
+        // Leg swing: negative Z is forward (direction character faces)
+        // When left leg swings forward, right leg swings back (and vice versa)
+        // During jump, legs tuck together
+        let walkLeftLegSwing = -sin(walkPhase) * legSwingAmount
+        let walkRightLegSwing = sin(walkPhase) * legSwingAmount
+        
+        let leftLegSwing = isJumping ? -jumpLegTuck : walkLeftLegSwing
+        let rightLegSwing = isJumping ? -jumpLegTuck : walkRightLegSwing
+        
+        // Arms: opposite to legs when walking, raised when jumping
+        let walkLeftArmSwing = sin(walkPhase) * armSwingAmount
+        let walkRightArmSwing = -sin(walkPhase) * armSwingAmount
+        
+        let leftArmSwing = isJumping ? -jumpArmRaise : walkLeftArmSwing
+        let rightArmSwing = isJumping ? -jumpArmRaise : walkRightArmSwing
+        
+        let bodyBob = isJumping ? 0.0 : abs(sin(walkPhase * 2)) * 0.03
         
         // Material indices for different body parts (map to texture UV regions)
         // We'll use materialIndex 5 for character, but vary UV to get different textures
@@ -1209,32 +1286,38 @@ final class Renderer: NSObject, MTKViewDelegate {
         addLimb(from: rightElbowPos, to: rightHandPos, radius: 0.06, segments: 6, uvYStart: 0.25, uvYEnd: 0.5, material: matArm)
         addSphere(center: rightHandPos, radius: 0.08, latSegments: 4, lonSegments: 6, uvYStart: 0.25, uvYEnd: 0.5, material: matArm)
         
-        // LEGS with walking animation - UV 0.75-1.0 for pants
+        // LEGS with walking/jumping animation - UV 0.75-1.0 for pants
         let legSeparation: Float = 0.12
         
-        // Left leg
+        // Jump tuck amount for knees and feet
+        let jumpKneeTuck: Float = isJumping ? 0.15 : 0.0   // Knees come up when jumping
+        let jumpFootTuck: Float = isJumping ? 0.25 : 0.0   // Feet come up more when jumping
+        
+        // Left leg - knee bends and foot lifts when leg swings forward (negative Z) or jumping
         let leftHipPos = simd_float3(-legSeparation, hipY, 0)
-        let leftKneeHeight = 0.45 + max(0, sin(walkPhase)) * 0.08
+        let leftLegForward = isJumping ? 1.0 : max(0, -leftLegSwing / legSwingAmount)
+        let leftKneeHeight = 0.45 + leftLegForward * 0.08 + jumpKneeTuck
         let leftKneePos = simd_float3(-legSeparation, leftKneeHeight, leftLegSwing * 0.4)
-        let leftFootHeight: Float = 0.08 + max(0, sin(walkPhase)) * 0.12
+        let leftFootHeight: Float = 0.08 + leftLegForward * 0.12 + jumpFootTuck
         let leftFootPos = simd_float3(-legSeparation, leftFootHeight, leftLegSwing * 0.6)
         
         addLimb(from: leftHipPos, to: leftKneePos, radius: 0.09, segments: 6, uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
         addLimb(from: leftKneePos, to: leftFootPos, radius: 0.07, segments: 6, uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
-        // Foot (small box)
-        addBox(center: leftFootPos + simd_float3(0, -0.03, 0.05), size: simd_float3(0.1, 0.06, 0.18), uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
+        // Foot (small box) - offset in negative Z to point forward
+        addBox(center: leftFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18), uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
         
-        // Right leg
+        // Right leg - opposite phase when walking, same as left when jumping
         let rightHipPos = simd_float3(legSeparation, hipY, 0)
-        let rightKneeHeight = 0.45 + max(0, -sin(walkPhase)) * 0.08
+        let rightLegForward = isJumping ? 1.0 : max(0, -rightLegSwing / legSwingAmount)
+        let rightKneeHeight = 0.45 + rightLegForward * 0.08 + jumpKneeTuck
         let rightKneePos = simd_float3(legSeparation, rightKneeHeight, rightLegSwing * 0.4)
-        let rightFootHeight: Float = 0.08 + max(0, -sin(walkPhase)) * 0.12
+        let rightFootHeight: Float = 0.08 + rightLegForward * 0.12 + jumpFootTuck
         let rightFootPos = simd_float3(legSeparation, rightFootHeight, rightLegSwing * 0.6)
         
         addLimb(from: rightHipPos, to: rightKneePos, radius: 0.09, segments: 6, uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
         addLimb(from: rightKneePos, to: rightFootPos, radius: 0.07, segments: 6, uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
-        // Foot
-        addBox(center: rightFootPos + simd_float3(0, -0.03, 0.05), size: simd_float3(0.1, 0.06, 0.18), uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
+        // Foot - offset in negative Z to point forward
+        addBox(center: rightFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18), uvYStart: 0.75, uvYEnd: 1.0, material: matLeg)
         
         // Update buffer
         characterVertexCount = vertices.count

@@ -228,10 +228,14 @@ struct MetalGameView: NSViewRepresentable {
             
             // Arrow key codes:
             // Left: 123, Right: 124, Down: 125, Up: 126
+            // Spacebar: 49
             if pressedKeys.contains(123) { x -= 1 } // Left arrow
             if pressedKeys.contains(124) { x += 1 } // Right arrow
             if pressedKeys.contains(125) { y -= 1 } // Down arrow
             if pressedKeys.contains(126) { y += 1 } // Up arrow
+            
+            // Jump with spacebar
+            renderer.jumpPressed = pressedKeys.contains(49)
             
             // Normalize diagonal movement
             if x != 0 && y != 0 {
