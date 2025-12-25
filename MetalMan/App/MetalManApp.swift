@@ -9,6 +9,11 @@ import SwiftUI
 
 @main
 struct MetalManApp: App {
+    init() {
+        // Debug: Print available Font Awesome fonts
+        FontAwesomeChecker.printAvailableFonts()
+    }
+    
     var body: some Scene {
         WindowGroup {
             ContentView()

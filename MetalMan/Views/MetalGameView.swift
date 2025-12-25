@@ -52,8 +52,21 @@ struct MetalGameView: UIViewRepresentable {
             
             // Bind HUD to player and renderer (on main actor)
             let player = renderer.player
+            let rendererRef = renderer
             Task { @MainActor in
                 hudViewModel.bind(to: player)
+                
+                // Set up death screen callbacks
+                hudViewModel.onRestartGame = {
+                    rendererRef.restartGame()
+                }
+                hudViewModel.onLoadSaveGame = {
+                    rendererRef.loadGame()
+                }
+                // Set up chest looting callback
+                hudViewModel.onChestLooted = { chestIndex, goldTaken, itemsTaken in
+                    rendererRef.finalizeChestLoot(chestIndex: chestIndex, goldTaken: goldTaken, itemsTaken: itemsTaken)
+                }
             }
             renderer.hudViewModel = hudViewModel
         }
@@ -248,8 +261,21 @@ struct MetalGameView: NSViewRepresentable {
             
             // Bind HUD to player and renderer (on main actor)
             let player = renderer.player
+            let rendererRef = renderer
             Task { @MainActor in
                 hudViewModel.bind(to: player)
+                
+                // Set up death screen callbacks
+                hudViewModel.onRestartGame = {
+                    rendererRef.restartGame()
+                }
+                hudViewModel.onLoadSaveGame = {
+                    rendererRef.loadGame()
+                }
+                // Set up chest looting callback
+                hudViewModel.onChestLooted = { chestIndex, goldTaken, itemsTaken in
+                    rendererRef.finalizeChestLoot(chestIndex: chestIndex, goldTaken: goldTaken, itemsTaken: itemsTaken)
+                }
             }
             renderer.hudViewModel = hudViewModel
         }
@@ -266,6 +292,10 @@ struct MetalGameView: NSViewRepresentable {
         }
         
         private var inventoryKeyWasPressed = false
+        private var helpKeyWasPressed = false
+        private var escapeKeyWasPressed = false
+        private var levelUpKeyWasPressed = false
+        private var enterKeyWasPressed = false
         
         private func updateMovementFromKeys() {
             var x: Float = 0
@@ -296,6 +326,57 @@ struct MetalGameView: NSViewRepresentable {
                 }
             }
             inventoryKeyWasPressed = inventoryKeyPressed
+            
+            // Escape key (keyCode 53) closes open panels
+            let escapeKeyPressed = pressedKeys.contains(53)
+            if escapeKeyPressed && !escapeKeyWasPressed {
+                Task { @MainActor in
+                    if hudViewModel?.isInventoryOpen == true {
+                        hudViewModel?.toggleInventory()
+                    } else if hudViewModel?.isHelpMenuOpen == true {
+                        hudViewModel?.toggleHelpMenu()
+                    } else if hudViewModel?.isLootPanelOpen == true {
+                        hudViewModel?.closeLootPanel()
+                    } else if hudViewModel?.isLevelUpMenuOpen == true {
+                        hudViewModel?.closeLevelUpMenu()
+                    } else if hudViewModel?.isShopOpen == true {
+                        hudViewModel?.closeShop()
+                    }
+                }
+            }
+            escapeKeyWasPressed = escapeKeyPressed
+            
+            // Toggle help menu with H key (keyCode 4)
+            let helpKeyPressed = pressedKeys.contains(4)
+            if helpKeyPressed && !helpKeyWasPressed {
+                Task { @MainActor in
+                    hudViewModel?.toggleHelpMenu()
+                }
+            }
+            helpKeyWasPressed = helpKeyPressed
+            
+            // Open level up menu with L key (keyCode 37)
+            let levelUpKeyPressed = pressedKeys.contains(37)
+            if levelUpKeyPressed && !levelUpKeyWasPressed {
+                Task { @MainActor in
+                    hudViewModel?.openLevelUpMenu()
+                }
+            }
+            levelUpKeyWasPressed = levelUpKeyPressed
+            
+            // Enter key (keyCode 36) - Take All and close loot panel
+            let enterKeyPressed = pressedKeys.contains(36)
+            if enterKeyPressed && !enterKeyWasPressed {
+                Task { @MainActor in
+                    if hudViewModel?.isLootPanelOpen == true {
+                        hudViewModel?.lootAll()
+                    }
+                }
+            }
+            enterKeyWasPressed = enterKeyPressed
+            
+            // Quick save with F5 key (keyCode 96)
+            renderer.savePressed = pressedKeys.contains(96)
             
             // For tank controls, do NOT normalize - rotation (x) and movement (y) are independent
             movementVector = SIMD2<Float>(x, y)

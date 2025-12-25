@@ -38,10 +38,12 @@ class CharacterMesh {
     ///   - walkPhase: Current phase of the walking animation cycle
     ///   - isJumping: Whether the character is currently jumping
     ///   - hasSwordEquipped: Whether a sword is equipped in the right hand
+    ///   - hasShieldEquipped: Whether a shield is equipped in the left hand
     ///   - isAttacking: Whether currently performing an attack
     ///   - attackPhase: Progress through attack animation (0 to 1)
     ///   - swingType: Type of sword swing being performed
     func update(walkPhase: Float, isJumping: Bool, hasSwordEquipped: Bool = false,
+                hasShieldEquipped: Bool = false,
                 isAttacking: Bool = false, attackPhase: Float = 0, swingType: SwingType = .mittelhaw) {
         var vertices: [TexturedVertex] = []
         
@@ -200,6 +202,11 @@ class CharacterMesh {
             addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
                       uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
             
+            // Shield in left hand (if equipped) - held in front during jump
+            if hasShieldEquipped {
+                addShield(at: leftHandPos, facingAngle: 0, isBlocking: false, vertices: &vertices)
+            }
+            
             // Right arm - raised up
             let rightShoulderPos = simd_float3(shoulderWidth, shoulderY - 0.05, 0)
             let rightElbowPos = rightShoulderPos + simd_float3(0.1, upperArmLength * 0.7, -0.05)
@@ -247,6 +254,13 @@ class CharacterMesh {
                     uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
             addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
                       uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+            
+            // Shield in left hand (if equipped)
+            if hasShieldEquipped {
+                // Shield faces forward, slightly angled during attacks for guard position
+                let shieldAngle = isAttacking ? -0.3 : leftArmSwing * 0.2
+                addShield(at: leftHandPos, facingAngle: shieldAngle, isBlocking: isAttacking, vertices: &vertices)
+            }
             
             // Right arm - with attack animation support
             let rightShoulderPos = rightShoulderOffset
@@ -870,6 +884,102 @@ class CharacterMesh {
         vertices.append(TexturedVertex(position: bl, normal: normal, texCoord: simd_float2(0, 1), materialIndex: material))
         vertices.append(TexturedVertex(position: tr, normal: normal, texCoord: simd_float2(1, 0), materialIndex: material))
         vertices.append(TexturedVertex(position: tl, normal: normal, texCoord: simd_float2(0, 0), materialIndex: material))
+    }
+    
+    /// Add a shield mesh at the given hand position
+    /// - Parameters:
+    ///   - handPos: Position of the left hand
+    ///   - facingAngle: Angle the shield faces (0 = forward)
+    ///   - isBlocking: Whether in blocking/guard stance
+    private func addShield(at handPos: simd_float3, facingAngle: Float, isBlocking: Bool,
+                           vertices: inout [TexturedVertex]) {
+        // Shield dimensions
+        let shieldWidth: Float = 0.35      // Width of the shield
+        let shieldHeight: Float = 0.45     // Height of the shield
+        let shieldThickness: Float = 0.04  // Thickness of the shield
+        let rimWidth: Float = 0.03         // Width of the metal rim
+        let bossRadius: Float = 0.06       // Central boss (dome) radius
+        
+        // Materials
+        let matWood: UInt32 = MaterialIndex.treeTrunk.rawValue   // Shield body (wood)
+        let matMetal: UInt32 = MaterialIndex.pole.rawValue       // Metal parts
+        
+        // Shield is held slightly forward and to the side from the hand
+        let shieldOffset = simd_float3(-0.05, 0.08, -0.15)  // Left, up, forward
+        let shieldCenter = handPos + shieldOffset
+        
+        // Shield faces forward with slight angle based on arm position
+        let shieldFacing = simd_float3(sin(facingAngle) * 0.3, 0, -1)
+        let shieldNormal = simd_normalize(shieldFacing)
+        let shieldUp = simd_float3(0, 1, 0)
+        let shieldRight = simd_normalize(simd_cross(shieldUp, shieldNormal))
+        
+        // Adjust shield position when blocking (more forward and angled)
+        var adjustedCenter = shieldCenter
+        if isBlocking {
+            adjustedCenter.z -= 0.08  // Move more forward
+            adjustedCenter.y += 0.05  // Raise slightly
+        }
+        
+        // Main shield body (slightly curved appearance via multiple panels)
+        let hw = shieldWidth / 2
+        let hh = shieldHeight / 2
+        let ht = shieldThickness / 2
+        
+        // Front face of shield
+        let frontBL = adjustedCenter + shieldRight * (-hw) + shieldUp * (-hh) + shieldNormal * ht
+        let frontBR = adjustedCenter + shieldRight * hw + shieldUp * (-hh) + shieldNormal * ht
+        let frontTL = adjustedCenter + shieldRight * (-hw) + shieldUp * hh + shieldNormal * ht
+        let frontTR = adjustedCenter + shieldRight * hw + shieldUp * hh + shieldNormal * ht
+        addQuadVerts(frontBL, frontBR, frontTL, frontTR, normal: shieldNormal, material: matWood, vertices: &vertices)
+        
+        // Back face of shield
+        let backBL = adjustedCenter + shieldRight * (-hw) + shieldUp * (-hh) - shieldNormal * ht
+        let backBR = adjustedCenter + shieldRight * hw + shieldUp * (-hh) - shieldNormal * ht
+        let backTL = adjustedCenter + shieldRight * (-hw) + shieldUp * hh - shieldNormal * ht
+        let backTR = adjustedCenter + shieldRight * hw + shieldUp * hh - shieldNormal * ht
+        addQuadVerts(backBR, backBL, backTR, backTL, normal: -shieldNormal, material: matWood, vertices: &vertices)
+        
+        // Edges
+        addQuadVerts(frontTL, frontTR, backTL, backTR, normal: shieldUp, material: matMetal, vertices: &vertices)      // Top
+        addQuadVerts(frontBR, frontBL, backBR, backBL, normal: -shieldUp, material: matMetal, vertices: &vertices)     // Bottom
+        addQuadVerts(frontBL, frontTL, backBL, backTL, normal: -shieldRight, material: matMetal, vertices: &vertices)  // Left
+        addQuadVerts(frontTR, frontBR, backTR, backBR, normal: shieldRight, material: matMetal, vertices: &vertices)   // Right
+        
+        // Metal rim around the shield (as thin boxes on top of the main shield)
+        // Top rim
+        let rimTopCenter = adjustedCenter + shieldUp * (hh - rimWidth / 2) + shieldNormal * (ht + 0.005)
+        addBox(center: rimTopCenter, size: simd_float3(shieldWidth, rimWidth, 0.01),
+               uvYStart: 0.0, uvYEnd: 0.2, material: matMetal, vertices: &vertices)
+        
+        // Bottom rim
+        let rimBottomCenter = adjustedCenter + shieldUp * (-hh + rimWidth / 2) + shieldNormal * (ht + 0.005)
+        addBox(center: rimBottomCenter, size: simd_float3(shieldWidth, rimWidth, 0.01),
+               uvYStart: 0.0, uvYEnd: 0.2, material: matMetal, vertices: &vertices)
+        
+        // Left rim
+        let rimLeftCenter = adjustedCenter + shieldRight * (-hw + rimWidth / 2) + shieldNormal * (ht + 0.005)
+        addBox(center: rimLeftCenter, size: simd_float3(rimWidth, shieldHeight - rimWidth * 2, 0.01),
+               uvYStart: 0.0, uvYEnd: 0.2, material: matMetal, vertices: &vertices)
+        
+        // Right rim
+        let rimRightCenter = adjustedCenter + shieldRight * (hw - rimWidth / 2) + shieldNormal * (ht + 0.005)
+        addBox(center: rimRightCenter, size: simd_float3(rimWidth, shieldHeight - rimWidth * 2, 0.01),
+               uvYStart: 0.0, uvYEnd: 0.2, material: matMetal, vertices: &vertices)
+        
+        // Central boss (dome) - approximated with a sphere
+        let bossCenter = adjustedCenter + shieldNormal * (ht + bossRadius * 0.3)
+        addSphere(center: bossCenter, radius: bossRadius, latSegments: 4, lonSegments: 8,
+                  uvYStart: 0.0, uvYEnd: 0.3, material: matMetal, vertices: &vertices)
+        
+        // Cross-bar reinforcement (horizontal metal bar across center)
+        let crossBarCenter = adjustedCenter + shieldNormal * (ht + 0.01)
+        addBox(center: crossBarCenter, size: simd_float3(shieldWidth * 0.7, 0.025, 0.015),
+               uvYStart: 0.0, uvYEnd: 0.2, material: matMetal, vertices: &vertices)
+        
+        // Vertical reinforcement bar
+        addBox(center: crossBarCenter, size: simd_float3(0.025, shieldHeight * 0.6, 0.015),
+               uvYStart: 0.0, uvYEnd: 0.2, material: matMetal, vertices: &vertices)
     }
 }
 

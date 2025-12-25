@@ -52,6 +52,17 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var enemyTexture: MTLTexture!
     private var enemyManager: EnemyManager!
     private var enemyMesh: EnemyMesh!
+    private var targetEnemyCount: Int = 25
+    private var respawnTimer: Float = 0
+    private let respawnInterval: Float = 5.0  // Seconds between respawn checks
+    private let minSpawnDistance: Float = 30.0  // Minimum distance from player to spawn
+    
+    // MARK: - NPCs
+    
+    private var vendorTexture: MTLTexture!
+    private var npcManager: NPCManager!
+    private var npcMesh: NPCMesh!
+    private var npcUniformBuffer: MTLBuffer!
     
     // MARK: - Textures (Normal Maps)
     
@@ -67,16 +78,36 @@ final class Renderer: NSObject, MTKViewDelegate {
     var jumpPressed: Bool = false
     var interactPressed: Bool = false
     var attackPressed: Bool = false
+    var savePressed: Bool = false
+    private var saveWasPressed: Bool = false
     
     // MARK: - Combat State
     
     private var isAttacking: Bool = false
     private var attackPhase: Float = 0        // 0 to 1, progress through swing
     private var attackCooldown: Float = 0     // Time until next attack allowed
-    private let attackDuration: Float = 0.4   // How long the swing takes
-    private let attackCooldownTime: Float = 0.3  // Time between attacks
+    private let baseAttackDuration: Float = 0.4   // How long the swing takes (base)
+    private let baseAttackCooldownTime: Float = 0.3  // Time between attacks (base)
     private var attackWasPressed: Bool = false
     private var currentSwingType: SwingType = .mittelhaw
+    
+    /// Effective attack cooldown based on dexterity
+    /// Higher dexterity = faster recovery = lower cooldown
+    private var effectiveAttackCooldown: Float {
+        let dex = Float(player.effectiveDexterity)
+        // Base cooldown reduced by 3% per dexterity point above 10
+        // At DEX 10: 100% cooldown, DEX 20: 70% cooldown, DEX 30: 40% cooldown
+        let reduction = max(0.3, 1.0 - (dex - 10) * 0.03)
+        return baseAttackCooldownTime * reduction
+    }
+    
+    /// Effective attack duration based on dexterity
+    private var effectiveAttackDuration: Float {
+        let dex = Float(player.effectiveDexterity)
+        // Slightly faster swings with higher dex
+        let reduction = max(0.5, 1.0 - (dex - 10) * 0.02)
+        return baseAttackDuration * reduction
+    }
     
     // MARK: - HUD Reference
     
@@ -277,6 +308,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var colliders: [Collider] = []
     private let characterRadius: Float = 0.3
     
+    // Camera obstruction data (trees, rocks with their visual radius)
+    private var cameraBlockers: [(position: simd_float2, radius: Float, height: Float)] = []
+    
     private var lastFrameTime: CFTimeInterval = CACurrentMediaTime()
     
     // MARK: - Init
@@ -375,6 +409,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         treeVertexBuffer = treeResult.0
         treeVertexCount = treeResult.1
         allColliders.append(contentsOf: treeResult.2)
+        cameraBlockers.append(contentsOf: treeResult.3)
         
         // 3. Rocks third (medium objects)
         let rockResult = GeometryGenerator.makeRockMeshes(device: device)
@@ -404,6 +439,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.enemyMesh = EnemyMesh(device: device)
         self.enemyManager = EnemyManager()
         
+        // Create NPC mesh and manager
+        self.npcMesh = NPCMesh(device: device)
+        self.npcManager = NPCManager()
+        
         // Create uniform buffers with shared storage mode for CPU/GPU access
         uniformBuffer = device.makeBuffer(length: MemoryLayout<simd_float4x4>.stride * 3, options: .storageModeShared)!
         litUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
@@ -413,11 +452,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255  // 256-byte aligned
         enemyUniformBuffer = device.makeBuffer(length: uniformStride * 100, options: .storageModeShared)!
         
+        // NPC uniform buffer - for 10 NPCs
+        npcUniformBuffer = device.makeBuffer(length: uniformStride * 10, options: .storageModeShared)!
+        
         super.init()
         
         // Spawn enemies (higher chance near treasure chests)
         // Must be after super.init() to call instance method
         spawnEnemies(nearChests: self.interactables)
+        
+        // Spawn NPCs (vendors)
+        spawnNPCs()
         
         // Create textures
         let textureGen = TextureGenerator(device: device, commandQueue: commandQueue)
@@ -435,6 +480,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         skyTexture = textureGen.createSkyTexture()
         treasureChestTexture = textureGen.createTreasureChestTexture()
         enemyTexture = textureGen.createEnemyTexture()
+        vendorTexture = textureGen.createVendorTexture()
         shadowMap = textureGen.createShadowMap(size: shadowMapSize)
         
         // Normal maps
@@ -446,6 +492,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Initialize character mesh
         characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
                             hasSwordEquipped: player.equipment.hasSwordEquipped,
+                            hasShieldEquipped: player.equipment.hasShieldEquipped,
                             isAttacking: isAttacking, attackPhase: attackPhase,
                             swingType: currentSwingType)
         
@@ -590,49 +637,63 @@ final class Renderer: NSObject, MTKViewDelegate {
             let lootRoll = seededRandom(seed)
             seed += 1
             
-            if lootRoll < 0.4 {
-                // Gold only (40% chance)
+            if lootRoll < 0.35 {
+                // Gold only (35% chance)
                 chest.goldAmount = 10 + Int(seededRandom(seed) * 40)
                 seed += 1
-            } else if lootRoll < 0.7 {
-                // Gold + common item (30% chance)
+            } else if lootRoll < 0.60 {
+                // Gold + common item (25% chance)
                 chest.goldAmount = 5 + Int(seededRandom(seed) * 20)
                 seed += 1
                 
                 let itemRoll = seededRandom(seed)
                 seed += 1
-                if itemRoll < 0.5 {
+                if itemRoll < 0.25 {
                     chest.containedItem = ItemTemplates.healthPotion(size: .common)
+                } else if itemRoll < 0.40 {
+                    chest.containedItem = ItemTemplates.randomSword()
+                } else if itemRoll < 0.55 {
+                    chest.containedItem = ItemTemplates.randomShield()
+                } else if itemRoll < 0.70 {
+                    chest.containedItem = ItemTemplates.randomArmor()
                 } else {
-                    chest.containedItem = ItemTemplates.sword(rarity: .common)
+                    chest.containedItem = ItemTemplates.randomGem()
                 }
-            } else if lootRoll < 0.9 {
-                // Uncommon item (20% chance)
+            } else if lootRoll < 0.85 {
+                // Better item (25% chance)
                 chest.goldAmount = 15 + Int(seededRandom(seed) * 30)
                 seed += 1
                 
                 let itemRoll = seededRandom(seed)
                 seed += 1
-                if itemRoll < 0.3 {
+                if itemRoll < 0.15 {
                     chest.containedItem = ItemTemplates.healthPotion(size: .uncommon)
-                } else if itemRoll < 0.6 {
-                    chest.containedItem = ItemTemplates.sword(rarity: .uncommon)
+                } else if itemRoll < 0.35 {
+                    chest.containedItem = ItemTemplates.randomSword()
+                } else if itemRoll < 0.50 {
+                    chest.containedItem = ItemTemplates.randomShield()
+                } else if itemRoll < 0.65 {
+                    chest.containedItem = ItemTemplates.randomArmor()
                 } else {
-                    chest.containedItem = ItemTemplates.chestplate(rarity: .common)
+                    chest.containedItem = ItemTemplates.randomGem()
                 }
             } else {
-                // Rare item (10% chance)
+                // Rare item (15% chance)
                 chest.goldAmount = 30 + Int(seededRandom(seed) * 50)
                 seed += 1
                 
                 let itemRoll = seededRandom(seed)
                 seed += 1
-                if itemRoll < 0.4 {
-                    chest.containedItem = ItemTemplates.sword(rarity: .rare)
-                } else if itemRoll < 0.7 {
-                    chest.containedItem = ItemTemplates.chestplate(rarity: .uncommon)
+                if itemRoll < 0.25 {
+                    chest.containedItem = ItemTemplates.randomSword()
+                } else if itemRoll < 0.45 {
+                    chest.containedItem = ItemTemplates.randomShield()
+                } else if itemRoll < 0.60 {
+                    chest.containedItem = ItemTemplates.randomArmor()
+                } else if itemRoll < 0.75 {
+                    chest.containedItem = ItemTemplates.healthPotion(size: .rare)
                 } else {
-                    chest.containedItem = ItemTemplates.boots(rarity: .rare)
+                    chest.containedItem = ItemTemplates.randomGem()
                 }
             }
             
@@ -669,7 +730,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                     // Don't spawn too close to origin (player spawn)
                     let distFromOrigin = sqrtf(x * x + z * z)
                     if distFromOrigin > 15 {
-                        enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z))
+                        // Initial enemies start at level 1
+                        enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z), playerLevel: 1)
                     }
                 }
             }
@@ -688,15 +750,75 @@ final class Renderer: NSObject, MTKViewDelegate {
             if distFromOrigin < 20 { continue }
             
             let y = Terrain.heightAt(x: x, z: z)
-            enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z))
+            // Initial enemies start at level 1
+            enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z), playerLevel: 1)
         }
         
         print("[Enemies] Spawned \(enemyManager.count) bandits")
+        targetEnemyCount = enemyManager.count  // Set target to initial spawn count
     }
     
-    /// Try to interact with nearby chests or corpses
+    /// Spawn vendor NPCs at strategic locations
+    private func spawnNPCs() {
+        // Place a vendor near the spawn area (but not too close)
+        let vendorX: Float = 12.0
+        let vendorZ: Float = 8.0
+        let vendorY = Terrain.heightAt(x: vendorX, z: vendorZ)
+        
+        // Vendor faces toward spawn point
+        let yaw = atan2(-vendorX, -vendorZ)
+        
+        npcManager.spawnNPC(type: .vendor, name: "Traveling Merchant", at: simd_float3(vendorX, vendorY, vendorZ), yaw: yaw)
+        
+        print("[NPCs] Spawned \(npcManager.count) NPCs")
+    }
+    
+    /// Try to respawn enemies if below target count
+    private func tryRespawnEnemies(deltaTime dt: Float) {
+        respawnTimer += dt
+        
+        guard respawnTimer >= respawnInterval else { return }
+        respawnTimer = 0
+        
+        // Check if we need more enemies
+        let currentAlive = enemyManager.aliveCount
+        guard currentAlive < targetEnemyCount else { return }
+        
+        // Spawn 1-2 enemies at a time
+        let toSpawn = min(2, targetEnemyCount - currentAlive)
+        
+        for _ in 0..<toSpawn {
+            // Try to find a valid spawn location
+            for _ in 0..<10 {  // Max 10 attempts
+                // Random location in the world
+                let x = Float.random(in: -80...80)
+                let z = Float.random(in: -80...80)
+                
+                // Check distance from player
+                let distFromPlayer = simd_distance(
+                    simd_float2(x, z),
+                    simd_float2(characterPosition.x, characterPosition.z)
+                )
+                
+                if distFromPlayer >= minSpawnDistance {
+                    let y = Terrain.heightAt(x: x, z: z)
+                    // Respawned enemies scale with player level
+                    enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z), playerLevel: player.vitals.level)
+                    break
+                }
+            }
+        }
+    }
+    
+    /// Try to interact with nearby chests, corpses, or NPCs
     func tryInteract() {
-        // Check for treasure chests first
+        // Check for NPCs first (vendors, etc.)
+        if let npc = npcManager.findInteractableNPC(near: characterPosition) {
+            interactWithNPC(npc)
+            return
+        }
+        
+        // Check for treasure chests
         for i in 0..<interactables.count {
             if interactables[i].canInteract(playerPosition: characterPosition) {
                 openChest(at: i)
@@ -710,36 +832,149 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
     
-    /// Loot a dead enemy's corpse
+    /// Interact with an NPC (open shop, dialogue, etc.)
+    private func interactWithNPC(_ npc: NPC) {
+        switch npc.type {
+        case .vendor:
+            // Open shop UI
+            Task { @MainActor in
+                hudViewModel?.openShop(for: npc)
+            }
+            print("[NPC] Opened shop for \(npc.name)")
+        }
+    }
+    
+    /// Open the loot panel for a dead enemy's corpse
     private func lootCorpse(_ enemy: Enemy) {
         guard !enemy.isLooted else { return }
         
-        enemy.isLooted = true
+        // Open the loot panel UI instead of auto-looting
+        hudViewModel?.openLootPanel(for: enemy)
+    }
+    
+    // MARK: - Save/Load System
+    
+    /// Save the current game state
+    func saveGame() {
+        let success = SaveGameManager.shared.saveGame(
+            player: player,
+            position: characterPosition,
+            yaw: characterYaw
+        )
         
-        // Collect gold
-        if enemy.lootGold > 0 {
-            player.inventory.addGold(enemy.lootGold)
+        if success {
+            Task { @MainActor in
+                hudViewModel?.showLoot(gold: 0, itemName: "Game Saved!", itemRarity: nil, title: "💾 Saved", icon: "checkmark.circle.fill")
+            }
+        }
+    }
+    
+    /// Load a saved game
+    func loadGame() {
+        guard let saveData = SaveGameManager.shared.loadGame() else {
+            print("[SaveGame] No save data found")
+            return
         }
         
-        // Collect items
-        var itemName: String? = nil
-        var itemRarity: String? = nil
+        // Restore player state
+        player.attributes.strength = saveData.strength
+        player.attributes.dexterity = saveData.dexterity
+        player.attributes.intelligence = saveData.intelligence
+        player.vitals.currentHP = saveData.currentHP
+        player.vitals.maxHP = saveData.maxHP
+        player.vitals.currentXP = saveData.currentXP
+        player.vitals.xpToNextLevel = saveData.xpToNextLevel
+        player.vitals.level = saveData.level
+        player.unspentAttributePoints = saveData.unspentPoints
         
-        for item in enemy.lootItems {
-            player.inventory.addItem(item)
-            itemName = item.name
-            itemRarity = item.rarity.name
+        // Clear and restore inventory
+        player.inventory.clear()
+        player.inventory.addGold(saveData.gold)
+        
+        for savedStack in saveData.inventoryItems {
+            let item = SaveGameManager.shared.restoreItem(savedStack.item)
+            player.inventory.addItem(item, quantity: savedStack.quantity)
         }
         
-        // Show loot notification
-        if enemy.lootGold > 0 || !enemy.lootItems.isEmpty {
-            hudViewModel?.showLoot(gold: enemy.lootGold, itemName: itemName, itemRarity: itemRarity, title: "💀 Looted \(enemy.type.rawValue)!")
+        // Clear and restore equipment
+        for slot in EquipmentSlot.allCases {
+            player.equipment.unequip(slot)
+        }
+        for (_, savedItem) in saveData.equippedItems {
+            let item = SaveGameManager.shared.restoreItem(savedItem)
+            player.equipment.equip(item)
         }
         
-        // Give XP for kill
-        player.gainXP(enemy.type.xpReward)
+        // Restore position
+        characterPosition = simd_float3(saveData.positionX, saveData.positionY, saveData.positionZ)
+        characterYaw = saveData.yaw
+        characterVelocity = .zero
         
-        hudViewModel?.update()
+        // Reset game state
+        isAttacking = false
+        attackPhase = 0
+        isJumping = false
+        
+        // Update HUD
+        Task { @MainActor in
+            hudViewModel?.hideDeathScreen()
+            hudViewModel?.update()
+            hudViewModel?.updateInventorySlots()
+            hudViewModel?.updateEquipmentDisplay()
+        }
+        
+        print("[SaveGame] Game loaded - Position: \(characterPosition), HP: \(player.vitals.currentHP)")
+    }
+    
+    /// Restart the game with a fresh character
+    func restartGame() {
+        // Reset player
+        player.attributes = CharacterAttributes(strength: 10, dexterity: 12, intelligence: 8)
+        player.vitals = CharacterVitals(maxHP: 100, level: 1)
+        player.vitals.currentHP = player.effectiveMaxHP
+        player.unspentAttributePoints = 0
+        
+        // Clear inventory and give starting gold
+        player.inventory.clear()
+        player.inventory.addGold(50)
+        
+        // Give starter items
+        player.inventory.addItem(ItemTemplates.healthPotion(size: .common), quantity: 3)
+        
+        // Clear and reset equipment
+        for slot in EquipmentSlot.allCases {
+            player.equipment.unequip(slot)
+        }
+        player.equipment.equip(ItemTemplates.sword(rarity: .common))
+        
+        // Reset position to origin
+        characterPosition = simd_float3(0, 0, 0)
+        characterPosition.y = Terrain.shared.heightAt(x: 0, z: 0)
+        characterYaw = 0
+        characterVelocity = .zero
+        
+        // Reset game state
+        isAttacking = false
+        attackPhase = 0
+        isJumping = false
+        
+        // Respawn enemies
+        enemyManager.clearEnemies()
+        spawnEnemies(nearChests: interactables)
+        
+        // Reset treasure chests
+        for i in 0..<interactables.count {
+            interactables[i].isOpen = false
+        }
+        chestsNeedRebuild = true
+        
+        // Update HUD
+        Task { @MainActor in
+            hudViewModel?.hideDeathScreen()
+            hudViewModel?.bind(to: player)
+        }
+        
+        print("[Game] Game restarted")
     }
     
     /// Open a chest and give loot to player
@@ -747,32 +982,50 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard index >= 0 && index < interactables.count else { return }
         guard !interactables[index].isOpen else { return }
         
+        // Mark chest as open (visually) but don't give loot yet
         interactables[index].isOpen = true
         chestsNeedRebuild = true
         
-        let goldFound = interactables[index].goldAmount
-        var itemName: String? = nil
-        var itemRarity: String? = nil
-        
-        // Give loot to player
-        if goldFound > 0 {
-            player.inventory.addGold(goldFound)
-            print("[Chest] Found \(goldFound) gold!")
+        let goldAmount = interactables[index].goldAmount
+        var items: [Item] = []
+        if let item = interactables[index].containedItem {
+            items.append(item)
         }
         
-        if let item = interactables[index].containedItem {
+        // Open the loot panel for this chest
+        Task { @MainActor in
+            hudViewModel?.openLootPanelForChest(
+                index: index,
+                name: "Treasure Chest",
+                gold: goldAmount,
+                items: items
+            )
+        }
+    }
+    
+    /// Called when player finishes looting a chest (from loot panel)
+    func finalizeChestLoot(chestIndex: Int, goldTaken: Int, itemsTaken: [Item]) {
+        guard chestIndex >= 0 && chestIndex < interactables.count else { return }
+        
+        // Give gold to player
+        if goldTaken > 0 {
+            player.inventory.addGold(goldTaken)
+            print("[Chest] Took \(goldTaken) gold")
+        }
+        
+        // Give items to player
+        for item in itemsTaken {
             if player.inventory.addItem(item) {
-                itemName = item.name
-                itemRarity = item.rarity.name
-                print("[Chest] Found \(item.rarity.name) \(item.name)!")
+                print("[Chest] Took \(item.name)")
             } else {
-                print("[Chest] Inventory full! Couldn't pick up \(item.name)")
+                print("[Chest] Inventory full! Couldn't take \(item.name)")
             }
         }
         
-        // Show loot notification on HUD
+        // Update HUD
         Task { @MainActor in
-            hudViewModel?.showLoot(gold: goldFound, itemName: itemName, itemRarity: itemRarity)
+            hudViewModel?.update()
+            hudViewModel?.updateInventorySlots()
         }
     }
     
@@ -822,13 +1075,26 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         interactWasPressed = interactPressed
         
+        // Handle save input (F5 key)
+        if savePressed && !saveWasPressed {
+            saveGame()
+        }
+        saveWasPressed = savePressed
+        
         // Rebuild chest meshes if any were opened
         rebuildChestsIfNeeded()
         
-        // Handle combat
-        updateCombat(deltaTime: dt)
+        // Check if game is paused (menus open)
+        let isGamePaused = hudViewModel?.isGamePaused ?? false
         
-        updateCharacter(deltaTime: dt)
+        if !isGamePaused {
+            // Handle combat (only when not paused)
+            updateCombat(deltaTime: dt)
+            
+            // Update character movement (only when not paused)
+            updateCharacter(deltaTime: dt)
+        }
+        
         updateCamera(deltaTime: dt)
         viewMatrix = buildViewMatrix()
         updateLightMatrix()  // Update shadows for current sun position
@@ -839,14 +1105,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Update character mesh animation
         let hasSword = player.equipment.hasSwordEquipped
+        let hasShield = player.equipment.hasShieldEquipped
         characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
                             hasSwordEquipped: hasSword,
+                            hasShieldEquipped: hasShield,
                             isAttacking: isAttacking, attackPhase: attackPhase,
                             swingType: currentSwingType)
         
         // Update enemies
         updateEnemies(deltaTime: dt)
         enemyMesh.update(enemies: enemyManager.enemies)
+        
+        // Update NPCs
+        npcManager.update(deltaTime: dt, playerPosition: characterPosition)
+        npcMesh.update(npcs: npcManager.npcs)
         
         // Update damage numbers on HUD
         updateDamageNumbersDisplay()
@@ -993,6 +1265,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Draw enemies
         drawEnemies(encoder: encoder, litUniforms: litUniforms)
         
+        // Draw NPCs (vendors)
+        drawNPCs(encoder: encoder, litUniforms: litUniforms)
+        
         // Draw grid lines overlay
         encoder.setRenderPipelineState(wireframePipelineState)
         encoder.setDepthStencilState(depthStencilStateNoWrite)
@@ -1032,6 +1307,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Enemy texture (index 17 - red shirt for bandits)
         encoder.setFragmentTexture(enemyTexture, index: 17)
+        
+        // Vendor texture (index 18 - yellow shirt for vendors)
+        encoder.setFragmentTexture(vendorTexture, index: 18)
         
         encoder.setFragmentSamplerState(textureSampler, index: 0)
         encoder.setFragmentSamplerState(shadowSampler, index: 1)
@@ -1089,7 +1367,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         
         // Second pass: draw each enemy using its uniform offset
-        for (index, enemy) in enemies.enumerated() {
+        for (index, _) in enemies.enumerated() {
             guard index < enemyMesh.enemyVertexRanges.count else { break }
             guard index < 100 else { break }
             
@@ -1099,6 +1377,54 @@ final class Renderer: NSObject, MTKViewDelegate {
             let offset = index * uniformStride
             encoder.setVertexBuffer(enemyUniformBuffer, offset: offset, index: 1)
             encoder.setFragmentBuffer(enemyUniformBuffer, offset: offset, index: 1)
+            
+            encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
+        }
+        
+        // Restore landscape uniform buffer
+        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+    }
+    
+    /// Draw all NPCs (vendors)
+    private func drawNPCs(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
+        guard npcMesh.vertexCount > 0 else { return }
+        
+        let npcs = npcManager.npcs
+        guard !npcs.isEmpty else { return }
+        
+        encoder.setVertexBuffer(npcMesh.vertexBuffer, offset: 0, index: 0)
+        
+        // 256-byte aligned stride for uniform buffer offsets
+        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
+        
+        // First pass: write all NPC uniforms to buffer
+        let bufferBase = npcUniformBuffer.contents()
+        for (index, npc) in npcs.enumerated() {
+            guard index < 10 else { break }  // Max 10 NPCs
+            
+            let npcModelMatrix = translation(npc.position.x, npc.position.y, npc.position.z) * rotationY(npc.yaw)
+            
+            var npcUniforms = litUniforms
+            npcUniforms.modelMatrix = npcModelMatrix
+            
+            // Write to this NPC's slot in the buffer
+            let offset = index * uniformStride
+            let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
+            ptr.pointee = npcUniforms
+        }
+        
+        // Second pass: draw each NPC using its uniform offset
+        for (index, _) in npcs.enumerated() {
+            guard index < npcMesh.npcVertexRanges.count else { break }
+            guard index < 10 else { break }
+            
+            let range = npcMesh.npcVertexRanges[index]
+            guard range.count > 0 else { continue }
+            
+            let offset = index * uniformStride
+            encoder.setVertexBuffer(npcUniformBuffer, offset: offset, index: 1)
+            encoder.setFragmentBuffer(npcUniformBuffer, offset: offset, index: 1)
             
             encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
         }
@@ -1265,6 +1591,24 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         
+        // Enemy collision detection
+        for enemy in enemyManager.enemies where enemy.isAlive {
+            let charPos2D = simd_float2(finalPosition.x, finalPosition.z)
+            let enemyPos2D = simd_float2(enemy.position.x, enemy.position.z)
+            let toChar = charPos2D - enemyPos2D
+            let distance = simd_length(toChar)
+            let enemyRadius: Float = 0.4
+            let minDist = enemyRadius + characterRadius
+            
+            if distance < minDist && distance > 0.001 {
+                let pushDirection = simd_normalize(toChar)
+                let pushAmount = minDist - distance + 0.01
+                finalPosition.x += pushDirection.x * pushAmount
+                finalPosition.z += pushDirection.y * pushAmount
+                collisionOccurred = true
+            }
+        }
+        
         if collisionOccurred {
             characterVelocity *= 0.5
         }
@@ -1331,13 +1675,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Update attack animation
         if isAttacking {
-            attackPhase += dt / attackDuration
+            attackPhase += dt / effectiveAttackDuration
             
             if attackPhase >= 1.0 {
                 // Attack finished
                 isAttacking = false
                 attackPhase = 0
-                attackCooldown = attackCooldownTime
+                attackCooldown = effectiveAttackCooldown
                 
                 // Check for hits (damage enemies in range)
                 performAttackHitCheck()
@@ -1388,11 +1732,11 @@ final class Renderer: NSObject, MTKViewDelegate {
                 
                 // Check if enemy died
                 if !enemy.isAlive {
-                    // Give XP and gold
-                    player.gainXP(enemy.type.xpReward)
-                    let goldDrop = Int.random(in: enemy.type.goldDrop)
+                    // Give XP and gold (scaled by enemy level)
+                    player.gainXP(enemy.xpReward)
+                    let goldDrop = Int.random(in: enemy.goldDropRange)
                     player.inventory.addGold(goldDrop)
-                    print("[Combat] \(enemy.type.rawValue) defeated! +\(enemy.type.xpReward) XP, +\(goldDrop) gold")
+                    print("[Combat] \(enemy.displayName) defeated! +\(enemy.xpReward) XP, +\(goldDrop) gold")
                     
                     // Update HUD
                     Task { @MainActor in
@@ -1405,31 +1749,49 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     /// Update all enemies (AI, movement, attacks)
     private func updateEnemies(deltaTime dt: Float) {
-        // Update enemy AI and animation
-        enemyManager.update(deltaTime: dt, playerPosition: characterPosition, terrain: Terrain.shared)
+        // Check if game is paused (menus open)
+        let isPaused = hudViewModel?.isGamePaused ?? false
         
-        // Check if any enemy is attacking the player
-        let enemyHits = enemyManager.checkEnemyAttacks(playerPosition: characterPosition)
-        for (enemy, damage) in enemyHits {
-            // Player takes damage
-            player.takeDamage(damage)
+        if !isPaused {
+            // Update enemy AI and animation (only when not paused)
+            enemyManager.update(deltaTime: dt, playerPosition: characterPosition, terrain: Terrain.shared)
             
-            // Show damage number on player
-            enemyManager.addDamageNumber(damage, at: characterPosition)
+            // Try to respawn enemies if needed
+            tryRespawnEnemies(deltaTime: dt)
             
-            print("[Combat] Player hit by \(enemy.type.rawValue) for \(damage) damage! HP: \(player.vitals.currentHP)/\(player.effectiveMaxHP)")
-            
-            // Update HUD
-            Task { @MainActor in
-                hudViewModel?.update()
+            // Check if any enemy is attacking the player
+            let enemyHits = enemyManager.checkEnemyAttacks(playerPosition: characterPosition)
+            for (enemy, damage) in enemyHits {
+                // Check for shield block
+                let blockChance = player.effectiveBlockChance
+                let blockRoll = Int.random(in: 1...100)
+                
+                if blockRoll <= blockChance {
+                    // Blocked! Show floating "Blocked!" text like damage numbers
+                    enemyManager.addBlockIndicator(at: characterPosition)
+                    print("[Combat] BLOCKED attack from \(enemy.displayName)! (Roll: \(blockRoll) <= \(blockChance)%)")
+                } else {
+                    // Player takes damage (armor already reduces in takeDamage)
+                    player.takeDamage(damage)
+                    
+                    // Show damage number on player
+                    enemyManager.addDamageNumber(damage, at: characterPosition)
+                    
+                    print("[Combat] Player hit by \(enemy.type.rawValue) for \(damage) damage! HP: \(player.vitals.currentHP)/\(player.effectiveMaxHP)")
+                    
+                    // Update HUD
+                    Task { @MainActor in
+                        hudViewModel?.update()
+                    }
+                }
             }
         }
         
-        // Clean up dead enemies
+        // Clean up dead enemies (always run to avoid buildup)
         enemyManager.removeDeadEnemies()
     }
     
-    /// Project world position to screen position
+    /// Project world position to screen position (in SwiftUI points, not pixels)
     private func worldToScreen(_ worldPos: simd_float3) -> CGPoint? {
         let vp = projectionMatrix * viewMatrix
         let clipPos = vp * simd_float4(worldPos.x, worldPos.y, worldPos.z, 1.0)
@@ -1441,9 +1803,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         let ndcX = clipPos.x / clipPos.w
         let ndcY = clipPos.y / clipPos.w
         
+        // Get the actual view size in points (not pixels)
+        // viewportSize is in pixels, so divide by content scale for SwiftUI coordinates
+        let scaleFactor = NSScreen.main?.backingScaleFactor ?? 2.0
+        let viewWidth = viewportSize.width / scaleFactor
+        let viewHeight = viewportSize.height / scaleFactor
+        
         // Screen coordinates (0,0 is top-left in SwiftUI)
-        let screenX = (ndcX + 1) * 0.5 * Float(viewportSize.width)
-        let screenY = (1 - ndcY) * 0.5 * Float(viewportSize.height)  // Flip Y
+        let screenX = (ndcX + 1) * 0.5 * Float(viewWidth)
+        let screenY = (1 - ndcY) * 0.5 * Float(viewHeight)  // Flip Y
         
         return CGPoint(x: CGFloat(screenX), y: CGFloat(screenY))
     }
@@ -1468,6 +1836,45 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Clear damage numbers from manager after sending to HUD
         // (they're now managed by the HUD)
         enemyManager.damageNumbers.removeAll()
+        
+        // Update enemy health bars
+        updateEnemyHealthBarsDisplay()
+    }
+    
+    /// Update HUD with enemy health bars (for damaged enemies)
+    private func updateEnemyHealthBarsDisplay() {
+        var healthBars: [EnemyHealthBar] = []
+        
+        for enemy in enemyManager.enemies {
+            // Only show health bars for alive enemies that have been damaged recently (within 5 seconds)
+            guard enemy.isAlive && enemy.lastDamageTime < 5.0 && enemy.hpPercentage < 1.0 else { continue }
+            
+            // Position above enemy's head
+            let barPosition = enemy.position + simd_float3(0, 2.2, 0)
+            
+            guard let screenPos = worldToScreen(barPosition) else { continue }
+            
+            // Fade out over the last second
+            let opacity: Double
+            if enemy.lastDamageTime > 4.0 {
+                opacity = Double(5.0 - enemy.lastDamageTime)
+            } else {
+                opacity = 1.0
+            }
+            
+            let bar = EnemyHealthBar(
+                id: enemy.id,
+                screenPosition: screenPos,
+                hpPercentage: enemy.hpPercentage,
+                opacity: opacity,
+                name: enemy.displayName
+            )
+            healthBars.append(bar)
+        }
+        
+        Task { @MainActor in
+            hudViewModel?.updateEnemyHealthBars(healthBars)
+        }
     }
     
     private func updateCamera(deltaTime dt: Float) {
@@ -1475,10 +1882,51 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Character forward direction: (sin(yaw), 0, -cos(yaw))
         // Camera should be behind, so we negate the forward direction
         
-        // Calculate camera position behind character
-        // Behind = opposite of forward = (-sin(yaw), 0, cos(yaw))
-        let offsetX = -sin(characterYaw) * cameraDistance
-        let offsetZ = cos(characterYaw) * cameraDistance
+        // Calculate camera direction (from character to camera)
+        let cameraDirX = -sin(characterYaw)
+        let cameraDirZ = cos(characterYaw)
+        
+        // Check for obstructions between character and camera
+        // Start with full camera distance, reduce if obstructed
+        var effectiveDistance = cameraDistance
+        
+        // Ray from character to camera position (in 2D, X-Z plane)
+        let characterPos2D = simd_float2(characterPosition.x, characterPosition.z)
+        let rayDir = simd_float2(cameraDirX, cameraDirZ)
+        
+        let minDistance: Float = 2.0  // Minimum camera distance
+        
+        // Check against camera blockers (trees with their foliage radius)
+        for blocker in cameraBlockers {
+            // Vector from character to blocker
+            let toBlocker = blocker.position - characterPos2D
+            
+            // Project blocker center onto the camera ray
+            let projLength = simd_dot(toBlocker, rayDir)
+            
+            // Only check objects between character and camera
+            if projLength < 0.5 || projLength > effectiveDistance + blocker.radius { continue }
+            
+            // Find closest point on ray to blocker center
+            let closestPointOnRay = characterPos2D + rayDir * projLength
+            let distToCenter = simd_length(blocker.position - closestPointOnRay)
+            
+            // Check if ray passes through the blocker's visual area
+            if distToCenter < blocker.radius {
+                // Calculate where the ray enters the blocker
+                let halfChord = sqrt(max(0, blocker.radius * blocker.radius - distToCenter * distToCenter))
+                let enterDistance = projLength - halfChord
+                
+                // Reduce camera distance to just before the blocker
+                if enterDistance > minDistance && enterDistance < effectiveDistance {
+                    effectiveDistance = max(minDistance, enterDistance - 0.5)
+                }
+            }
+        }
+        
+        // Calculate camera position with potentially reduced distance
+        let offsetX = cameraDirX * effectiveDistance
+        let offsetZ = cameraDirZ * effectiveDistance
         
         // Target camera position (behind and above the character)
         let targetCameraPos = simd_float3(
@@ -1487,8 +1935,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             characterPosition.z + offsetZ
         )
         
-        // Smooth camera position follow
-        let positionSmoothness: Float = 12.0
+        // Smooth camera position follow (faster when avoiding obstacles)
+        let positionSmoothness: Float = effectiveDistance < cameraDistance ? 25.0 : 12.0
         cameraPosition = cameraPosition + (targetCameraPos - cameraPosition) * min(1.0, positionSmoothness * dt)
     }
     

@@ -16,6 +16,11 @@
 			path = MetalMan;
 			sourceTree = "<group>";
 		};
+		693EBC342EFCF91B00667F7A /* Icons */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Icons;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -32,6 +37,7 @@
 		693EB5D42EFB2F2B00667F7A = {
 			isa = PBXGroup;
 			children = (
+				693EBC342EFCF91B00667F7A /* Icons */,
 				693EB5DF2EFB2F2B00667F7A /* MetalMan */,
 				693EB5DE2EFB2F2B00667F7A /* Products */,
 			);
@@ -62,6 +68,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				693EB5DF2EFB2F2B00667F7A /* MetalMan */,
+				693EBC342EFCF91B00667F7A /* Icons */,
 			);
 			name = MetalMan;
 			packageProductDependencies = (

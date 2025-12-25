@@ -119,6 +119,7 @@ enum MaterialIndex: UInt32 {
     case sky = 10
     case treasureChest = 11
     case enemy = 12  // Red shirt for bandits
+    case vendor = 13 // Yellow shirt for vendors
 }
 
 // MARK: - Interactables

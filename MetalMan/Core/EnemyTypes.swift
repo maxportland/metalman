@@ -15,7 +15,7 @@ enum EnemyType: String, CaseIterable {
     
     var damage: Int {
         switch self {
-        case .bandit: return 8
+        case .bandit: return 5
         }
     }
     
@@ -74,15 +74,19 @@ enum EnemyState {
 final class Enemy: Identifiable {
     let id: UUID
     let type: EnemyType
+    let level: Int  // Enemy level affects stats
     
     // Position and movement
     var position: simd_float3
     var yaw: Float  // Facing direction (radians)
     var velocity: simd_float3 = .zero
     
-    // Stats
+    // Stats (scaled by level)
     var currentHP: Int
     var maxHP: Int
+    var damage: Int
+    var xpReward: Int
+    var goldDropRange: ClosedRange<Int>
     
     // AI State
     var state: EnemyState = .idle
@@ -114,35 +118,67 @@ final class Enemy: Identifiable {
         Collider.circle(x: position.x, z: position.z, radius: 0.4)
     }
     
-    init(type: EnemyType, position: simd_float3) {
+    /// Display name including level
+    var displayName: String {
+        "\(type.rawValue) Lv.\(level)"
+    }
+    
+    init(type: EnemyType, position: simd_float3, level: Int = 1) {
         self.id = UUID()
         self.type = type
+        self.level = max(1, level)
         self.position = position
         self.patrolCenter = position
         self.yaw = Float.random(in: 0...(2 * .pi))
-        self.maxHP = type.maxHP
-        self.currentHP = type.maxHP
+        
+        // Scale stats based on level
+        // HP: +15% per level above 1
+        let hpMultiplier = 1.0 + Double(level - 1) * 0.15
+        self.maxHP = Int(Double(type.maxHP) * hpMultiplier)
+        self.currentHP = self.maxHP
+        
+        // Damage: +10% per level above 1
+        let damageMultiplier = 1.0 + Double(level - 1) * 0.10
+        self.damage = Int(Double(type.damage) * damageMultiplier)
+        
+        // XP: +20% per level above 1
+        let xpMultiplier = 1.0 + Double(level - 1) * 0.20
+        self.xpReward = Int(Double(type.xpReward) * xpMultiplier)
+        
+        // Gold: +15% per level above 1
+        let goldMultiplier = 1.0 + Double(level - 1) * 0.15
+        let baseLow = type.goldDrop.lowerBound
+        let baseHigh = type.goldDrop.upperBound
+        self.goldDropRange = Int(Double(baseLow) * goldMultiplier)...Int(Double(baseHigh) * goldMultiplier)
     }
     
     /// Generate loot when killed
     func generateLoot() {
         guard !isLooted else { return }
         
-        // Gold based on enemy type
-        lootGold = Int.random(in: type.goldDrop)
+        // Gold based on enemy level (scaled)
+        lootGold = Int.random(in: goldDropRange)
         
-        // Random chance for items
+        // Random chance for items (can get multiple items)
         let roll = Float.random(in: 0...1)
         
-        if roll < 0.15 {
-            // 15% chance for a sword
-            let rarities: [ItemRarity] = [.common, .common, .common, .uncommon]
-            lootItems.append(ItemTemplates.sword(rarity: rarities.randomElement()!))
-        } else if roll < 0.40 {
-            // 25% chance for a potion
+        if roll < 0.10 {
+            // 10% chance for a sword with random quality (exponential distribution)
+            lootItems.append(ItemTemplates.randomSword())
+        } else if roll < 0.18 {
+            // 8% chance for armor
+            lootItems.append(ItemTemplates.randomArmor())
+        } else if roll < 0.26 {
+            // 8% chance for a shield
+            lootItems.append(ItemTemplates.randomShield())
+        } else if roll < 0.45 {
+            // 19% chance for a potion
             lootItems.append(ItemTemplates.healthPotion(size: .common))
+        } else if roll < 0.65 {
+            // 20% chance for a gem
+            lootItems.append(ItemTemplates.randomGem())
         }
-        // 60% chance for just gold
+        // 35% chance for just gold
     }
     
     var isAlive: Bool { currentHP > 0 }
@@ -340,18 +376,20 @@ struct DamageNumber: Identifiable {
     let amount: Int
     let isCritical: Bool
     let isHeal: Bool
+    let isBlock: Bool
     var worldPosition: simd_float3
     var age: Float = 0
     var velocity: simd_float3
     
     static let lifetime: Float = 1.5
     
-    init(amount: Int, position: simd_float3, isCritical: Bool = false, isHeal: Bool = false) {
+    init(amount: Int, position: simd_float3, isCritical: Bool = false, isHeal: Bool = false, isBlock: Bool = false) {
         self.id = UUID()
         self.amount = amount
         self.worldPosition = position + simd_float3(0, 2.0, 0)  // Start above target
         self.isCritical = isCritical
         self.isHeal = isHeal
+        self.isBlock = isBlock
         // Random upward velocity with slight horizontal drift
         self.velocity = simd_float3(
             Float.random(in: -0.5...0.5),
@@ -385,9 +423,16 @@ final class EnemyManager {
     private(set) var enemies: [Enemy] = []
     var damageNumbers: [DamageNumber] = []
     
-    /// Spawn an enemy at a position
-    func spawnEnemy(type: EnemyType, at position: simd_float3) {
-        let enemy = Enemy(type: type, position: position)
+    /// Spawn an enemy at a position with optional level scaling
+    /// - Parameters:
+    ///   - type: The type of enemy to spawn
+    ///   - position: World position to spawn at
+    ///   - playerLevel: The player's current level (used to scale enemy level)
+    func spawnEnemy(type: EnemyType, at position: simd_float3, playerLevel: Int = 1) {
+        // Enemy level is player level +/- 1, minimum 1
+        let levelVariation = Int.random(in: -1...1)
+        let enemyLevel = max(1, playerLevel + levelVariation)
+        let enemy = Enemy(type: type, position: position, level: enemyLevel)
         enemies.append(enemy)
     }
     
@@ -399,13 +444,54 @@ final class EnemyManager {
     }
     
     /// Update all enemies
-    func update(deltaTime dt: Float, playerPosition: simd_float3, terrain: Terrain) {
+    func update(deltaTime dt: Float, playerPosition: simd_float3, terrain: Terrain, playerRadius: Float = 0.3) {
+        let enemyRadius: Float = 0.4
+        
         for enemy in enemies {
             if enemy.isAlive {
                 enemy.update(deltaTime: dt, playerPosition: playerPosition, terrain: terrain)
+                
+                // Enemy-player collision - push enemy away from player
+                let enemyPos2D = simd_float2(enemy.position.x, enemy.position.z)
+                let playerPos2D = simd_float2(playerPosition.x, playerPosition.z)
+                let toEnemy = enemyPos2D - playerPos2D
+                let distance = simd_length(toEnemy)
+                let minDist = enemyRadius + playerRadius
+                
+                if distance < minDist && distance > 0.001 {
+                    let pushDirection = simd_normalize(toEnemy)
+                    let pushAmount = (minDist - distance) * 0.5 + 0.01  // Push enemy half the overlap
+                    enemy.position.x += pushDirection.x * pushAmount
+                    enemy.position.z += pushDirection.y * pushAmount
+                }
             } else {
                 // Update dead enemies' state timer for death animation
                 enemy.stateTimer += dt
+            }
+        }
+        
+        // Enemy-enemy collision resolution
+        for i in 0..<enemies.count {
+            guard enemies[i].isAlive else { continue }
+            for j in (i+1)..<enemies.count {
+                guard enemies[j].isAlive else { continue }
+                
+                let pos1 = simd_float2(enemies[i].position.x, enemies[i].position.z)
+                let pos2 = simd_float2(enemies[j].position.x, enemies[j].position.z)
+                let toSecond = pos2 - pos1
+                let distance = simd_length(toSecond)
+                let minDist = enemyRadius * 2
+                
+                if distance < minDist && distance > 0.001 {
+                    let pushDirection = simd_normalize(toSecond)
+                    let pushAmount = (minDist - distance) * 0.5 + 0.005
+                    
+                    // Push both enemies apart equally
+                    enemies[i].position.x -= pushDirection.x * pushAmount
+                    enemies[i].position.z -= pushDirection.y * pushAmount
+                    enemies[j].position.x += pushDirection.x * pushAmount
+                    enemies[j].position.z += pushDirection.y * pushAmount
+                }
             }
         }
         
@@ -423,6 +509,13 @@ final class EnemyManager {
     func addDamageNumber(_ amount: Int, at position: simd_float3, isCritical: Bool = false, isHeal: Bool = false) {
         let damageNum = DamageNumber(amount: amount, position: position, isCritical: isCritical, isHeal: isHeal)
         damageNumbers.append(damageNum)
+    }
+    
+    /// Add a block indicator to display (shows "BLOCKED!" text)
+    func addBlockIndicator(at position: simd_float3) {
+        // Use damage number system with 0 damage and special flag
+        let blockNum = DamageNumber(amount: 0, position: position, isCritical: false, isHeal: false, isBlock: true)
+        damageNumbers.append(blockNum)
     }
     
     /// Get enemies within attack range of a position
@@ -449,7 +542,7 @@ final class EnemyManager {
                     simd_float2(enemy.position.x, enemy.position.z)
                 )
                 if dist <= enemy.type.attackRange * 1.2 {
-                    hits.append((enemy, enemy.type.damage))
+                    hits.append((enemy, enemy.damage))
                 }
             }
         }
@@ -460,6 +553,11 @@ final class EnemyManager {
     /// Get enemy count
     var count: Int { enemies.count }
     var aliveCount: Int { enemies.filter { $0.isAlive }.count }
+    
+    /// Clear all enemies
+    func clearEnemies() {
+        enemies.removeAll()
+    }
     
     /// Find a lootable corpse near the player
     func findLootableCorpse(near position: simd_float3, range: Float = 2.0) -> Enemy? {

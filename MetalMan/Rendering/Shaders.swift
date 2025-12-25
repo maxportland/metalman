@@ -124,8 +124,9 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
                              texture2d<float> rockNormalMap [[texture(14)]],
                              texture2d<float> pathNormalMap [[texture(15)]],
                              texture2d<float> treasureChestTex [[texture(16)]],
-                             texture2d<float> enemyTex [[texture(17)]],
-                             sampler texSampler [[sampler(0)]],
+                            texture2d<float> enemyTex [[texture(17)]],
+                            texture2d<float> vendorTex [[texture(18)]],
+                            sampler texSampler [[sampler(0)]],
                              sampler shadowSampler [[sampler(1)]],
                              constant LitUniforms &uniforms [[buffer(1)]]) {
     // Sample texture based on material
@@ -144,6 +145,7 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
         case 10: texColor = skyTex.sample(texSampler, in.texCoord); break;
         case 11: texColor = treasureChestTex.sample(texSampler, in.texCoord); break;
         case 12: texColor = enemyTex.sample(texSampler, in.texCoord); break;
+        case 13: texColor = vendorTex.sample(texSampler, in.texCoord); break;
         default: texColor = float4(1, 0, 1, 1); break;
     }
     

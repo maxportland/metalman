@@ -23,7 +23,7 @@ struct MetalGameContainer: View {
             
             // HUD overlay
             GameHUD(viewModel: hudViewModel)
-                .allowsHitTesting(hudViewModel.isInventoryOpen)  // Only allow hit testing when inventory is open
+                .allowsHitTesting(hudViewModel.isInventoryOpen || hudViewModel.isLootPanelOpen || hudViewModel.isPlayerDead || hudViewModel.isHelpMenuOpen || hudViewModel.isShopOpen || hudViewModel.isLevelUpMenuOpen)  // Allow hit testing for UI overlays
         }
     }
 }

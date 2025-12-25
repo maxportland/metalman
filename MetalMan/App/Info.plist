@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS: Path to fonts folder -->
+    <key>ATSApplicationFontsPath</key>
+    <string>Fonts</string>
+    
+    <!-- iOS/macOS: Explicit list of font files -->
+    <key>UIAppFonts</key>
+    <array>
+        <string>Font Awesome 7 Free-Solid-900.otf</string>
+    </array>
+</dict>
+</plist>

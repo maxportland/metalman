@@ -290,9 +290,13 @@ class GeometryGenerator {
         case dead = 4     // Bare branches
     }
     
-    static func makeTreeMeshes(device: MTLDevice) -> (MTLBuffer, Int, [Collider]) {
+    /// Camera blocker data: position (x,z), visual radius, height
+    typealias CameraBlocker = (position: simd_float2, radius: Float, height: Float)
+    
+    static func makeTreeMeshes(device: MTLDevice) -> (MTLBuffer, Int, [Collider], [CameraBlocker]) {
         var vertices: [TexturedVertex] = []
         var colliders: [Collider] = []
+        var cameraBlockers: [CameraBlocker] = []
         
         var seed = 1
         for gridX in stride(from: -90, through: 90, by: 10) {
@@ -342,13 +346,18 @@ class GeometryGenerator {
                     markOccupied(x: x, z: z, radius: occupiedRadius)
                     
                     addTree(at: pos, height: height, radius: radius, type: treeType, seed: seed, vertices: &vertices, colliders: &colliders)
+                    
+                    // Add camera blocker with visual (foliage) radius
+                    // Dead trees don't block much, others use foliage radius
+                    let visualRadius = treeType == .dead ? radius * 0.3 : radius
+                    cameraBlockers.append((simd_float2(x, z), visualRadius, height))
                 }
                 seed += 6
             }
         }
         
         let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
-        return (buffer, vertices.count, colliders)
+        return (buffer, vertices.count, colliders, cameraBlockers)
     }
     
     private static func addTree(at pos: simd_float3, height: Float, radius: Float, type: TreeType, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
@@ -371,6 +380,12 @@ class GeometryGenerator {
     private static func addOakTree(at pos: simd_float3, height: Float, radius: Float, seed: Int, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
         let trunkHeight = height * 0.4
         let trunkRadius = radius * 0.15
+        
+        // Exposed roots at base
+        addTreeRoots(at: pos, trunkRadius: trunkRadius, rootCount: 4 + Int(seededRandom(seed + 100) * 3), seed: seed + 200, vertices: &vertices)
+        
+        // Trunk base bulge
+        addTrunkBase(at: pos, radius: trunkRadius * 1.4, height: trunkRadius * 0.6, vertices: &vertices)
         
         // Main trunk with slight taper
         addTaperedCylinder(at: pos, radiusBottom: trunkRadius, radiusTop: trunkRadius * 0.7, height: trunkHeight, segments: 8, material: MaterialIndex.treeTrunk.rawValue, vertices: &vertices)
@@ -623,6 +638,133 @@ class GeometryGenerator {
         }
     }
     
+    /// Add exposed tree roots radiating from the trunk base
+    private static func addTreeRoots(at pos: simd_float3, trunkRadius: Float, rootCount: Int, seed: Int, vertices: inout [TexturedVertex]) {
+        let matTrunk = MaterialIndex.treeTrunk.rawValue
+        
+        for i in 0..<rootCount {
+            let angle = Float(i) / Float(rootCount) * .pi * 2 + seededRandom(seed + i) * 0.5
+            let rootLength = trunkRadius * (2.0 + seededRandom(seed + 10 + i) * 1.5)
+            let rootRadius = trunkRadius * (0.25 + seededRandom(seed + 20 + i) * 0.15)
+            let rootHeight = trunkRadius * (0.3 + seededRandom(seed + 30 + i) * 0.2)
+            
+            // Root starts at trunk and curves down into ground
+            let startX = cos(angle) * trunkRadius * 0.8
+            let startZ = sin(angle) * trunkRadius * 0.8
+            let endX = cos(angle) * rootLength
+            let endZ = sin(angle) * rootLength
+            
+            // Create curved root with 3 segments
+            let segments = 3
+            for seg in 0..<segments {
+                let t1 = Float(seg) / Float(segments)
+                let t2 = Float(seg + 1) / Float(segments)
+                
+                // Curve: starts at rootHeight, curves down to ground
+                let curve1 = (1 - t1 * t1)  // Quadratic curve
+                let curve2 = (1 - t2 * t2)
+                
+                let p1 = pos + simd_float3(
+                    startX + (endX - startX) * t1,
+                    rootHeight * curve1,
+                    startZ + (endZ - startZ) * t1
+                )
+                let p2 = pos + simd_float3(
+                    startX + (endX - startX) * t2,
+                    rootHeight * curve2,
+                    startZ + (endZ - startZ) * t2
+                )
+                
+                // Radius tapers towards end
+                let r1 = rootRadius * (1 - t1 * 0.7)
+                let r2 = rootRadius * (1 - t2 * 0.7)
+                
+                // Draw root segment as simple box oriented along direction
+                addRootSegment(from: p1, to: p2, radius1: r1, radius2: r2, material: matTrunk, vertices: &vertices)
+            }
+        }
+    }
+    
+    /// Add a single root segment (tapered cylinder between two points)
+    private static func addRootSegment(from start: simd_float3, to end: simd_float3, radius1: Float, radius2: Float, material: UInt32, vertices: inout [TexturedVertex]) {
+        let dir = simd_normalize(end - start)
+        let length = simd_length(end - start)
+        
+        // Find perpendicular vectors
+        var up = simd_float3(0, 1, 0)
+        if abs(simd_dot(dir, up)) > 0.9 {
+            up = simd_float3(1, 0, 0)
+        }
+        let right = simd_normalize(simd_cross(dir, up))
+        let forward = simd_normalize(simd_cross(right, dir))
+        
+        let segments = 4
+        for i in 0..<segments {
+            let angle1 = Float(i) / Float(segments) * .pi * 2
+            let angle2 = Float(i + 1) / Float(segments) * .pi * 2
+            
+            let offset1 = right * cos(angle1) + forward * sin(angle1)
+            let offset2 = right * cos(angle2) + forward * sin(angle2)
+            
+            let b1 = start + offset1 * radius1
+            let b2 = start + offset2 * radius1
+            let t1 = end + offset1 * radius2
+            let t2 = end + offset2 * radius2
+            
+            let n1 = simd_normalize(offset1)
+            let n2 = simd_normalize(offset2)
+            
+            vertices.append(TexturedVertex(position: b1, normal: n1, texCoord: simd_float2(0, 0), materialIndex: material))
+            vertices.append(TexturedVertex(position: t1, normal: n1, texCoord: simd_float2(0, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: t2, normal: n2, texCoord: simd_float2(1, 1), materialIndex: material))
+            
+            vertices.append(TexturedVertex(position: b1, normal: n1, texCoord: simd_float2(0, 0), materialIndex: material))
+            vertices.append(TexturedVertex(position: t2, normal: n2, texCoord: simd_float2(1, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: b2, normal: n2, texCoord: simd_float2(1, 0), materialIndex: material))
+        }
+    }
+    
+    /// Add a bulging trunk base
+    private static func addTrunkBase(at pos: simd_float3, radius: Float, height: Float, vertices: inout [TexturedVertex]) {
+        let matTrunk = MaterialIndex.treeTrunk.rawValue
+        let segments = 8
+        
+        // Create a flared base using multiple rings
+        let rings = 3
+        for ring in 0..<rings {
+            let t1 = Float(ring) / Float(rings)
+            let t2 = Float(ring + 1) / Float(rings)
+            
+            // Radius flares out at bottom (inverse exponential curve)
+            let r1 = radius * (1.0 - t1 * t1 * 0.4)
+            let r2 = radius * (1.0 - t2 * t2 * 0.4)
+            
+            let y1 = height * t1
+            let y2 = height * t2
+            
+            for i in 0..<segments {
+                let angle1 = Float(i) / Float(segments) * .pi * 2
+                let angle2 = Float(i + 1) / Float(segments) * .pi * 2
+                
+                let bl = pos + simd_float3(cos(angle1) * r1, y1, sin(angle1) * r1)
+                let br = pos + simd_float3(cos(angle2) * r1, y1, sin(angle2) * r1)
+                let tl = pos + simd_float3(cos(angle1) * r2, y2, sin(angle1) * r2)
+                let tr = pos + simd_float3(cos(angle2) * r2, y2, sin(angle2) * r2)
+                
+                let n1 = simd_normalize(simd_float3(cos(angle1), 0.3, sin(angle1)))
+                let n2 = simd_normalize(simd_float3(cos(angle2), 0.3, sin(angle2)))
+                
+                vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(0, t1), materialIndex: matTrunk))
+                vertices.append(TexturedVertex(position: br, normal: n2, texCoord: simd_float2(1, t1), materialIndex: matTrunk))
+                vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(1, t2), materialIndex: matTrunk))
+                
+                vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(0, t1), materialIndex: matTrunk))
+                vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(1, t2), materialIndex: matTrunk))
+                vertices.append(TexturedVertex(position: tl, normal: n1, texCoord: simd_float2(0, t2), materialIndex: matTrunk))
+            }
+        }
+    }
+    
     private static func addFoliageSphere(at center: simd_float3, radius: Float, segments: Int, vertices: inout [TexturedVertex]) {
         // Create an icosphere-like shape for foliage
         let latSegments = segments
@@ -733,39 +875,137 @@ class GeometryGenerator {
     private static func addRock(at pos: simd_float3, size: Float, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
         let s = size
         let h = size * 1.2
+        let matRock = MaterialIndex.rock.rawValue
         
-        let corners: [simd_float3] = [
-            pos + simd_float3(-s * 0.9, 0, -s * 0.8),
-            pos + simd_float3(s * 0.85, 0, -s * 0.95),
-            pos + simd_float3(s * 0.9, 0, s * 0.75),
-            pos + simd_float3(-s * 0.75, 0, s * 0.9),
-            pos + simd_float3(-s * 0.5, h * 0.9, -s * 0.4),
-            pos + simd_float3(s * 0.45, h, -s * 0.5),
-            pos + simd_float3(s * 0.5, h * 0.85, s * 0.35),
-            pos + simd_float3(-s * 0.4, h * 0.8, s * 0.45)
+        // More detailed rock with multiple layers of vertices for natural appearance
+        // Bottom layer (ground level, 8 points)
+        let bottomPoints: [simd_float3] = [
+            pos + simd_float3(-s * 0.95, 0, 0),
+            pos + simd_float3(-s * 0.7, 0, -s * 0.7),
+            pos + simd_float3(0, 0, -s * 0.9),
+            pos + simd_float3(s * 0.75, 0, -s * 0.65),
+            pos + simd_float3(s * 0.85, 0, 0),
+            pos + simd_float3(s * 0.7, 0, s * 0.7),
+            pos + simd_float3(0, 0, s * 0.85),
+            pos + simd_float3(-s * 0.65, 0, s * 0.75)
         ]
         
-        let faces: [(Int, Int, Int)] = [
-            (0, 2, 1), (0, 3, 2),
-            (4, 5, 6), (4, 6, 7),
-            (0, 1, 5), (0, 5, 4),
-            (1, 2, 6), (1, 6, 5),
-            (2, 3, 7), (2, 7, 6),
-            (3, 0, 4), (3, 4, 7)
+        // Middle layer (widest part, 8 points with irregular heights)
+        let midHeight = h * 0.45
+        let midPoints: [simd_float3] = [
+            pos + simd_float3(-s * 1.1, midHeight * 0.9, 0),
+            pos + simd_float3(-s * 0.8, midHeight * 1.1, -s * 0.8),
+            pos + simd_float3(0, midHeight, -s * 1.05),
+            pos + simd_float3(s * 0.85, midHeight * 0.95, -s * 0.75),
+            pos + simd_float3(s * 1.0, midHeight * 1.05, 0),
+            pos + simd_float3(s * 0.8, midHeight * 0.9, s * 0.8),
+            pos + simd_float3(0, midHeight * 1.1, s * 0.95),
+            pos + simd_float3(-s * 0.75, midHeight, s * 0.85)
         ]
         
-        for (a, b, c) in faces {
-            let edge1 = corners[b] - corners[a]
-            let edge2 = corners[c] - corners[a]
+        // Upper layer (tapering, 8 points)
+        let upperHeight = h * 0.75
+        let upperPoints: [simd_float3] = [
+            pos + simd_float3(-s * 0.7, upperHeight * 0.95, 0),
+            pos + simd_float3(-s * 0.5, upperHeight * 1.05, -s * 0.5),
+            pos + simd_float3(0, upperHeight, -s * 0.65),
+            pos + simd_float3(s * 0.55, upperHeight * 0.9, -s * 0.45),
+            pos + simd_float3(s * 0.6, upperHeight * 1.0, 0),
+            pos + simd_float3(s * 0.5, upperHeight * 0.95, s * 0.5),
+            pos + simd_float3(0, upperHeight * 1.1, s * 0.55),
+            pos + simd_float3(-s * 0.45, upperHeight, s * 0.55)
+        ]
+        
+        // Top peak (single point, slightly off-center for natural look)
+        let topPoint = pos + simd_float3(s * 0.1, h, -s * 0.05)
+        
+        // Build faces between layers
+        let n = 8  // Number of points per layer
+        
+        // Bottom to middle layer
+        for i in 0..<n {
+            let next = (i + 1) % n
+            addRockQuad(bottomPoints[i], bottomPoints[next], midPoints[i], midPoints[next], material: matRock, vertices: &vertices)
+        }
+        
+        // Middle to upper layer
+        for i in 0..<n {
+            let next = (i + 1) % n
+            addRockQuad(midPoints[i], midPoints[next], upperPoints[i], upperPoints[next], material: matRock, vertices: &vertices)
+        }
+        
+        // Upper layer to peak (triangular faces)
+        for i in 0..<n {
+            let next = (i + 1) % n
+            let edge1 = upperPoints[next] - upperPoints[i]
+            let edge2 = topPoint - upperPoints[i]
             let normal = simd_normalize(simd_cross(edge1, edge2))
             
-            vertices.append(TexturedVertex(position: corners[a], normal: normal, texCoord: simd_float2(0, 0), materialIndex: MaterialIndex.rock.rawValue))
-            vertices.append(TexturedVertex(position: corners[b], normal: normal, texCoord: simd_float2(1, 0), materialIndex: MaterialIndex.rock.rawValue))
-            vertices.append(TexturedVertex(position: corners[c], normal: normal, texCoord: simd_float2(0.5, 1), materialIndex: MaterialIndex.rock.rawValue))
+            vertices.append(TexturedVertex(position: upperPoints[i], normal: normal, texCoord: simd_float2(0, 1), materialIndex: matRock))
+            vertices.append(TexturedVertex(position: upperPoints[next], normal: normal, texCoord: simd_float2(1, 1), materialIndex: matRock))
+            vertices.append(TexturedVertex(position: topPoint, normal: normal, texCoord: simd_float2(0.5, 0), materialIndex: matRock))
+        }
+        
+        // Add smaller accent rocks around the base
+        let smallRockCount = 3
+        for i in 0..<smallRockCount {
+            let angle = Float(i) * 2.0 * .pi / Float(smallRockCount) + 0.5
+            let dist = s * 0.9
+            let smallSize = s * 0.25
+            let smallPos = pos + simd_float3(cos(angle) * dist, 0, sin(angle) * dist)
+            addSmallRock(at: smallPos, size: smallSize, vertices: &vertices)
         }
         
         // Climbable collider - character can walk on top
-        colliders.append(Collider.climbable(x: pos.x, z: pos.z, radius: s, height: h, baseY: pos.y))
+        colliders.append(Collider.climbable(x: pos.x, z: pos.z, radius: s * 1.1, height: h, baseY: pos.y))
+    }
+    
+    /// Add a quad for rock faces (splits into two triangles)
+    private static func addRockQuad(_ bl: simd_float3, _ br: simd_float3, _ tl: simd_float3, _ tr: simd_float3, material: UInt32, vertices: inout [TexturedVertex]) {
+        // Calculate normals for each triangle
+        let edge1a = br - bl
+        let edge2a = tl - bl
+        let normal1 = simd_normalize(simd_cross(edge1a, edge2a))
+        
+        let edge1b = tr - tl
+        let edge2b = br - tl
+        let normal2 = simd_normalize(simd_cross(edge1b, edge2b))
+        
+        // First triangle
+        vertices.append(TexturedVertex(position: bl, normal: normal1, texCoord: simd_float2(0, 1), materialIndex: material))
+        vertices.append(TexturedVertex(position: br, normal: normal1, texCoord: simd_float2(1, 1), materialIndex: material))
+        vertices.append(TexturedVertex(position: tl, normal: normal1, texCoord: simd_float2(0, 0), materialIndex: material))
+        
+        // Second triangle
+        vertices.append(TexturedVertex(position: tl, normal: normal2, texCoord: simd_float2(0, 0), materialIndex: material))
+        vertices.append(TexturedVertex(position: br, normal: normal2, texCoord: simd_float2(1, 1), materialIndex: material))
+        vertices.append(TexturedVertex(position: tr, normal: normal2, texCoord: simd_float2(1, 0), materialIndex: material))
+    }
+    
+    /// Add a small decorative rock
+    private static func addSmallRock(at pos: simd_float3, size: Float, vertices: inout [TexturedVertex]) {
+        let matRock = MaterialIndex.rock.rawValue
+        
+        // Simple 5-sided pyramid for small rocks
+        let base: [simd_float3] = [
+            pos + simd_float3(-size, 0, -size * 0.8),
+            pos + simd_float3(size * 0.9, 0, -size * 0.7),
+            pos + simd_float3(size * 0.8, 0, size * 0.9),
+            pos + simd_float3(-size * 0.7, 0, size * 0.8)
+        ]
+        let top = pos + simd_float3(0, size * 0.8, 0)
+        
+        // Side faces
+        for i in 0..<4 {
+            let next = (i + 1) % 4
+            let edge1 = base[next] - base[i]
+            let edge2 = top - base[i]
+            let normal = simd_normalize(simd_cross(edge1, edge2))
+            
+            vertices.append(TexturedVertex(position: base[i], normal: normal, texCoord: simd_float2(0, 1), materialIndex: matRock))
+            vertices.append(TexturedVertex(position: base[next], normal: normal, texCoord: simd_float2(1, 1), materialIndex: matRock))
+            vertices.append(TexturedVertex(position: top, normal: normal, texCoord: simd_float2(0.5, 0), materialIndex: matRock))
+        }
     }
     
     // MARK: - Structure Meshes (Houses, Ruins, Bridges)
@@ -836,26 +1076,207 @@ class GeometryGenerator {
         let hw = size.x / 2
         let hd = size.z / 2
         let wallHeight = size.y
+        let wallThickness: Float = 0.15
         
-        // Walls
-        addBox(at: basePos + simd_float3(0, wallHeight / 2, 0), size: size, material: MaterialIndex.stoneWall.rawValue, vertices: &vertices)
+        // Foundation/base step
+        let foundationHeight: Float = 0.15
+        addBox(at: basePos + simd_float3(0, foundationHeight / 2, 0),
+               size: simd_float3(size.x + 0.4, foundationHeight, size.z + 0.4),
+               material: MaterialIndex.rock.rawValue, vertices: &vertices)
         
-        // Roof (triangular prism)
-        let roofBase = basePos.y + wallHeight
+        // Main walls - build each wall separately to allow for door/window cutouts
+        let stoneWall = MaterialIndex.stoneWall.rawValue
+        let woodPlank = MaterialIndex.woodPlank.rawValue
+        
+        // FRONT WALL (facing -Z) with door
+        let doorWidth: Float = 1.2
+        let doorHeight: Float = 2.2
+        let doorX: Float = 0  // Center of door
+        
+        // Front wall - left section (left of door)
+        let frontLeftWidth = hw - doorWidth / 2
+        if frontLeftWidth > 0.3 {
+            addBox(at: basePos + simd_float3(-hw / 2 - doorWidth / 4, wallHeight / 2 + foundationHeight, -hd + wallThickness / 2),
+                   size: simd_float3(frontLeftWidth, wallHeight, wallThickness),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Front wall - right section (right of door)
+        let frontRightWidth = hw - doorWidth / 2
+        if frontRightWidth > 0.3 {
+            addBox(at: basePos + simd_float3(hw / 2 + doorWidth / 4, wallHeight / 2 + foundationHeight, -hd + wallThickness / 2),
+                   size: simd_float3(frontRightWidth, wallHeight, wallThickness),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Front wall - above door
+        let aboveDoorHeight = wallHeight - doorHeight
+        if aboveDoorHeight > 0.1 {
+            addBox(at: basePos + simd_float3(doorX, doorHeight + aboveDoorHeight / 2 + foundationHeight, -hd + wallThickness / 2),
+                   size: simd_float3(doorWidth + 0.1, aboveDoorHeight, wallThickness),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Door frame (wood)
+        let frameThickness: Float = 0.1
+        // Left frame
+        addBox(at: basePos + simd_float3(doorX - doorWidth / 2 - frameThickness / 2, doorHeight / 2 + foundationHeight, -hd),
+               size: simd_float3(frameThickness, doorHeight, wallThickness + 0.05),
+               material: woodPlank, vertices: &vertices)
+        // Right frame
+        addBox(at: basePos + simd_float3(doorX + doorWidth / 2 + frameThickness / 2, doorHeight / 2 + foundationHeight, -hd),
+               size: simd_float3(frameThickness, doorHeight, wallThickness + 0.05),
+               material: woodPlank, vertices: &vertices)
+        // Top frame
+        addBox(at: basePos + simd_float3(doorX, doorHeight + frameThickness / 2 + foundationHeight, -hd),
+               size: simd_float3(doorWidth + frameThickness * 2, frameThickness, wallThickness + 0.05),
+               material: woodPlank, vertices: &vertices)
+        
+        // Door (recessed, wooden)
+        addBox(at: basePos + simd_float3(doorX, doorHeight / 2 + foundationHeight, -hd + wallThickness / 2 + 0.05),
+               size: simd_float3(doorWidth - 0.05, doorHeight - 0.05, 0.08),
+               material: woodPlank, vertices: &vertices)
+        
+        // Doorstep
+        addBox(at: basePos + simd_float3(doorX, foundationHeight / 2, -hd - 0.4),
+               size: simd_float3(doorWidth + 0.4, foundationHeight, 0.5),
+               material: MaterialIndex.rock.rawValue, vertices: &vertices)
+        
+        // BACK WALL (facing +Z) - solid
+        addBox(at: basePos + simd_float3(0, wallHeight / 2 + foundationHeight, hd - wallThickness / 2),
+               size: simd_float3(size.x, wallHeight, wallThickness),
+               material: stoneWall, vertices: &vertices)
+        
+        // LEFT WALL (facing -X) with window
+        let windowWidth: Float = 1.0
+        let windowHeight: Float = 1.0
+        let windowY: Float = wallHeight * 0.5 + foundationHeight
+        let windowZ: Float = 0  // Center of wall
+        
+        // Left wall - front section (before window)
+        let leftFrontLength = hd - windowWidth / 2 - 0.3
+        if leftFrontLength > 0.2 {
+            addBox(at: basePos + simd_float3(-hw + wallThickness / 2, wallHeight / 2 + foundationHeight, -hd / 2 - windowWidth / 4),
+                   size: simd_float3(wallThickness, wallHeight, leftFrontLength),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Left wall - back section (after window)
+        let leftBackLength = hd - windowWidth / 2 - 0.3
+        if leftBackLength > 0.2 {
+            addBox(at: basePos + simd_float3(-hw + wallThickness / 2, wallHeight / 2 + foundationHeight, hd / 2 + windowWidth / 4),
+                   size: simd_float3(wallThickness, wallHeight, leftBackLength),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Left wall - below window
+        let belowWindowHeight = windowY - windowHeight / 2 - foundationHeight
+        if belowWindowHeight > 0.1 {
+            addBox(at: basePos + simd_float3(-hw + wallThickness / 2, belowWindowHeight / 2 + foundationHeight, windowZ),
+                   size: simd_float3(wallThickness, belowWindowHeight, windowWidth + 0.2),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Left wall - above window
+        let aboveWindowHeight = wallHeight - (windowY - foundationHeight + windowHeight / 2)
+        if aboveWindowHeight > 0.1 {
+            addBox(at: basePos + simd_float3(-hw + wallThickness / 2, windowY + windowHeight / 2 + aboveWindowHeight / 2, windowZ),
+                   size: simd_float3(wallThickness, aboveWindowHeight, windowWidth + 0.2),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Window frame (wood)
+        let winFrameThick: Float = 0.08
+        // Left window - outer frame
+        addBox(at: basePos + simd_float3(-hw, windowY, windowZ),
+               size: simd_float3(0.06, windowHeight + winFrameThick * 2, winFrameThick),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(-hw, windowY, windowZ - windowWidth / 2 - winFrameThick / 2),
+               size: simd_float3(0.06, windowHeight + winFrameThick * 2, winFrameThick),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(-hw, windowY, windowZ + windowWidth / 2 + winFrameThick / 2),
+               size: simd_float3(0.06, windowHeight + winFrameThick * 2, winFrameThick),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(-hw, windowY - windowHeight / 2 - winFrameThick / 2, windowZ),
+               size: simd_float3(0.06, winFrameThick, windowWidth),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(-hw, windowY + windowHeight / 2 + winFrameThick / 2, windowZ),
+               size: simd_float3(0.06, winFrameThick, windowWidth),
+               material: woodPlank, vertices: &vertices)
+        
+        // Window sill (stone ledge)
+        addBox(at: basePos + simd_float3(-hw - 0.15, windowY - windowHeight / 2 - 0.05, windowZ),
+               size: simd_float3(0.25, 0.1, windowWidth + 0.3),
+               material: MaterialIndex.rock.rawValue, vertices: &vertices)
+        
+        // RIGHT WALL (facing +X) with window
+        // Right wall - front section
+        if leftFrontLength > 0.2 {
+            addBox(at: basePos + simd_float3(hw - wallThickness / 2, wallHeight / 2 + foundationHeight, -hd / 2 - windowWidth / 4),
+                   size: simd_float3(wallThickness, wallHeight, leftFrontLength),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Right wall - back section
+        if leftBackLength > 0.2 {
+            addBox(at: basePos + simd_float3(hw - wallThickness / 2, wallHeight / 2 + foundationHeight, hd / 2 + windowWidth / 4),
+                   size: simd_float3(wallThickness, wallHeight, leftBackLength),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Right wall - below window
+        if belowWindowHeight > 0.1 {
+            addBox(at: basePos + simd_float3(hw - wallThickness / 2, belowWindowHeight / 2 + foundationHeight, windowZ),
+                   size: simd_float3(wallThickness, belowWindowHeight, windowWidth + 0.2),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Right wall - above window
+        if aboveWindowHeight > 0.1 {
+            addBox(at: basePos + simd_float3(hw - wallThickness / 2, windowY + windowHeight / 2 + aboveWindowHeight / 2, windowZ),
+                   size: simd_float3(wallThickness, aboveWindowHeight, windowWidth + 0.2),
+                   material: stoneWall, vertices: &vertices)
+        }
+        
+        // Right window frame
+        addBox(at: basePos + simd_float3(hw, windowY, windowZ),
+               size: simd_float3(0.06, windowHeight + winFrameThick * 2, winFrameThick),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(hw, windowY, windowZ - windowWidth / 2 - winFrameThick / 2),
+               size: simd_float3(0.06, windowHeight + winFrameThick * 2, winFrameThick),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(hw, windowY, windowZ + windowWidth / 2 + winFrameThick / 2),
+               size: simd_float3(0.06, windowHeight + winFrameThick * 2, winFrameThick),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(hw, windowY - windowHeight / 2 - winFrameThick / 2, windowZ),
+               size: simd_float3(0.06, winFrameThick, windowWidth),
+               material: woodPlank, vertices: &vertices)
+        addBox(at: basePos + simd_float3(hw, windowY + windowHeight / 2 + winFrameThick / 2, windowZ),
+               size: simd_float3(0.06, winFrameThick, windowWidth),
+               material: woodPlank, vertices: &vertices)
+        
+        // Right window sill
+        addBox(at: basePos + simd_float3(hw + 0.15, windowY - windowHeight / 2 - 0.05, windowZ),
+               size: simd_float3(0.25, 0.1, windowWidth + 0.3),
+               material: MaterialIndex.rock.rawValue, vertices: &vertices)
+        
+        // ROOF
+        let roofOverhang: Float = 0.4
+        let roofBase = basePos.y + wallHeight + foundationHeight
         let roofPeak = roofBase + roofHeight
         
-        // Front and back triangles
-        let frontLeft = basePos + simd_float3(-hw - 0.3, wallHeight, -hd - 0.3)
-        let frontRight = basePos + simd_float3(hw + 0.3, wallHeight, -hd - 0.3)
-        let frontPeak = basePos + simd_float3(0, roofPeak, -hd - 0.3)
-        let backLeft = basePos + simd_float3(-hw - 0.3, wallHeight, hd + 0.3)
-        let backRight = basePos + simd_float3(hw + 0.3, wallHeight, hd + 0.3)
-        let backPeak = basePos + simd_float3(0, roofPeak, hd + 0.3)
+        // Front and back triangles (gables)
+        let frontLeft = basePos + simd_float3(-hw - roofOverhang, wallHeight + foundationHeight, -hd - roofOverhang)
+        let frontRight = basePos + simd_float3(hw + roofOverhang, wallHeight + foundationHeight, -hd - roofOverhang)
+        let frontPeak = basePos + simd_float3(0, roofPeak, -hd - roofOverhang)
+        let backLeft = basePos + simd_float3(-hw - roofOverhang, wallHeight + foundationHeight, hd + roofOverhang)
+        let backRight = basePos + simd_float3(hw + roofOverhang, wallHeight + foundationHeight, hd + roofOverhang)
+        let backPeak = basePos + simd_float3(0, roofPeak, hd + roofOverhang)
         
-        // Front gable
-        addTriangle(frontLeft, frontRight, frontPeak, material: MaterialIndex.stoneWall.rawValue, vertices: &vertices)
+        // Front gable (wood planks for variety)
+        addTriangle(frontLeft, frontRight, frontPeak, material: woodPlank, vertices: &vertices)
         // Back gable
-        addTriangle(backRight, backLeft, backPeak, material: MaterialIndex.stoneWall.rawValue, vertices: &vertices)
+        addTriangle(backRight, backLeft, backPeak, material: woodPlank, vertices: &vertices)
         
         // Roof slopes
         let roofNormalLeft = simd_normalize(simd_cross(frontPeak - frontLeft, backLeft - frontLeft))
@@ -876,6 +1297,46 @@ class GeometryGenerator {
         vertices.append(TexturedVertex(position: frontRight, normal: roofNormalRight, texCoord: simd_float2(1, 1), materialIndex: MaterialIndex.roof.rawValue))
         vertices.append(TexturedVertex(position: backPeak, normal: roofNormalRight, texCoord: simd_float2(0.5, 0), materialIndex: MaterialIndex.roof.rawValue))
         vertices.append(TexturedVertex(position: frontPeak, normal: roofNormalRight, texCoord: simd_float2(0.5, 0), materialIndex: MaterialIndex.roof.rawValue))
+        
+        // CHIMNEY (on right side of roof)
+        let chimneyWidth: Float = 0.6
+        let chimneyDepth: Float = 0.5
+        let chimneyHeight: Float = roofHeight * 0.8
+        let chimneyX = hw * 0.4  // Offset from center
+        let chimneyZ = hd * 0.3
+        
+        // Calculate chimney base Y on roof slope
+        let roofSlopeAngle = atan(roofHeight / hw)
+        let chimneyBaseY = roofBase + (hw - chimneyX) * tan(roofSlopeAngle) * 0.6
+        
+        addBox(at: basePos + simd_float3(chimneyX, chimneyBaseY + chimneyHeight / 2, chimneyZ),
+               size: simd_float3(chimneyWidth, chimneyHeight, chimneyDepth),
+               material: MaterialIndex.rock.rawValue, vertices: &vertices)
+        
+        // Chimney cap (slightly wider)
+        addBox(at: basePos + simd_float3(chimneyX, chimneyBaseY + chimneyHeight + 0.05, chimneyZ),
+               size: simd_float3(chimneyWidth + 0.15, 0.1, chimneyDepth + 0.15),
+               material: MaterialIndex.rock.rawValue, vertices: &vertices)
+        
+        // DECORATIVE CORNER POSTS (wood trim)
+        let postSize: Float = 0.12
+        let postHeight = wallHeight + foundationHeight
+        // Front-left corner
+        addBox(at: basePos + simd_float3(-hw + postSize / 2, postHeight / 2, -hd + postSize / 2),
+               size: simd_float3(postSize, postHeight, postSize),
+               material: woodPlank, vertices: &vertices)
+        // Front-right corner
+        addBox(at: basePos + simd_float3(hw - postSize / 2, postHeight / 2, -hd + postSize / 2),
+               size: simd_float3(postSize, postHeight, postSize),
+               material: woodPlank, vertices: &vertices)
+        // Back-left corner
+        addBox(at: basePos + simd_float3(-hw + postSize / 2, postHeight / 2, hd - postSize / 2),
+               size: simd_float3(postSize, postHeight, postSize),
+               material: woodPlank, vertices: &vertices)
+        // Back-right corner
+        addBox(at: basePos + simd_float3(hw - postSize / 2, postHeight / 2, hd - postSize / 2),
+               size: simd_float3(postSize, postHeight, postSize),
+               material: woodPlank, vertices: &vertices)
         
         // Collision - houses are solid, can't walk inside
         colliders.append(Collider.circle(x: basePos.x, z: basePos.z, radius: max(hw, hd) + 0.5))
@@ -1032,58 +1493,175 @@ class GeometryGenerator {
     
     /// Add a treasure chest at the specified position
     private static func addTreasureChest(at pos: simd_float3, isOpen: Bool, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
-        let chestWidth: Float = 0.6
-        let chestDepth: Float = 0.4
-        let chestHeight: Float = 0.35
-        let lidHeight: Float = 0.15
+        // Bigger chest dimensions
+        let chestWidth: Float = 1.0
+        let chestDepth: Float = 0.7
+        let chestHeight: Float = 0.55
+        let lidHeight: Float = 0.25
+        let baseHeight: Float = 0.08  // Raised base/feet
         
         let matChest = MaterialIndex.treasureChest.rawValue
+        let matMetal = MaterialIndex.pole.rawValue  // For metal parts
         
-        // Base box (the main chest body)
-        addChestBox(at: pos + simd_float3(0, chestHeight / 2, 0),
+        // ===== FEET / BASE =====
+        // Four decorative feet at corners
+        let footSize: Float = 0.12
+        let footInset: Float = 0.08
+        let footPositions = [
+            simd_float3(-chestWidth/2 + footInset, baseHeight/2, -chestDepth/2 + footInset),
+            simd_float3(chestWidth/2 - footInset, baseHeight/2, -chestDepth/2 + footInset),
+            simd_float3(-chestWidth/2 + footInset, baseHeight/2, chestDepth/2 - footInset),
+            simd_float3(chestWidth/2 - footInset, baseHeight/2, chestDepth/2 - footInset)
+        ]
+        for footPos in footPositions {
+            addChestBox(at: pos + footPos, size: simd_float3(footSize, baseHeight, footSize),
+                        material: matMetal, vertices: &vertices)
+        }
+        
+        // ===== MAIN BODY =====
+        // Main chest body (raised on feet)
+        addChestBox(at: pos + simd_float3(0, baseHeight + chestHeight/2, 0),
                     size: simd_float3(chestWidth, chestHeight, chestDepth),
                     material: matChest, vertices: &vertices)
         
-        // Lid (either closed on top, or rotated open)
-        if isOpen {
-            // Lid rotated back ~110 degrees
-            let lidPivotY = pos.y + chestHeight
-            let lidPivotZ = pos.z - chestDepth / 2
-            
-            // Lid is rotated back, so it's mostly vertical behind the chest
-            let lidAngle: Float = 1.9  // ~110 degrees in radians
-            let lidCenterY = lidPivotY + sin(lidAngle) * (lidHeight / 2)
-            let lidCenterZ = lidPivotZ - cos(lidAngle) * (lidHeight / 2)
-            
-            addChestBox(at: simd_float3(pos.x, lidCenterY, lidCenterZ),
-                        size: simd_float3(chestWidth, lidHeight, chestDepth * 0.9),
-                        material: matChest, vertices: &vertices)
-        } else {
-            // Lid closed on top
-            addChestBox(at: pos + simd_float3(0, chestHeight + lidHeight / 2, 0),
-                        size: simd_float3(chestWidth + 0.02, lidHeight, chestDepth + 0.02),
-                        material: matChest, vertices: &vertices)
-            
-            // Metal clasp/lock on front
-            addChestBox(at: pos + simd_float3(0, chestHeight * 0.6, chestDepth / 2 + 0.02),
-                        size: simd_float3(0.1, 0.1, 0.04),
-                        material: MaterialIndex.pole.rawValue, vertices: &vertices)
-        }
+        // ===== HORIZONTAL METAL BANDS =====
+        let bandThickness: Float = 0.04
+        let bandDepth: Float = 0.02
         
-        // Metal corner reinforcements
-        let cornerOffset = simd_float3(chestWidth / 2 - 0.05, 0, chestDepth / 2 - 0.05)
+        // Bottom band
+        addChestBox(at: pos + simd_float3(0, baseHeight + 0.06, chestDepth/2 + bandDepth/2),
+                    size: simd_float3(chestWidth + 0.02, bandThickness * 1.5, bandDepth),
+                    material: matMetal, vertices: &vertices)
+        addChestBox(at: pos + simd_float3(0, baseHeight + 0.06, -chestDepth/2 - bandDepth/2),
+                    size: simd_float3(chestWidth + 0.02, bandThickness * 1.5, bandDepth),
+                    material: matMetal, vertices: &vertices)
+        
+        // Middle band
+        addChestBox(at: pos + simd_float3(0, baseHeight + chestHeight * 0.5, chestDepth/2 + bandDepth/2),
+                    size: simd_float3(chestWidth + 0.02, bandThickness, bandDepth),
+                    material: matMetal, vertices: &vertices)
+        addChestBox(at: pos + simd_float3(0, baseHeight + chestHeight * 0.5, -chestDepth/2 - bandDepth/2),
+                    size: simd_float3(chestWidth + 0.02, bandThickness, bandDepth),
+                    material: matMetal, vertices: &vertices)
+        
+        // ===== VERTICAL CORNER REINFORCEMENTS =====
+        let cornerWidth: Float = 0.06
         let corners = [
-            simd_float3(-1, 0, -1), simd_float3(1, 0, -1),
-            simd_float3(-1, 0, 1), simd_float3(1, 0, 1)
+            simd_float3(-chestWidth/2 - 0.01, 0, -chestDepth/2 - 0.01),
+            simd_float3(chestWidth/2 + 0.01, 0, -chestDepth/2 - 0.01),
+            simd_float3(-chestWidth/2 - 0.01, 0, chestDepth/2 + 0.01),
+            simd_float3(chestWidth/2 + 0.01, 0, chestDepth/2 + 0.01)
         ]
         for corner in corners {
-            let cornerPos = pos + simd_float3(corner.x * cornerOffset.x, chestHeight / 2, corner.z * cornerOffset.z)
-            addChestBox(at: cornerPos, size: simd_float3(0.06, chestHeight + 0.02, 0.06),
-                        material: MaterialIndex.pole.rawValue, vertices: &vertices)
+            let cornerPos = pos + simd_float3(corner.x, baseHeight + chestHeight/2, corner.z)
+            addChestBox(at: cornerPos, size: simd_float3(cornerWidth, chestHeight + 0.04, cornerWidth),
+                        material: matMetal, vertices: &vertices)
         }
         
-        // Collider
-        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: max(chestWidth, chestDepth) / 2 + 0.1))
+        // ===== LID =====
+        let lidTop = baseHeight + chestHeight
+        
+        if isOpen {
+            // Lid rotates around the back-bottom edge (the hinge)
+            let lidAngle: Float = 1.75  // ~100 degrees in radians
+            
+            // Pivot point is at back edge of chest, at the top of the body (in world coords)
+            let pivotY = pos.y + lidTop
+            let pivotZ = pos.z - chestDepth/2
+            
+            // Lid center position when rotated around the pivot
+            // When closed (angle=0): center is at (forward by chestDepth/2, up by lidHeight/2) from pivot
+            // Rotating backwards: use rotation matrix around X-axis
+            let offsetY = cos(lidAngle) * (lidHeight/2) + sin(lidAngle) * (chestDepth/2)
+            let offsetZ = cos(lidAngle) * (chestDepth/2) - sin(lidAngle) * (lidHeight/2)
+            
+            let lidCenterY = pivotY + offsetY
+            let lidCenterZ = pivotZ + offsetZ
+            
+            addChestBox(at: simd_float3(pos.x, lidCenterY, lidCenterZ),
+                        size: simd_float3(chestWidth + 0.04, lidHeight, chestDepth),
+                        material: matChest, vertices: &vertices)
+            
+            // Lid metal band (on the front edge of the open lid)
+            let bandOffsetY = sin(lidAngle) * (chestDepth/2 + 0.02) + cos(lidAngle) * 0.02
+            let bandOffsetZ = cos(lidAngle) * (chestDepth/2 + 0.02) - sin(lidAngle) * 0.02
+            addChestBox(at: simd_float3(pos.x, pivotY + bandOffsetY, pivotZ + bandOffsetZ),
+                        size: simd_float3(chestWidth + 0.06, bandThickness, bandDepth),
+                        material: matMetal, vertices: &vertices)
+        } else {
+            // Lid closed - slightly domed appearance with layered boxes
+            addChestBox(at: pos + simd_float3(0, lidTop + lidHeight * 0.3, 0),
+                        size: simd_float3(chestWidth + 0.04, lidHeight * 0.6, chestDepth + 0.04),
+                        material: matChest, vertices: &vertices)
+            addChestBox(at: pos + simd_float3(0, lidTop + lidHeight * 0.7, 0),
+                        size: simd_float3(chestWidth * 0.9, lidHeight * 0.4, chestDepth * 0.85),
+                        material: matChest, vertices: &vertices)
+            
+            // Lid top band
+            addChestBox(at: pos + simd_float3(0, lidTop + lidHeight * 0.5, chestDepth/2 + bandDepth),
+                        size: simd_float3(chestWidth + 0.06, bandThickness, bandDepth),
+                        material: matMetal, vertices: &vertices)
+            addChestBox(at: pos + simd_float3(0, lidTop + lidHeight * 0.5, -chestDepth/2 - bandDepth),
+                        size: simd_float3(chestWidth + 0.06, bandThickness, bandDepth),
+                        material: matMetal, vertices: &vertices)
+            
+            // ===== LOCK/CLASP =====
+            // Lock plate
+            addChestBox(at: pos + simd_float3(0, baseHeight + chestHeight * 0.65, chestDepth/2 + 0.03),
+                        size: simd_float3(0.15, 0.18, 0.03),
+                        material: matMetal, vertices: &vertices)
+            // Keyhole (darker inset)
+            addChestBox(at: pos + simd_float3(0, baseHeight + chestHeight * 0.6, chestDepth/2 + 0.045),
+                        size: simd_float3(0.04, 0.08, 0.01),
+                        material: MaterialIndex.stoneWall.rawValue, vertices: &vertices)
+            
+            // Lid clasp
+            addChestBox(at: pos + simd_float3(0, lidTop + 0.02, chestDepth/2 + 0.03),
+                        size: simd_float3(0.12, 0.06, 0.03),
+                        material: matMetal, vertices: &vertices)
+        }
+        
+        // ===== SIDE HANDLES =====
+        let handleY = baseHeight + chestHeight * 0.5
+        let handleSize = simd_float3(0.08, 0.12, 0.05)
+        
+        // Left handle
+        addChestBox(at: pos + simd_float3(-chestWidth/2 - 0.03, handleY, 0),
+                    size: handleSize, material: matMetal, vertices: &vertices)
+        // Handle ring (simplified as small box)
+        addChestBox(at: pos + simd_float3(-chestWidth/2 - 0.06, handleY - 0.02, 0),
+                    size: simd_float3(0.03, 0.08, 0.04), material: matMetal, vertices: &vertices)
+        
+        // Right handle
+        addChestBox(at: pos + simd_float3(chestWidth/2 + 0.03, handleY, 0),
+                    size: handleSize, material: matMetal, vertices: &vertices)
+        // Handle ring
+        addChestBox(at: pos + simd_float3(chestWidth/2 + 0.06, handleY - 0.02, 0),
+                    size: simd_float3(0.03, 0.08, 0.04), material: matMetal, vertices: &vertices)
+        
+        // ===== DECORATIVE STUDS =====
+        let studSize: Float = 0.035
+        let studY = baseHeight + chestHeight * 0.75
+        let studSpacing: Float = 0.2
+        
+        // Front studs
+        for i in -2...2 {
+            let studX = Float(i) * studSpacing
+            addChestBox(at: pos + simd_float3(studX, studY, chestDepth/2 + 0.02),
+                        size: simd_float3(studSize, studSize, studSize * 0.5),
+                        material: matMetal, vertices: &vertices)
+        }
+        
+        // Back studs
+        for i in -2...2 {
+            let studX = Float(i) * studSpacing
+            addChestBox(at: pos + simd_float3(studX, studY, -chestDepth/2 - 0.02),
+                        size: simd_float3(studSize, studSize, studSize * 0.5),
+                        material: matMetal, vertices: &vertices)
+        }
+        
+        // Collider (bigger to match new size)
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: max(chestWidth, chestDepth) / 2 + 0.15))
     }
     
     /// Helper to add a box for chest (uses wood plank texture coordinates)
@@ -1201,24 +1779,183 @@ class GeometryGenerator {
     }
     
     private static func addPole(at pos: simd_float3, height: Float, radius: Float, vertices: inout [TexturedVertex], colliders: inout [Collider]) {
-        addCylinder(at: pos, radius: radius, height: height, segments: 6, material: MaterialIndex.pole.rawValue, vertices: &vertices)
+        let segments = 8  // Smoother cylinder
+        let matPole = MaterialIndex.pole.rawValue
+        let matWood = MaterialIndex.treeTrunk.rawValue
         
-        // Top cap
+        // Base platform (wider at bottom for stability)
+        let baseRadius = radius * 2.5
+        let baseHeight: Float = 0.15
+        addCylinder(at: pos, radius: baseRadius, height: baseHeight, segments: segments, material: matWood, vertices: &vertices)
+        
+        // Main pole shaft (tapered - slightly thinner at top)
+        let topRadius = radius * 0.85
+        addTaperedCylinder(at: pos + simd_float3(0, baseHeight, 0), 
+                          bottomRadius: radius, 
+                          topRadius: topRadius, 
+                          height: height - baseHeight, 
+                          segments: segments, 
+                          material: matPole, 
+                          vertices: &vertices)
+        
+        // Decorative ring near top
+        let ringY = pos.y + height * 0.85
+        let ringRadius = topRadius * 1.4
+        let ringHeight: Float = 0.08
+        addCylinder(at: simd_float3(pos.x, ringY, pos.z), radius: ringRadius, height: ringHeight, segments: segments, material: matPole, vertices: &vertices)
+        
+        // Lantern holder (horizontal arm)
+        let armY = pos.y + height - 0.1
+        let armLength: Float = 0.35
+        let armRadius: Float = 0.03
+        addHorizontalCylinder(at: simd_float3(pos.x, armY, pos.z), 
+                              radius: armRadius, 
+                              length: armLength, 
+                              segments: 6, 
+                              material: matPole, 
+                              vertices: &vertices)
+        
+        // Lantern cage
+        let lanternPos = simd_float3(pos.x + armLength, armY - 0.15, pos.z)
+        let lanternSize: Float = 0.12
+        addLantern(at: lanternPos, size: lanternSize, vertices: &vertices)
+        
+        // Top cap with decorative finial
         let topCenter = pos + simd_float3(0, height, 0)
-        let topNormal = simd_float3(0, 1, 0)
-        for i in 0..<6 {
-            let angle1 = Float(i) / 6.0 * 2 * .pi
-            let angle2 = Float(i + 1) / 6.0 * 2 * .pi
-            
-            let p1 = pos + simd_float3(cos(angle1) * radius, height, sin(angle1) * radius)
-            let p2 = pos + simd_float3(cos(angle2) * radius, height, sin(angle2) * radius)
-            
-            vertices.append(TexturedVertex(position: topCenter, normal: topNormal, texCoord: simd_float2(0.5, 0.5), materialIndex: MaterialIndex.pole.rawValue))
-            vertices.append(TexturedVertex(position: p1, normal: topNormal, texCoord: simd_float2(0, 0), materialIndex: MaterialIndex.pole.rawValue))
-            vertices.append(TexturedVertex(position: p2, normal: topNormal, texCoord: simd_float2(1, 0), materialIndex: MaterialIndex.pole.rawValue))
+        addSphere(at: topCenter, radius: topRadius * 1.2, segments: 6, material: matPole, vertices: &vertices)
+        
+        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: baseRadius + 0.1))
+    }
+    
+    /// Add a decorative lantern
+    private static func addLantern(at pos: simd_float3, size: Float, vertices: inout [TexturedVertex]) {
+        let matMetal = MaterialIndex.pole.rawValue
+        
+        // Lantern frame (4 vertical posts)
+        let postRadius = size * 0.08
+        let postHeight = size * 1.5
+        let cornerDist = size * 0.4
+        
+        let corners: [simd_float2] = [
+            simd_float2(-cornerDist, -cornerDist),
+            simd_float2(cornerDist, -cornerDist),
+            simd_float2(cornerDist, cornerDist),
+            simd_float2(-cornerDist, cornerDist)
+        ]
+        
+        for corner in corners {
+            let postPos = pos + simd_float3(corner.x, 0, corner.y)
+            addCylinder(at: postPos, radius: postRadius, height: postHeight, segments: 4, material: matMetal, vertices: &vertices)
         }
         
-        colliders.append(Collider.circle(x: pos.x, z: pos.z, radius: radius + 0.1))
+        // Top cap
+        let topPos = pos + simd_float3(0, postHeight, 0)
+        addCone(at: topPos, radius: size * 0.5, height: size * 0.4, segments: 4, material: matMetal, vertices: &vertices)
+        
+        // Bottom ring
+        addCylinder(at: pos, radius: size * 0.45, height: size * 0.1, segments: 6, material: matMetal, vertices: &vertices)
+    }
+    
+    /// Add a tapered cylinder (different top and bottom radius)
+    private static func addTaperedCylinder(at pos: simd_float3, bottomRadius: Float, topRadius: Float, height: Float, segments: Int, material: UInt32, vertices: inout [TexturedVertex]) {
+        for i in 0..<segments {
+            let angle1 = Float(i) / Float(segments) * 2 * .pi
+            let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+            
+            let x1b = cos(angle1) * bottomRadius
+            let z1b = sin(angle1) * bottomRadius
+            let x2b = cos(angle2) * bottomRadius
+            let z2b = sin(angle2) * bottomRadius
+            
+            let x1t = cos(angle1) * topRadius
+            let z1t = sin(angle1) * topRadius
+            let x2t = cos(angle2) * topRadius
+            let z2t = sin(angle2) * topRadius
+            
+            let n1 = simd_normalize(simd_float3(cos(angle1), (bottomRadius - topRadius) / height, sin(angle1)))
+            let n2 = simd_normalize(simd_float3(cos(angle2), (bottomRadius - topRadius) / height, sin(angle2)))
+            
+            let u1 = Float(i) / Float(segments)
+            let u2 = Float(i + 1) / Float(segments)
+            
+            let bl = pos + simd_float3(x1b, 0, z1b)
+            let br = pos + simd_float3(x2b, 0, z2b)
+            let tl = pos + simd_float3(x1t, height, z1t)
+            let tr = pos + simd_float3(x2t, height, z2t)
+            
+            vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(u1, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: br, normal: n2, texCoord: simd_float2(u2, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(u2, 0), materialIndex: material))
+            
+            vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(u1, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(u2, 0), materialIndex: material))
+            vertices.append(TexturedVertex(position: tl, normal: n1, texCoord: simd_float2(u1, 0), materialIndex: material))
+        }
+    }
+    
+    /// Add a horizontal cylinder (for arms, beams, etc.)
+    private static func addHorizontalCylinder(at pos: simd_float3, radius: Float, length: Float, segments: Int, material: UInt32, vertices: inout [TexturedVertex]) {
+        for i in 0..<segments {
+            let angle1 = Float(i) / Float(segments) * 2 * .pi
+            let angle2 = Float(i + 1) / Float(segments) * 2 * .pi
+            
+            let y1 = cos(angle1) * radius
+            let z1 = sin(angle1) * radius
+            let y2 = cos(angle2) * radius
+            let z2 = sin(angle2) * radius
+            
+            let n1 = simd_normalize(simd_float3(0, cos(angle1), sin(angle1)))
+            let n2 = simd_normalize(simd_float3(0, cos(angle2), sin(angle2)))
+            
+            let bl = pos + simd_float3(0, y1, z1)
+            let br = pos + simd_float3(0, y2, z2)
+            let tl = pos + simd_float3(length, y1, z1)
+            let tr = pos + simd_float3(length, y2, z2)
+            
+            vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(0, 0), materialIndex: material))
+            vertices.append(TexturedVertex(position: br, normal: n2, texCoord: simd_float2(0, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(1, 1), materialIndex: material))
+            
+            vertices.append(TexturedVertex(position: bl, normal: n1, texCoord: simd_float2(0, 0), materialIndex: material))
+            vertices.append(TexturedVertex(position: tr, normal: n2, texCoord: simd_float2(1, 1), materialIndex: material))
+            vertices.append(TexturedVertex(position: tl, normal: n1, texCoord: simd_float2(1, 0), materialIndex: material))
+        }
+    }
+    
+    /// Add a sphere at a position
+    private static func addSphere(at pos: simd_float3, radius: Float, segments: Int, material: UInt32, vertices: inout [TexturedVertex]) {
+        let latSegments = segments
+        let lonSegments = segments * 2
+        
+        for lat in 0..<latSegments {
+            let theta1 = Float(lat) / Float(latSegments) * .pi
+            let theta2 = Float(lat + 1) / Float(latSegments) * .pi
+            
+            for lon in 0..<lonSegments {
+                let phi1 = Float(lon) / Float(lonSegments) * 2 * .pi
+                let phi2 = Float(lon + 1) / Float(lonSegments) * 2 * .pi
+                
+                let p1 = pos + simd_float3(sin(theta1) * cos(phi1), cos(theta1), sin(theta1) * sin(phi1)) * radius
+                let p2 = pos + simd_float3(sin(theta1) * cos(phi2), cos(theta1), sin(theta1) * sin(phi2)) * radius
+                let p3 = pos + simd_float3(sin(theta2) * cos(phi1), cos(theta2), sin(theta2) * sin(phi1)) * radius
+                let p4 = pos + simd_float3(sin(theta2) * cos(phi2), cos(theta2), sin(theta2) * sin(phi2)) * radius
+                
+                let n1 = simd_normalize(p1 - pos)
+                let n2 = simd_normalize(p2 - pos)
+                let n3 = simd_normalize(p3 - pos)
+                let n4 = simd_normalize(p4 - pos)
+                
+                // First triangle
+                vertices.append(TexturedVertex(position: p1, normal: n1, texCoord: simd_float2(0, 0), materialIndex: material))
+                vertices.append(TexturedVertex(position: p3, normal: n3, texCoord: simd_float2(0, 1), materialIndex: material))
+                vertices.append(TexturedVertex(position: p4, normal: n4, texCoord: simd_float2(1, 1), materialIndex: material))
+                
+                // Second triangle
+                vertices.append(TexturedVertex(position: p1, normal: n1, texCoord: simd_float2(0, 0), materialIndex: material))
+                vertices.append(TexturedVertex(position: p4, normal: n4, texCoord: simd_float2(1, 1), materialIndex: material))
+                vertices.append(TexturedVertex(position: p2, normal: n2, texCoord: simd_float2(1, 0), materialIndex: material))
+            }
+        }
     }
     
     // MARK: - Primitive Helpers
