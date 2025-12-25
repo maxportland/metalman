@@ -54,6 +54,16 @@ func translation(_ x: Float, _ y: Float, _ z: Float) -> simd_float4x4 {
     )
 }
 
+/// Creates a scaling matrix
+func scaling(_ x: Float, _ y: Float, _ z: Float) -> simd_float4x4 {
+    return simd_float4x4(
+        simd_float4(x, 0, 0, 0),
+        simd_float4(0, y, 0, 0),
+        simd_float4(0, 0, z, 0),
+        simd_float4(0, 0, 0, 1)
+    )
+}
+
 /// Creates a right-handed orthographic projection matrix
 func orthographicRH(left: Float, right: Float, bottom: Float, top: Float, near: Float, far: Float) -> simd_float4x4 {
     let rml = right - left

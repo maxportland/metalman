@@ -633,6 +633,51 @@ class TextureGenerator {
         return createTexture(from: pixels, size: size)
     }
     
+    /// Creates a fallback texture for cabin models (dark wood)
+    func createCabinTexture() -> MTLTexture {
+        let size = 64
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        
+        for y in 0..<size {
+            for x in 0..<size {
+                let i = (y * size + x) * 4
+                
+                // Dark brown wood color (matches EXR texture name color_0C0C0C - very dark)
+                var r: Float = 0.15
+                var g: Float = 0.12
+                var b: Float = 0.08
+                
+                // Wood grain horizontal lines
+                let grainY = sin(Float(y) * 0.5 + Float(x) * 0.05) * 0.5 + 0.5
+                r += grainY * 0.08
+                g += grainY * 0.06
+                b += grainY * 0.04
+                
+                // Vertical board divisions
+                let boardWidth: Float = 16
+                let boardX = Float(x).truncatingRemainder(dividingBy: boardWidth) / boardWidth
+                if boardX < 0.05 || boardX > 0.95 {
+                    r *= 0.7
+                    g *= 0.7
+                    b *= 0.7
+                }
+                
+                // Add subtle noise
+                let noise = Float.random(in: -0.03...0.03)
+                r += noise
+                g += noise
+                b += noise
+                
+                pixels[i] = UInt8(min(255, max(0, r * 255)))
+                pixels[i + 1] = UInt8(min(255, max(0, g * 255)))
+                pixels[i + 2] = UInt8(min(255, max(0, b * 255)))
+                pixels[i + 3] = 255
+            }
+        }
+        
+        return createTexture(from: pixels, size: size)
+    }
+    
     func createSkyTexture() -> MTLTexture {
         let size = 256
         var pixels = [UInt8](repeating: 0, count: size * size * 4)

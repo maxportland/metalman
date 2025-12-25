@@ -6,8 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		693EC1532EFD2B9000667F7A /* cabin.usdc in Resources */ = {isa = PBXBuildFile; fileRef = 693EC1502EFD2B9000667F7A /* cabin.usdc */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		693EB5DD2EFB2F2B00667F7A /* MetalMan.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalMan.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		693EC1502EFD2B9000667F7A /* cabin.usdc */ = {isa = PBXFileReference; lastKnownFileType = file; name = cabin.usdc; path = usdc/cabin.usdc; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -19,6 +24,12 @@
 		693EBC342EFCF91B00667F7A /* Icons */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Icons;
+			sourceTree = "<group>";
+		};
+		693EC1522EFD2B9000667F7A /* textures */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			name = textures;
+			path = usdc/textures;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -37,6 +48,8 @@
 		693EB5D42EFB2F2B00667F7A = {
 			isa = PBXGroup;
 			children = (
+				693EC1502EFD2B9000667F7A /* cabin.usdc */,
+				693EC1522EFD2B9000667F7A /* textures */,
 				693EBC342EFCF91B00667F7A /* Icons */,
 				693EB5DF2EFB2F2B00667F7A /* MetalMan */,
 				693EB5DE2EFB2F2B00667F7A /* Products */,
@@ -69,6 +82,7 @@
 			fileSystemSynchronizedGroups = (
 				693EB5DF2EFB2F2B00667F7A /* MetalMan */,
 				693EBC342EFCF91B00667F7A /* Icons */,
+				693EC1522EFD2B9000667F7A /* textures */,
 			);
 			name = MetalMan;
 			packageProductDependencies = (
@@ -116,6 +130,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				693EC1532EFD2B9000667F7A /* cabin.usdc in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

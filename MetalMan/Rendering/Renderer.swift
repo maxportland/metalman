@@ -64,6 +64,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var npcMesh: NPCMesh!
     private var npcUniformBuffer: MTLBuffer!
     
+    // MARK: - USD Models (Cabin)
+    
+    private var cabinTexture: MTLTexture!
+    private var cabinVertexBuffer: MTLBuffer?
+    private var cabinVertexCount: Int = 0
+    private var cabinModelMatrix: simd_float4x4 = matrix_identity_float4x4
+    
     // MARK: - Textures (Normal Maps)
     
     private var groundNormalMap: MTLTexture!
@@ -457,6 +464,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         super.init()
         
+        // Load cabin USD model (must be after super.init)
+        loadCabinModel()
+        
         // Spawn enemies (higher chance near treasure chests)
         // Must be after super.init() to call instance method
         spawnEnemies(nearChests: self.interactables)
@@ -481,6 +491,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         treasureChestTexture = textureGen.createTreasureChestTexture()
         enemyTexture = textureGen.createEnemyTexture()
         vendorTexture = textureGen.createVendorTexture()
+        cabinTexture = textureGen.createCabinTexture()  // Fallback texture for cabin
         shadowMap = textureGen.createShadowMap(size: shadowMapSize)
         
         // Normal maps
@@ -1268,6 +1279,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Draw NPCs (vendors)
         drawNPCs(encoder: encoder, litUniforms: litUniforms)
         
+        // Draw cabin (USD model)
+        drawCabin(encoder: encoder, litUniforms: litUniforms)
+        
         // Draw grid lines overlay
         encoder.setRenderPipelineState(wireframePipelineState)
         encoder.setDepthStencilState(depthStencilStateNoWrite)
@@ -1310,6 +1324,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Vendor texture (index 18 - yellow shirt for vendors)
         encoder.setFragmentTexture(vendorTexture, index: 18)
+        
+        // Cabin texture (index 19 - USD model texture)
+        encoder.setFragmentTexture(cabinTexture, index: 19)
         
         encoder.setFragmentSamplerState(textureSampler, index: 0)
         encoder.setFragmentSamplerState(shadowSampler, index: 1)
@@ -1953,5 +1970,81 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         let aspect = Float(size.width / size.height)
         projectionMatrix = perspectiveFovRH(fovYRadians: 45 * .pi / 180, aspectRatio: aspect, nearZ: 0.1, farZ: 500)
+    }
+    
+    // MARK: - USD Model Loading
+    
+    /// Load the cabin USD model
+    private func loadCabinModel() {
+        let loader = USDModelLoader(device: device)
+        
+        // Try to load the cabin model from usdc subdirectory
+        guard let cabinURL = Bundle.main.url(forResource: "cabin", withExtension: "usdc", subdirectory: "usdc") else {
+            print("[Cabin] Could not find cabin.usdc in bundle (usdc subdirectory)")
+            return
+        }
+        
+        if let model = loader.loadModel(from: cabinURL, materialIndex: MaterialIndex.cabin.rawValue) {
+            cabinVertexBuffer = model.vertexBuffer
+            cabinVertexCount = model.vertexCount
+            
+            // Position the cabin in the world
+            // Scale and position based on bounds
+            let bounds = model.boundingBox
+            let modelSize = bounds.max - bounds.min
+            let modelCenter = (bounds.max + bounds.min) / 2
+            
+            // Scale to reasonable size (about 5 units tall)
+            let targetHeight: Float = 5.0
+            let scale = targetHeight / max(modelSize.y, 0.1)
+            
+            // Position near player spawn
+            let cabinPosition = simd_float3(8, Terrain.heightAt(x: 8, z: 10), 10)
+            
+            // Create model matrix: translate to position, center the model, scale
+            cabinModelMatrix = translation(cabinPosition.x, cabinPosition.y, cabinPosition.z) *
+                               scaling(scale, scale, scale) *
+                               translation(-modelCenter.x, -bounds.min.y, -modelCenter.z)
+            
+            print("[Cabin] Loaded cabin model at position \(cabinPosition) with scale \(scale)")
+        } else {
+            print("[Cabin] Failed to load cabin model - file may not be in bundle")
+        }
+        
+        // Try to load the actual cabin texture from EXR
+        // Note: EXR may need to be converted to PNG for reliable loading
+        if let textureURL = Bundle.main.url(forResource: "color_0C0C0C", withExtension: "exr", subdirectory: "usdc/textures") {
+            if let texture = loader.loadTexture(from: textureURL) {
+                cabinTexture = texture
+                print("[Cabin] Loaded cabin texture from EXR")
+            }
+        } else if let textureURL = Bundle.main.url(forResource: "color_0C0C0C", withExtension: "png", subdirectory: "usdc/textures") {
+            if let texture = loader.loadTexture(from: textureURL) {
+                cabinTexture = texture
+                print("[Cabin] Loaded cabin texture from PNG")
+            }
+        }
+    }
+    
+    /// Draw the cabin model
+    private func drawCabin(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
+        guard let vertexBuffer = cabinVertexBuffer, cabinVertexCount > 0 else { return }
+        
+        // Create uniforms with cabin's model matrix
+        var cabinUniforms = litUniforms
+        cabinUniforms.modelMatrix = cabinModelMatrix
+        
+        // Use the character uniform buffer temporarily for the cabin
+        let bufferPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
+        bufferPtr.pointee = cabinUniforms
+        
+        encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cabinVertexCount)
+        
+        // Restore landscape uniform buffer
+        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
     }
 }

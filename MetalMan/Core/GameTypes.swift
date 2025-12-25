@@ -120,6 +120,7 @@ enum MaterialIndex: UInt32 {
     case treasureChest = 11
     case enemy = 12  // Red shirt for bandits
     case vendor = 13 // Yellow shirt for vendors
+    case cabin = 14  // Cabin model texture
 }
 
 // MARK: - Interactables
