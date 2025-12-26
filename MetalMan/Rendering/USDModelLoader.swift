@@ -250,6 +250,40 @@ final class USDModelLoader {
             let indexData = indexBuffer.map()
             let indexCount = submesh.indexCount
             
+            // Detect material type from submesh/material name for trees
+            // This allows bark/trunk parts to use trunk texture and leaves to use foliage
+            var effectiveMaterialIndex = materialIndex
+            let submeshName = submesh.name.lowercased()
+            let materialName = submesh.material?.name.lowercased() ?? ""
+            let combinedName = submeshName + " " + materialName
+            
+            // Log submesh info for debugging (first few only)
+            if vertices.count < 1000 {
+                print("[USDLoader] Submesh: '\(submesh.name)' material: '\(submesh.material?.name ?? "none")'")
+            }
+            
+            // Check for bark/trunk keywords
+            if combinedName.contains("bark") || combinedName.contains("trunk") || 
+               combinedName.contains("stem") || combinedName.contains("branch") ||
+               combinedName.contains("wood") {
+                effectiveMaterialIndex = 1  // treeTrunk material index
+                if vertices.count < 1000 {
+                    print("[USDLoader]   -> Detected as TRUNK (material index 1)")
+                }
+            }
+            // Check for leaves/foliage keywords
+            else if combinedName.contains("leaf") || combinedName.contains("leaves") || 
+                    combinedName.contains("foliage") || combinedName.contains("frond") ||
+                    combinedName.contains("needle") || combinedName.contains("flower") ||
+                    combinedName.contains("fruit") {
+                effectiveMaterialIndex = 2  // foliage material index
+                if vertices.count < 1000 {
+                    print("[USDLoader]   -> Detected as FOLIAGE (material index 2)")
+                }
+            } else if vertices.count < 1000 {
+                print("[USDLoader]   -> Using default material index \(materialIndex)")
+            }
+            
             // Process triangles
             for i in Swift.stride(from: 0, to: indexCount, by: 3) {
                 var indices: [Int] = []
@@ -339,7 +373,7 @@ final class USDModelLoader {
                         normal: faceNormal,
                         tangent: tangent,
                         texCoord: texCoord,
-                        materialIndex: materialIndex
+                        materialIndex: effectiveMaterialIndex
                     )
                     vertices.append(vertex)
                 }

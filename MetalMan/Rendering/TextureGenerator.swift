@@ -140,6 +140,93 @@ class TextureGenerator {
         return texture
     }
     
+    /// Load a texture from the LandscapeModels/textures folder
+    func loadTextureFromLandscapeModels(named filename: String) -> MTLTexture? {
+        // Try multiple locations to find the texture
+        let possiblePaths = [
+            // Bundle resources (if copied to bundle)
+            Bundle.main.bundlePath + "/Contents/Resources/LandscapeModels/textures/" + filename,
+            Bundle.main.bundlePath + "/Contents/Resources/textures/" + filename,
+            // Absolute path for development
+            "/Users/maxdavis/Projects/MetalMan/MetalMan/LandscapeModels/textures/" + filename,
+            // Relative from bundle
+            Bundle.main.bundlePath + "/../../../MetalMan/LandscapeModels/textures/" + filename
+        ]
+        
+        for path in possiblePaths {
+            if FileManager.default.isReadableFile(atPath: path),
+               let image = NSImage(contentsOfFile: path) {
+                print("[TextureGen] Found LandscapeModels texture at: \(path)")
+                return createTextureFromNSImage(image, filename: filename)
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Create a texture from an NSImage
+    private func createTextureFromNSImage(_ image: NSImage, filename: String) -> MTLTexture? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            print("[TextureGen] Failed to get CGImage for: \(filename)")
+            return nil
+        }
+        
+        let width = cgImage.width
+        let height = cgImage.height
+        
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: width,
+            height: height,
+            mipmapped: true
+        )
+        descriptor.usage = [.shaderRead]
+        
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        
+        let bytesPerPixel = 4
+        let bytesPerRow = bytesPerPixel * width
+        var pixelData = [UInt8](repeating: 255, count: width * height * bytesPerPixel)
+        
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        
+        guard let context = CGContext(
+            data: &pixelData,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return nil
+        }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, width, height),
+            mipmapLevel: 0,
+            withBytes: pixelData,
+            bytesPerRow: bytesPerRow
+        )
+        
+        // Generate mipmaps
+        if let commandBuffer = commandQueue.makeCommandBuffer(),
+           let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
+            blitEncoder.generateMipmaps(for: texture)
+            blitEncoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+        }
+        
+        print("[TextureGen] Loaded \(filename) (\(width)x\(height))")
+        return texture
+    }
+    
     // MARK: - Public Texture Creation
     
     func createGroundTexture() -> MTLTexture {
@@ -171,8 +258,13 @@ class TextureGenerator {
     }
     
     func createTrunkTexture() -> MTLTexture {
-        // Try to load tree bark texture from file
+        // Try to load tree bark texture from file - check multiple possible names
         if let texture = loadTexture(named: "tree_01_diffuse.jpg") {
+            return texture
+        }
+        // Try the actual tree model bark texture
+        if let texture = loadTextureFromLandscapeModels(named: "3DGardenPlants_Koelreuteria_paniculata_Bark_Diffuse.jpg") {
+            print("[TextureGen] Loaded bark texture from LandscapeModels")
             return texture
         }
         
@@ -200,6 +292,11 @@ class TextureGenerator {
     func createFoliageTexture() -> MTLTexture {
         // Try to load foliage texture from file
         if let texture = loadTexture(named: "leaves_01_diffuse.jpg") {
+            return texture
+        }
+        // Try the actual tree model leaves texture (PNG format)
+        if let texture = loadTextureFromLandscapeModels(named: "3DGardenPlants_Koelreuteria_paniculata_Leaves_01_DIffuse.png") {
+            print("[TextureGen] Loaded leaves texture from LandscapeModels")
             return texture
         }
         

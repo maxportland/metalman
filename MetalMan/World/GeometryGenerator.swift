@@ -200,7 +200,7 @@ class GeometryGenerator {
     }
     
     /// Check if a point is on a path
-    private static func isOnPath(x: Float, z: Float) -> Bool {
+    static func isOnPath(x: Float, z: Float) -> Bool {
         // Main paths from center
         let pathWidth: Float = 2.5
         

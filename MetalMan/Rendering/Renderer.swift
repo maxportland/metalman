@@ -23,7 +23,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     // Skeletal Animation
     private var animatedCharacter: AnimatedCharacter?
-    private var useSkeletalAnimation: Bool = false  // Toggle between old/new character system
     
     // Samplers
     private let textureSampler: MTLSamplerState
@@ -57,7 +56,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     private var enemyTexture: MTLTexture!
     private var enemyManager: EnemyManager!
-    private var enemyMesh: EnemyMesh!
     private var targetEnemyCount: Int = 25
     private var respawnTimer: Float = 0
     private let respawnInterval: Float = 5.0  // Seconds between respawn checks
@@ -66,7 +64,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Skeletal enemy animation
     private var enemySkeletalMesh: SkeletalMesh?
     private var animatedEnemies: [UUID: AnimatedEnemy] = [:]  // Map enemy ID to animated instance
-    private var useSkeletalEnemies: Bool = false
     private var enemyModelMatrix: simd_float4x4 = matrix_identity_float4x4
     private var enemyModelScale: Float = 1.0
     
@@ -83,6 +80,29 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var cabinVertexBuffer: MTLBuffer?
     private var cabinVertexCount: Int = 0
     private var cabinModelMatrix: simd_float4x4 = matrix_identity_float4x4
+    
+    // MARK: - USD Tree Models
+    
+    /// Loaded tree model data
+    private struct TreeModel {
+        let vertexBuffer: MTLBuffer
+        let vertexCount: Int
+        let boundingBox: (min: simd_float3, max: simd_float3)
+        let height: Float  // Actual model height for proper scaling
+    }
+    
+    /// Instance of a tree in the world
+    private struct TreeInstance {
+        let modelIndex: Int      // Which tree model (0-7)
+        let position: simd_float3
+        let rotation: Float      // Y-axis rotation
+        let scale: Float
+    }
+    
+    private var treeModels: [TreeModel] = []
+    private var treeInstances: [TreeInstance] = []
+    private var treeUniformBuffer: MTLBuffer!
+    private var useModelTrees: Bool = false
     
     // MARK: - Textures (Normal Maps)
     
@@ -331,9 +351,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var skyboxVertexBuffer: MTLBuffer
     private var skyboxVertexCount: Int = 0
     
-    // Character mesh (animated each frame)
-    private let characterMesh: CharacterMesh
-    
     // Uniform buffers
     private var uniformBuffer: MTLBuffer
     private var litUniformBuffer: MTLBuffer
@@ -471,15 +488,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         self.colliders = allColliders
         
-        // Create character mesh (fallback)
-        self.characterMesh = CharacterMesh(device: device)
-        
-        // Try to create skinned pipelines and load skeletal character
+        // Create skinned pipelines for skeletal animation
         self.skinnedPipelineState = Renderer.createSkinnedPipeline(device: device, library: library, view: view)
         self.skinnedShadowPipelineState = Renderer.createSkinnedShadowPipeline(device: device, library: library)
         
-        // Create enemy mesh and manager
-        self.enemyMesh = EnemyMesh(device: device)
+        // Create enemy manager
         self.enemyManager = EnemyManager()
         
         // Create NPC mesh and manager
@@ -492,8 +505,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         characterUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
         skyboxUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
         cabinUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
-        // Enemy uniform buffer - large enough for 100 enemies with proper alignment
+        // Tree uniform buffer - large enough for 500 tree instances with proper alignment
         let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255  // 256-byte aligned
+        treeUniformBuffer = device.makeBuffer(length: uniformStride * 500, options: .storageModeShared)!
+        // Enemy uniform buffer - large enough for 100 enemies with proper alignment
         enemyUniformBuffer = device.makeBuffer(length: uniformStride * 100, options: .storageModeShared)!
         
         // NPC uniform buffer - for 10 NPCs
@@ -503,6 +518,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Load cabin USD model (must be after super.init)
         loadCabinModel()
+        
+        // Load tree USD models and generate instances
+        loadTreeModels()
         
         // Load skeletal player model (must be after super.init)
         loadPlayerModel()
@@ -542,13 +560,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         trunkNormalMap = textureGen.createTrunkNormalMap()
         rockNormalMap = textureGen.createRockNormalMap()
         pathNormalMap = textureGen.createPathNormalMap()
-        
-        // Initialize character mesh
-        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
-                            hasSwordEquipped: player.equipment.hasSwordEquipped,
-                            hasShieldEquipped: player.equipment.hasShieldEquipped,
-                            isAttacking: isAttacking, attackPhase: attackPhase,
-                            swingType: currentSwingType)
         
         // Setup view
         view.depthStencilPixelFormat = .depth32Float
@@ -1285,7 +1296,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let hasSword = player.equipment.hasSwordEquipped
         let hasShield = player.equipment.hasShieldEquipped
         
-        if useSkeletalAnimation, let animChar = animatedCharacter {
+        if let animChar = animatedCharacter {
             // Update skeletal animation based on player state
             if isAttacking {
                 animChar.setAnimationState(.attacking)
@@ -1305,18 +1316,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             
             animChar.hasShieldEquipped = hasShield
             animChar.update(deltaTime: dt)
-        } else {
-            // Fallback: Procedural character mesh with animation
-            characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
-                                hasSwordEquipped: hasSword,
-                                hasShieldEquipped: hasShield,
-                                isAttacking: isAttacking, attackPhase: attackPhase,
-                                swingType: currentSwingType)
         }
         
         // Update enemies
         updateEnemies(deltaTime: dt)
-        enemyMesh.update(enemies: enemyManager.enemies)
         
         // Update NPCs
         npcManager.update(deltaTime: dt, playerPosition: characterPosition)
@@ -1376,7 +1379,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Character shadow
         let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
         
-        if useSkeletalAnimation, let animChar = animatedCharacter, let skinnedShadowPipeline = skinnedShadowPipelineState {
+        if let animChar = animatedCharacter, let skinnedShadowPipeline = skinnedShadowPipelineState {
             // Use skeletal animation for shadow
             let fullModelMatrix = charModelMatrix * playerModelMatrix
             
@@ -1407,30 +1410,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             
             encoder.setRenderPipelineState(shadowPipelineState)
-        } else if useSkeletalAnimation, playerModelVertexCount > 0, let playerBuffer = playerModelVertexBuffer {
-            // Fallback: Use loaded player model for shadow (static)
-            let fullModelMatrix = charModelMatrix * playerModelMatrix
-            
-            let charShadowPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
-            charShadowPtr.pointee = shadowUniforms
-            charShadowPtr.pointee.modelMatrix = fullModelMatrix
-            
-            encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
-            encoder.setVertexBuffer(playerBuffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: playerModelVertexCount)
-        } else if characterMesh.vertexCount > 0 {
-            // Fallback to procedural character shadow
-            let charShadowPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
-            charShadowPtr.pointee = shadowUniforms
-            charShadowPtr.pointee.modelMatrix = charModelMatrix
-            
-        encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
-        encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
         }
         
         // Enemy shadows
-        if useSkeletalEnemies, let skeletalMesh = enemySkeletalMesh, let skinnedShadowPipeline = skinnedShadowPipelineState {
+        if let skeletalMesh = enemySkeletalMesh, let skinnedShadowPipeline = skinnedShadowPipelineState {
             encoder.setRenderPipelineState(skinnedShadowPipeline)
             
             let enemies = enemyManager.enemies.filter { $0.isAlive || $0.stateTimer < 60.0 }
@@ -1550,7 +1533,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Draw character
         let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
         
-        if useSkeletalAnimation, let animChar = animatedCharacter, let skinnedPipeline = skinnedPipelineState {
+        if let animChar = animatedCharacter, let skinnedPipeline = skinnedPipelineState {
             // Use skeletal animation with skinned pipeline
             let fullModelMatrix = charModelMatrix * playerModelMatrix
             
@@ -1588,37 +1571,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.setRenderPipelineState(litPipelineState)
             encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
             encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
-        } else if useSkeletalAnimation, playerModelVertexCount > 0, let playerBuffer = playerModelVertexBuffer {
-            // Fallback: Use loaded player model as static mesh
-            let fullModelMatrix = charModelMatrix * playerModelMatrix
-            
-            let charBufferPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
-            charBufferPtr.pointee = litUniforms
-            charBufferPtr.pointee.modelMatrix = fullModelMatrix
-            
-            encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
-            encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
-            encoder.setVertexBuffer(playerBuffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: playerModelVertexCount)
-            
-            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
-            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
-        } else if characterMesh.vertexCount > 0 {
-            // Fallback to procedural character mesh
-            // Write directly to characterUniformBuffer
-            let charBufferPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
-            charBufferPtr.pointee = litUniforms
-            charBufferPtr.pointee.modelMatrix = charModelMatrix
-            
-            // Bind character's uniform buffer
-        encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
-        encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
-        encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
-            
-            // Restore landscape uniform buffer for subsequent draws
-            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
-            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
         }
         
         // Draw enemies
@@ -1629,6 +1581,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Draw cabin (USD model)
         drawCabin(encoder: encoder, litUniforms: litUniforms)
+        
+        // Draw trees (USD models)
+        drawTrees(encoder: encoder, litUniforms: litUniforms)
         
         // Draw grid lines overlay
         encoder.setRenderPipelineState(wireframePipelineState)
@@ -1684,8 +1639,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(groundVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: groundVertexCount)
         
-        encoder.setVertexBuffer(treeVertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: treeVertexCount)
+        // Only draw procedural trees if we're not using USD model trees
+        if !useModelTrees {
+            encoder.setVertexBuffer(treeVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: treeVertexCount)
+        }
         
         encoder.setVertexBuffer(rockVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: rockVertexCount)
@@ -1710,9 +1668,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard !enemies.isEmpty else { return }
         
         // Use skeletal animation if available
-        if useSkeletalEnemies, let skeletalMesh = enemySkeletalMesh, skinnedPipelineState != nil {
+        if let skeletalMesh = enemySkeletalMesh, let skinnedPipeline = skinnedPipelineState {
             // Switch to skinned pipeline for skeletal enemies
-            encoder.setRenderPipelineState(skinnedPipelineState!)
+            encoder.setRenderPipelineState(skinnedPipeline)
             
             // Bind the enemy texture (from USDZ or fallback to procedural)
             // Enemy vertices have materialIndex=12, which maps to texture slot 17 in the shader
@@ -1764,50 +1722,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             
             // Restore regular pipeline
             encoder.setRenderPipelineState(litPipelineState)
-            
-            // Restore landscape uniform buffer
-            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
-            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
-            
-        } else {
-            // Fallback: Draw procedural enemy meshes
-            guard enemyMesh.vertexCount > 0 else { return }
-            
-            encoder.setVertexBuffer(enemyMesh.vertexBuffer, offset: 0, index: 0)
-            
-            // 256-byte aligned stride for uniform buffer offsets
-            let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
-            
-            // First pass: write all enemy uniforms to buffer
-            let bufferBase = enemyUniformBuffer.contents()
-            for (index, enemy) in enemies.enumerated() {
-                guard index < 100 else { break }  // Max 100 enemies
-                
-                let enemyModelMatrix = translation(enemy.position.x, enemy.position.y, enemy.position.z) * rotationY(enemy.yaw)
-                
-                var enemyUniforms = litUniforms
-                enemyUniforms.modelMatrix = enemyModelMatrix
-                
-                // Write to this enemy's slot in the buffer
-                let offset = index * uniformStride
-                let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
-                ptr.pointee = enemyUniforms
-            }
-            
-            // Second pass: draw each enemy using its uniform offset
-            for (index, _) in enemies.enumerated() {
-                guard index < enemyMesh.enemyVertexRanges.count else { break }
-                guard index < 100 else { break }
-                
-                let range = enemyMesh.enemyVertexRanges[index]
-                guard range.count > 0 else { continue }
-                
-                let offset = index * uniformStride
-                encoder.setVertexBuffer(enemyUniformBuffer, offset: offset, index: 1)
-                encoder.setFragmentBuffer(enemyUniformBuffer, offset: offset, index: 1)
-                
-                encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
-            }
             
             // Restore landscape uniform buffer
             encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
@@ -2116,7 +2030,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Check for attack completion
             var attackComplete = false
             
-            if useSkeletalAnimation, let animChar = animatedCharacter {
+            if let animChar = animatedCharacter {
                 // Use actual animation completion for skeletal animation
                 attackComplete = animChar.isAnimationComplete
             } else {
@@ -2254,7 +2168,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         enemyManager.removeDeadEnemies()
         
         // Update skeletal animation for enemies
-        if useSkeletalEnemies {
+        if enemySkeletalMesh != nil {
             for enemy in enemyManager.enemies {
                 if let animatedEnemy = getAnimatedEnemy(for: enemy) {
                     updateEnemyAnimationState(animatedEnemy: animatedEnemy, enemy: enemy)
@@ -2594,7 +2508,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             
             playerModelTexture = characterTexture
-            useSkeletalAnimation = true
             
             print("[Player] ✅ Skeletal animation enabled with \(skeletalMesh.bones.count) bones!")
             print("[Player] ✅ Loaded \(skeletalMesh.animations.count) animations")
@@ -2665,11 +2578,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Use the existing character texture for now
             playerModelTexture = characterTexture
             
-            useSkeletalAnimation = true  // Repurposing this flag to mean "use loaded model"
-            
             print("[Player] ✅ Player model loaded with \(playerModelVertexCount) vertices")
         } else {
-            print("[Player] Failed to load player model, using procedural character")
+            print("[Player] ⚠️ Failed to load player model")
         }
     }
     
@@ -2863,8 +2774,6 @@ final class Renderer: NSObject, MTKViewDelegate {
                                    scaling(enemyModelScale, enemyModelScale, enemyModelScale) *
                                    translation(-modelCenter.x, -modelCenter.y, 0)
             }
-            
-            useSkeletalEnemies = true
             
             print("[Enemy] ✅ Skeletal animation enabled with \(skeletalMesh.bones.count) bones!")
             print("[Enemy] ✅ Loaded \(skeletalMesh.animations.count) animations")
@@ -3097,6 +3006,327 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setFragmentBuffer(cabinUniformBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cabinVertexCount)
+        
+        // Restore landscape uniform buffer
+        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+    }
+    
+    // MARK: - Tree Models
+    
+    private func loadTreeModels() {
+        print("[Trees] ========== STARTING TREE MODEL LOADING ==========")
+        
+        let loader = USDModelLoader(device: device)
+        
+        // Load all tree models (tree1.usdc through tree8.usdc)
+        let treeNames = ["tree1", "tree2", "tree3", "tree4", "tree5", "tree6", "tree7", "tree8"]
+        
+        print("[Trees] Looking for \(treeNames.count) tree models: \(treeNames)")
+        print("[Trees] Bundle path: \(Bundle.main.bundlePath)")
+        
+        // List all usdc files in bundle for debugging
+        if let resourcePath = Bundle.main.resourcePath {
+            let fm = FileManager.default
+            do {
+                let allFiles = try fm.contentsOfDirectory(atPath: resourcePath)
+                let usdcFiles = allFiles.filter { $0.hasSuffix(".usdc") }
+                print("[Trees] Found \(usdcFiles.count) .usdc files in bundle root: \(usdcFiles)")
+                
+                // Check for LandscapeModels subdirectory
+                let landscapeModelsPath = resourcePath + "/LandscapeModels"
+                if fm.fileExists(atPath: landscapeModelsPath) {
+                    let landscapeFiles = try fm.contentsOfDirectory(atPath: landscapeModelsPath)
+                    print("[Trees] Found \(landscapeFiles.count) files in LandscapeModels/: \(landscapeFiles)")
+                } else {
+                    print("[Trees] LandscapeModels/ subdirectory does not exist in bundle")
+                }
+            } catch {
+                print("[Trees] Error listing bundle contents: \(error)")
+            }
+        }
+        
+        for name in treeNames {
+            print("[Trees] --- Attempting to load: \(name).usdc ---")
+            
+            // Try multiple locations
+            var treeURL: URL?
+            
+            // Try 1: Direct in bundle root
+            if let url = Bundle.main.url(forResource: name, withExtension: "usdc") {
+                treeURL = url
+                print("[Trees]   Found in bundle root: \(url.path)")
+            } else {
+                print("[Trees]   Not found in bundle root")
+            }
+            
+            // Try 2: In LandscapeModels subdirectory
+            if treeURL == nil {
+                if let url = Bundle.main.url(forResource: name, withExtension: "usdc", subdirectory: "LandscapeModels") {
+                    treeURL = url
+                    print("[Trees]   Found in LandscapeModels/: \(url.path)")
+                } else {
+                    print("[Trees]   Not found in LandscapeModels/")
+                }
+            }
+            
+            guard let url = treeURL else {
+                print("[Trees]   ❌ FAILED: Could not find \(name).usdc in any location")
+                continue
+            }
+            
+            // Verify file exists
+            if FileManager.default.fileExists(atPath: url.path) {
+                print("[Trees]   ✅ File exists at path: \(url.path)")
+            } else {
+                print("[Trees]   ❌ File does NOT exist at path: \(url.path)")
+                continue
+            }
+            
+            // Try to load the model
+            print("[Trees]   Calling USDModelLoader.loadModel()...")
+            if let model = loader.loadModel(from: url, materialIndex: MaterialIndex.foliage.rawValue) {
+                let bounds = model.boundingBox
+                let size = bounds.max - bounds.min
+                // Calculate actual model height (Z is up in these models based on bounds)
+                let modelHeight = max(size.x, max(size.y, size.z))  // Use largest dimension as height
+                treeModels.append(TreeModel(
+                    vertexBuffer: model.vertexBuffer,
+                    vertexCount: model.vertexCount,
+                    boundingBox: model.boundingBox,
+                    height: modelHeight
+                ))
+                print("[Trees]   ✅ SUCCESS: Loaded \(name).usdc")
+                print("[Trees]      Vertex count: \(model.vertexCount)")
+                print("[Trees]      Bounding box: min=\(bounds.min), max=\(bounds.max)")
+                print("[Trees]      Model size: \(size)")
+                print("[Trees]      Model height for scaling: \(modelHeight)")
+            } else {
+                print("[Trees]   ❌ FAILED: USDModelLoader returned nil for \(name).usdc")
+            }
+        }
+        
+        print("[Trees] --- Loading complete ---")
+        print("[Trees] Successfully loaded \(treeModels.count) / \(treeNames.count) tree models")
+        
+        guard !treeModels.isEmpty else {
+            print("[Trees] ❌ No tree models loaded, falling back to procedural trees")
+            print("[Trees] ==========================================")
+            return
+        }
+        
+        // Generate tree instances using the same placement logic as procedural trees
+        print("[Trees] Generating tree instances...")
+        generateTreeInstances()
+        
+        useModelTrees = true
+        print("[Trees] ✅ Tree model system enabled")
+        print("[Trees] Total instances: \(treeInstances.count)")
+        print("[Trees] ==========================================")
+    }
+    
+    private func generateTreeInstances() {
+        print("[Trees] generateTreeInstances() starting...")
+        print("[Trees] Number of loaded tree models: \(treeModels.count)")
+        
+        // Use the same seeded random placement as procedural trees
+        func seededRandom(_ seed: Int) -> Float {
+            var s = UInt64(seed &* 1103515245 &+ 12345)
+            s = (s &* 1103515245 &+ 12345)
+            return Float((s >> 16) & 0x7fff) / Float(0x7fff)
+        }
+        
+        var seed = 1
+        var skippedCenter = 0
+        var skippedPath = 0
+        var skippedOccupied = 0
+        var skippedRandom = 0
+        var placed = 0
+        
+        for gridX in stride(from: -90, through: 90, by: 10) {
+            for gridZ in stride(from: -90, through: 90, by: 10) {
+                // Skip area near center (where player spawns, cabin, etc.)
+                if abs(gridX) < 12 && abs(gridZ) < 12 { seed += 6; skippedCenter += 1; continue }
+                
+                let offsetX = (seededRandom(seed) - 0.5) * 8
+                let offsetZ = (seededRandom(seed + 1) - 0.5) * 8
+                let x = Float(gridX) + offsetX
+                let z = Float(gridZ) + offsetZ
+                
+                // Skip if on a path
+                if GeometryGenerator.isOnPath(x: x, z: z) { seed += 6; skippedPath += 1; continue }
+                
+                let height = 4.0 + seededRandom(seed + 2) * 4.0
+                let radius = 1.2 + seededRandom(seed + 3) * 1.5
+                
+                // Calculate occupied radius
+                let occupiedRadius = radius * 0.3 + 1.0
+                
+                // Check if position is clear
+                if !GeometryGenerator.isPositionClear(x: x, z: z, radius: occupiedRadius) {
+                    seed += 6
+                    skippedOccupied += 1
+                    continue
+                }
+                
+                // 75% chance to place a tree
+                if seededRandom(seed + 4) < 0.75 {
+                    let terrainY = Terrain.heightAt(x: x, z: z)
+                    
+                    // Select tree model randomly
+                    let modelIndex = Int(seededRandom(seed + 5) * Float(treeModels.count)) % treeModels.count
+                    
+                    // Random rotation (0 to 2*PI)
+                    let rotation = seededRandom(seed + 6) * .pi * 2
+                    
+                    // Scale based on desired height and actual model height
+                    // The tree models are very large (1000+ units), so we scale down significantly
+                    let modelHeight = treeModels[modelIndex].height
+                    let scale = height / modelHeight
+                    
+                    // Note: Colliders and camera blockers are already added by the procedural
+                    // tree generation (same positions) - we just replace the visual meshes
+                    treeInstances.append(TreeInstance(
+                        modelIndex: modelIndex,
+                        position: simd_float3(x, terrainY, z),
+                        rotation: rotation,
+                        scale: scale
+                    ))
+                    placed += 1
+                } else {
+                    skippedRandom += 1
+                }
+                seed += 6  // Match the seed increment from procedural tree generation
+            }
+        }
+        
+        print("[Trees] Instance generation complete:")
+        print("[Trees]   Placed: \(placed)")
+        print("[Trees]   Skipped (center): \(skippedCenter)")
+        print("[Trees]   Skipped (path): \(skippedPath)")
+        print("[Trees]   Skipped (occupied): \(skippedOccupied)")
+        print("[Trees]   Skipped (random 25%): \(skippedRandom)")
+        print("[Trees]   Total instances: \(treeInstances.count)")
+        
+        // Log distribution of tree models used
+        var modelCounts: [Int: Int] = [:]
+        for instance in treeInstances {
+            modelCounts[instance.modelIndex, default: 0] += 1
+        }
+        print("[Trees]   Model distribution: \(modelCounts)")
+        
+        // Log first few instances for debugging
+        if !treeInstances.isEmpty {
+            print("[Trees]   First 5 instances (with model heights):")
+            for i in 0..<min(5, treeInstances.count) {
+                let inst = treeInstances[i]
+                let modelHeight = treeModels[inst.modelIndex].height
+                print("[Trees]     [\(i)] model=\(inst.modelIndex), modelHeight=\(modelHeight), scale=\(inst.scale), worldHeight=\(modelHeight * inst.scale)")
+            }
+        }
+    }
+    
+    /// Draw all tree instances
+    private var treeDrawLogCount = 0
+    private func drawTrees(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
+        // Log only once at startup
+        if treeDrawLogCount == 0 {
+            print("[Trees] drawTrees() called for first time")
+            print("[Trees]   useModelTrees: \(useModelTrees)")
+            print("[Trees]   treeInstances.count: \(treeInstances.count)")
+            print("[Trees]   treeModels.count: \(treeModels.count)")
+            
+            // Log first tree positioning details
+            if !treeInstances.isEmpty && !treeModels.isEmpty {
+                let firstInstance = treeInstances[0]
+                let firstModel = treeModels[firstInstance.modelIndex]
+                let bounds = firstModel.boundingBox
+                let modelCenter = (bounds.max + bounds.min) / 2
+                let modelZExtent = bounds.max.z - bounds.min.z
+                let scaledLift = (modelZExtent / 2) * firstInstance.scale
+                print("[Trees]   First tree positioning:")
+                print("[Trees]     Model bounds: min=\(bounds.min), max=\(bounds.max)")
+                print("[Trees]     Model center: \(modelCenter)")
+                print("[Trees]     Model Z extent: \(modelZExtent)")
+                print("[Trees]     Instance scale: \(firstInstance.scale)")
+                print("[Trees]     Scaled lift: \(scaledLift)")
+                print("[Trees]     Position before lift: \(firstInstance.position)")
+                print("[Trees]     Position after lift: (\(firstInstance.position.x), \(firstInstance.position.y + scaledLift), \(firstInstance.position.z))")
+            }
+        }
+        
+        guard useModelTrees && !treeInstances.isEmpty else {
+            if treeDrawLogCount == 0 {
+                print("[Trees]   ❌ Early return: useModelTrees=\(useModelTrees), instances=\(treeInstances.count)")
+            }
+            treeDrawLogCount += 1
+            return
+        }
+        
+        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
+        let bufferBase = treeUniformBuffer.contents()
+        
+        // Group instances by model for efficient rendering
+        var instancesByModel: [[TreeInstance]] = Array(repeating: [], count: treeModels.count)
+        for instance in treeInstances {
+            if instance.modelIndex < treeModels.count {
+                instancesByModel[instance.modelIndex].append(instance)
+            }
+        }
+        
+        var instanceIndex = 0
+        var totalDrawCalls = 0
+        var totalVertices = 0
+        
+        for (modelIndex, instances) in instancesByModel.enumerated() {
+            guard !instances.isEmpty else { continue }
+            
+            let model = treeModels[modelIndex]
+            encoder.setVertexBuffer(model.vertexBuffer, offset: 0, index: 0)
+            
+            // Calculate model center and base offset for proper positioning
+            let bounds = model.boundingBox
+            let modelCenter = (bounds.max + bounds.min) / 2
+            // After Z-up to Y-up rotation, the model's Z extent becomes Y (height)
+            // We need to lift by half the Z extent so the bottom sits on ground
+            let modelZExtent = bounds.max.z - bounds.min.z
+            
+            // Write uniforms for all instances of this model
+            for instance in instances {
+                guard instanceIndex < 500 else { break }
+                
+                // Calculate lift offset after scaling - lift so tree bottom is at terrain height
+                let scaledLift = (modelZExtent / 2) * instance.scale
+                
+                // Tree models are Z-up, so rotate +90 degrees around X to convert to Y-up
+                // First center the model, then scale, then rotate, then position with lift
+                let modelMatrix = translation(instance.position.x, instance.position.y + scaledLift, instance.position.z) *
+                                  rotationY(instance.rotation) *
+                                  rotationX(.pi / 2) *
+                                  scaling(instance.scale, instance.scale, instance.scale) *
+                                  translation(-modelCenter.x, -modelCenter.y, -modelCenter.z)
+                
+                var treeUniforms = litUniforms
+                treeUniforms.modelMatrix = modelMatrix
+                
+                let offset = instanceIndex * uniformStride
+                let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
+                ptr.pointee = treeUniforms
+                
+                encoder.setVertexBuffer(treeUniformBuffer, offset: offset, index: 1)
+                encoder.setFragmentBuffer(treeUniformBuffer, offset: offset, index: 1)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: model.vertexCount)
+                
+                instanceIndex += 1
+                totalDrawCalls += 1
+                totalVertices += model.vertexCount
+            }
+        }
+        
+        if treeDrawLogCount == 0 {
+            print("[Trees]   ✅ Drawing complete: \(totalDrawCalls) draw calls, \(totalVertices) total vertices")
+        }
+        treeDrawLogCount += 1
         
         // Restore landscape uniform buffer
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)

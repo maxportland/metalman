@@ -1,6 +1,27 @@
 import simd
 import Foundation
 
+// MARK: - Attack Types
+
+/// Types of sword swings available for melee combat
+enum SwingType: Int, CaseIterable {
+    case oberhaw = 0    // Overhead descending cut
+    case mittelhaw = 1  // Horizontal slash
+    case unterhaw = 2   // Upward cut
+    case zornhaw = 3    // Diagonal 45-degree cut
+    case thrust = 4     // Forward thrust/pierce
+    
+    var name: String {
+        switch self {
+        case .oberhaw: return "Oberhaw"
+        case .mittelhaw: return "Mittelhaw"
+        case .unterhaw: return "Unterhaw"
+        case .zornhaw: return "Zornhaw"
+        case .thrust: return "Thrust"
+        }
+    }
+}
+
 // MARK: - Vertex Types
 
 /// Simple vertex for wireframe rendering (grid lines)
