@@ -48,9 +48,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: - Interactables
     
     private var interactables: [Interactable] = []
-    private var chestVertexBuffer: MTLBuffer!
-    private var chestVertexCount: Int = 0
     private var chestsNeedRebuild: Bool = false
+    
+    // USD Chest Model
+    private var chestModel: USDModelLoader.LoadedChestModel?
+    private var chestUniformBuffer: MTLBuffer!
+    private var chestModelScale: Float = 1.0
+    private var chestModelMatrix: simd_float4x4 = matrix_identity_float4x4
     
     // MARK: - Enemies
     
@@ -338,13 +342,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     private var groundVertexBuffer: MTLBuffer
     private var groundVertexCount: Int = 0
-    private var rockVertexBuffer: MTLBuffer
-    private var rockVertexCount: Int = 0
-    private var poleVertexBuffer: MTLBuffer
-    private var poleVertexCount: Int = 0
-    private var lanternPositions: [simd_float3] = []
-    private var structureVertexBuffer: MTLBuffer
-    private var structureVertexCount: Int = 0
     private var skyboxVertexBuffer: MTLBuffer
     private var skyboxVertexCount: Int = 0
     
@@ -449,38 +446,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         (groundVertexBuffer, groundVertexCount) = GeometryGenerator.makeGroundMesh(device: device)
         (skyboxVertexBuffer, skyboxVertexCount) = GeometryGenerator.makeSkybox(device: device)
         
-        // Generate objects in order of priority (largest first to ensure they get placed)
-        // 1. Structures first (houses, ruins, towers)
-        let structureResult = GeometryGenerator.makeStructureMeshes(device: device)
-        structureVertexBuffer = structureResult.0
-        structureVertexCount = structureResult.1
-        allColliders.append(contentsOf: structureResult.2)
-        
-        // 2. Trees - generate colliders and camera blockers (rendering now uses USD models)
+        // Generate tree colliders and camera blockers (rendering uses USD models)
         let treeResult = GeometryGenerator.makeTreeMeshes(device: device)
         // treeResult.0 and .1 (vertex buffer/count) no longer used - USD models render trees
         allColliders.append(contentsOf: treeResult.2)
         cameraBlockers.append(contentsOf: treeResult.3)
         
-        // 3. Rocks third (medium objects)
-        let rockResult = GeometryGenerator.makeRockMeshes(device: device)
-        rockVertexBuffer = rockResult.0
-        rockVertexCount = rockResult.1
-        allColliders.append(contentsOf: rockResult.2)
-        
-        // 4. Poles last (smallest objects)
-        let poleResult = GeometryGenerator.makePoleMeshes(device: device)
-        poleVertexBuffer = poleResult.0
-        poleVertexCount = poleResult.1
-        allColliders.append(contentsOf: poleResult.2)
-        lanternPositions = poleResult.3
-        
-        // 5. Create treasure chests
+        // Create treasure chests
         self.interactables = Renderer.createTreasureChests()
-        let chestResult = GeometryGenerator.makeTreasureChestMeshes(device: device, interactables: interactables)
-        chestVertexBuffer = chestResult.0
-        chestVertexCount = chestResult.1
-        allColliders.append(contentsOf: chestResult.2)
+        // Add chest colliders (simple radius-based)
+        for chest in interactables where chest.type == .treasureChest {
+            allColliders.append(Collider.circle(x: chest.position.x, z: chest.position.z, radius: 0.8))
+        }
         
         self.colliders = allColliders
         
@@ -510,6 +487,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // NPC uniform buffer - for 10 NPCs
         npcUniformBuffer = device.makeBuffer(length: uniformStride * 10, options: .storageModeShared)!
         
+        // Chest uniform buffer - for 20 chests (base + lid = 2 draw calls each, need separate uniforms)
+        chestUniformBuffer = device.makeBuffer(length: uniformStride * 40, options: .storageModeShared)!
+        
         super.init()
         
         // Load cabin USD model (must be after super.init)
@@ -517,6 +497,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Load tree USD models and generate instances
         loadTreeModels()
+        
+        // Load chest USD model
+        loadChestModel()
         
         // Load skeletal player model (must be after super.init)
         loadPlayerModel()
@@ -1215,13 +1198,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     /// Rebuild chest meshes if needed (after opening)
+    /// Note: With USD chest model, this is no longer needed as lid animation is handled in drawChests()
     private func rebuildChestsIfNeeded() {
-        guard chestsNeedRebuild else { return }
+        // No longer rebuilding procedural meshes - USD model lid animates via transform
         chestsNeedRebuild = false
-        
-        let chestResult = GeometryGenerator.makeTreasureChestMeshes(device: device, interactables: interactables)
-        chestVertexBuffer = chestResult.0
-        chestVertexCount = chestResult.1
     }
     
     // MARK: - MTKViewDelegate
@@ -1498,26 +1478,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             timeOfDay: timeOfDay
         )
         
-        // Add point lights from lanterns
-        // Lanterns are brighter at night (when ambient is lower)
-        let lanternIntensity: Float = isDaytime ? 0.3 : 1.2
-        
-        // Find the 8 nearest lanterns to the camera for performance
-        let sortedLanterns = lanternPositions
-            .map { ($0, simd_distance($0, cameraPosition)) }
-            .sorted { $0.1 < $1.1 }
-            .prefix(8)
-        
-        let lanternArray = Array(sortedLanterns)
-        if lanternArray.count > 0 { litUniforms.pointLight0 = simd_float4(lanternArray[0].0, lanternIntensity) }
-        if lanternArray.count > 1 { litUniforms.pointLight1 = simd_float4(lanternArray[1].0, lanternIntensity) }
-        if lanternArray.count > 2 { litUniforms.pointLight2 = simd_float4(lanternArray[2].0, lanternIntensity) }
-        if lanternArray.count > 3 { litUniforms.pointLight3 = simd_float4(lanternArray[3].0, lanternIntensity) }
-        if lanternArray.count > 4 { litUniforms.pointLight4 = simd_float4(lanternArray[4].0, lanternIntensity) }
-        if lanternArray.count > 5 { litUniforms.pointLight5 = simd_float4(lanternArray[5].0, lanternIntensity) }
-        if lanternArray.count > 6 { litUniforms.pointLight6 = simd_float4(lanternArray[6].0, lanternIntensity) }
-        if lanternArray.count > 7 { litUniforms.pointLight7 = simd_float4(lanternArray[7].0, lanternIntensity) }
-        litUniforms.pointLightCount = Int32(min(lanternArray.count, 8))
+        // No point lights currently (lantern poles removed)
+        litUniforms.pointLightCount = 0
         
         memcpy(litUniformBuffer.contents(), &litUniforms, MemoryLayout<LitUniforms>.stride)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
@@ -1541,12 +1503,6 @@ final class Renderer: NSObject, MTKViewDelegate {
                 encoder.setFragmentTexture(meshTexture, index: 6)
             }
             
-            // Get active point lights
-            var activePointLights: [PointLight] = []
-            for (pos, _) in lanternArray {
-                activePointLights.append(PointLight(position: pos, intensity: lanternIntensity))
-            }
-            
             // Draw the animated character with equipment visibility based on player state
             animChar.draw(
                 encoder: encoder,
@@ -1558,7 +1514,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 ambientIntensity: litUniforms.ambientIntensity,
                 diffuseIntensity: litUniforms.diffuseIntensity,
                 timeOfDay: timeOfDay,
-                pointLights: activePointLights,
+                pointLights: [],  // No point lights currently
                 showShield: player.equipment.hasShieldEquipped,
                 showWeapon: player.equipment.hasSwordEquipped
             )
@@ -1580,6 +1536,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Draw trees (USD models)
         drawTrees(encoder: encoder, litUniforms: litUniforms)
+        
+        // Draw treasure chests (USD model with animated lid)
+        drawChests(encoder: encoder, litUniforms: litUniforms)
         
         // Draw grid lines overlay
         encoder.setRenderPipelineState(wireframePipelineState)
@@ -1632,25 +1591,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     private func drawLandscape(encoder: MTLRenderCommandEncoder) {
+        // Draw ground terrain
         encoder.setVertexBuffer(groundVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: groundVertexCount)
         
-        // Trees are now rendered via drawTrees() using USD models
-        
-        encoder.setVertexBuffer(rockVertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: rockVertexCount)
-        
-        encoder.setVertexBuffer(poleVertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: poleVertexCount)
-        
-        encoder.setVertexBuffer(structureVertexBuffer, offset: 0, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: structureVertexCount)
-        
-        // Draw treasure chests
-        if chestVertexCount > 0 {
-            encoder.setVertexBuffer(chestVertexBuffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: chestVertexCount)
-        }
+        // Trees and cabin are rendered via drawTrees() and drawCabin() using USD models
+        // Treasure chests are rendered via drawChests() using USD model with animated lid
     }
     
     /// Draw all enemies
@@ -3000,6 +2946,150 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cabinVertexCount)
         
         // Restore landscape uniform buffer
+        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+    }
+    
+    // MARK: - Treasure Chest Model
+    
+    private func loadChestModel() {
+        print("[Chest] ========== LOADING CHEST MODEL ==========")
+        
+        let loader = USDModelLoader(device: device)
+        
+        // Find the treasure chest model
+        var chestURL: URL?
+        
+        // Try direct bundle location
+        if let url = Bundle.main.url(forResource: "treasure_chest", withExtension: "usdz") {
+            chestURL = url
+            print("[Chest] Found treasure_chest.usdz directly in bundle")
+        }
+        // Try LandscapeModels subdirectory
+        else if let url = Bundle.main.url(forResource: "treasure_chest", withExtension: "usdz", subdirectory: "LandscapeModels") {
+            chestURL = url
+            print("[Chest] Found treasure_chest.usdz in LandscapeModels")
+        }
+        else {
+            print("[Chest] ❌ Could not find treasure_chest.usdz")
+            return
+        }
+        
+        guard let url = chestURL else { return }
+        
+        // Print asset hierarchy for debugging
+        loader.printAssetHierarchy(from: url)
+        
+        // Load with lid submeshes separated
+        // The lid consists of submeshes named "topdetail_low" and "topwood_low"
+        if let model = loader.loadChestModel(
+            from: url,
+            materialIndex: MaterialIndex.treasureChest.rawValue,
+            lidSubmeshNames: ["topdetail", "topwood"]  // Partial match will work
+        ) {
+            chestModel = model
+            
+            // Calculate scale to make chest about 0.8 units wide
+            let bounds = model.boundingBox
+            let modelSize = bounds.max - bounds.min
+            let maxDim = max(modelSize.x, max(modelSize.y, modelSize.z))
+            chestModelScale = maxDim > 0.001 ? 0.8 / maxDim : 1.0
+            
+            print("[Chest] ✅ Loaded chest model")
+            print("[Chest]   Base vertices: \(model.baseVertexCount)")
+            print("[Chest]   Lid vertices: \(model.lidVertexCount)")
+            print("[Chest]   Model scale: \(chestModelScale)")
+            print("[Chest]   Hinge offset: \(model.hingeOffset)")
+        } else {
+            print("[Chest] ❌ Failed to load chest model")
+        }
+        
+        print("[Chest] ==========================================")
+    }
+    
+    /// Draw all treasure chests with animated lids
+    private func drawChests(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
+        guard let model = chestModel else { return }
+        
+        // Disable backface culling for chest - the model may have mixed winding order
+        encoder.setCullMode(.none)
+        
+        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
+        let bufferBase = chestUniformBuffer.contents()
+        
+        var uniformIndex = 0
+        
+        for chest in interactables where chest.type == .treasureChest {
+            guard uniformIndex < 40 else { break }  // Max 20 chests (40 draw calls)
+            
+            let terrainY = Terrain.heightAt(x: chest.position.x, z: chest.position.z)
+            
+            // Calculate lid open angle based on chest state
+            // Closed = 0 degrees, Open = -110 degrees (rotates backward)
+            let targetAngle: Float = chest.isOpen ? -.pi * 0.61 : 0  // ~110 degrees
+            let lidAngle = targetAngle  // Could add animation interpolation here
+            
+            // Generate consistent rotation based on position (seeded random)
+            let chestRotation = Float(Int(chest.position.x * 100 + chest.position.z * 73) % 628) / 100.0
+            
+            // Base model matrix: position, then scale
+            // Rotate to stand upright (flip 180 on X to be right-side up)
+            let baseModelMatrix = translation(chest.position.x, terrainY, chest.position.z) *
+                                  rotationY(chestRotation) *
+                                  rotationX(.pi / 2) *  // Flip to stand upright
+                                  scaling(chestModelScale, chestModelScale, chestModelScale)
+            
+            // Draw the base (non-moving part)
+            var baseUniforms = litUniforms
+            baseUniforms.modelMatrix = baseModelMatrix
+            
+            let baseOffset = uniformIndex * uniformStride
+            let basePtr = bufferBase.advanced(by: baseOffset).bindMemory(to: LitUniforms.self, capacity: 1)
+            basePtr.pointee = baseUniforms
+            
+            encoder.setVertexBuffer(chestUniformBuffer, offset: baseOffset, index: 1)
+            encoder.setFragmentBuffer(chestUniformBuffer, offset: baseOffset, index: 1)
+            encoder.setVertexBuffer(model.baseVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: model.baseVertexCount)
+            uniformIndex += 1
+            
+            // Draw the lid (animated part) - all lid submeshes use same transform
+            if model.lidVertexCount > 0 {
+                // Hinge is at the back-bottom of the lid in model space
+                // For lid rotation: first translate so hinge is at origin, rotate, translate back
+                let hinge = model.hingeOffset
+                
+                // Build the lid matrix in model space first, then apply world transforms
+                // Lid opens by rotating around the X axis (left-right hinge)
+                let hingeRotation = translation(hinge.x, hinge.y, hinge.z) *
+                                    rotationX(lidAngle) *  // Rotate around X axis (hinge)
+                                    translation(-hinge.x, -hinge.y, -hinge.z)
+                
+                // Apply world transforms, then hinge rotation in model space
+                // Rotate to stand upright (same as base)
+                let lidModelMatrix = translation(chest.position.x, terrainY, chest.position.z) *
+                                     rotationY(chestRotation) *
+                                     rotationX(.pi / 2) *  // Flip to stand upright
+                                     scaling(chestModelScale, chestModelScale, chestModelScale) *
+                                     hingeRotation
+                
+                var lidUniforms = litUniforms
+                lidUniforms.modelMatrix = lidModelMatrix
+                
+                let lidOffset = uniformIndex * uniformStride
+                let lidPtr = bufferBase.advanced(by: lidOffset).bindMemory(to: LitUniforms.self, capacity: 1)
+                lidPtr.pointee = lidUniforms
+                
+                encoder.setVertexBuffer(chestUniformBuffer, offset: lidOffset, index: 1)
+                encoder.setFragmentBuffer(chestUniformBuffer, offset: lidOffset, index: 1)
+                encoder.setVertexBuffer(model.lidVertexBuffer, offset: 0, index: 0)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: model.lidVertexCount)
+                uniformIndex += 1
+            }
+        }
+        
+        // Restore backface culling and landscape uniform buffer
+        encoder.setCullMode(.back)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
         encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
     }

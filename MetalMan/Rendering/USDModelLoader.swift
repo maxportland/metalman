@@ -24,6 +24,17 @@ final class USDModelLoader {
         let boundingBox: (min: simd_float3, max: simd_float3)
     }
     
+    /// Loaded chest model with separate base and lid for animation
+    struct LoadedChestModel {
+        let baseVertexBuffer: MTLBuffer
+        let baseVertexCount: Int
+        let lidVertexBuffer: MTLBuffer
+        let lidVertexCount: Int
+        let boundingBox: (min: simd_float3, max: simd_float3)
+        let lidBounds: (min: simd_float3, max: simd_float3)  // For calculating hinge position
+        let hingeOffset: simd_float3  // Offset from model center to hinge pivot point
+    }
+    
     /// Load a USD model from a file path
     func loadModel(named name: String, withExtension ext: String = "usdc", materialIndex: UInt32) -> LoadedModel? {
         guard let url = Bundle.main.url(forResource: name, withExtension: ext) else {
@@ -376,6 +387,361 @@ final class USDModelLoader {
                         materialIndex: effectiveMaterialIndex
                     )
                     vertices.append(vertex)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Chest Model Loading (with separate lid for animation)
+    
+    /// Load a treasure chest model with separate base and lid meshes for animation
+    /// - Parameters:
+    ///   - url: URL to the USDZ file
+    ///   - materialIndex: Material index for the chest
+    ///   - lidSubmeshNames: Names of submeshes that make up the lid (e.g., ["topdetail_low", "topwood_low"])
+    /// - Returns: LoadedChestModel with separate base and lid buffers
+    func loadChestModel(from url: URL, materialIndex: UInt32, lidSubmeshNames: [String]) -> LoadedChestModel? {
+        // Create a Metal vertex descriptor matching our TexturedVertex layout
+        let metalDescriptor = MTLVertexDescriptor()
+        metalDescriptor.attributes[0].format = .float3  // position
+        metalDescriptor.attributes[0].offset = 0
+        metalDescriptor.attributes[0].bufferIndex = 0
+        metalDescriptor.attributes[1].format = .float3  // normal
+        metalDescriptor.attributes[1].offset = 12
+        metalDescriptor.attributes[1].bufferIndex = 0
+        metalDescriptor.attributes[2].format = .float3  // tangent
+        metalDescriptor.attributes[2].offset = 24
+        metalDescriptor.attributes[2].bufferIndex = 0
+        metalDescriptor.attributes[3].format = .float2  // texCoord
+        metalDescriptor.attributes[3].offset = 36
+        metalDescriptor.attributes[3].bufferIndex = 0
+        metalDescriptor.layouts[0].stride = MemoryLayout<TexturedVertex>.stride
+        
+        // Convert to Model I/O descriptor
+        let mdlDescriptor = MTKModelIOVertexDescriptorFromMetal(metalDescriptor)
+        (mdlDescriptor.attributes[0] as! MDLVertexAttribute).name = MDLVertexAttributePosition
+        (mdlDescriptor.attributes[1] as! MDLVertexAttribute).name = MDLVertexAttributeNormal
+        (mdlDescriptor.attributes[2] as! MDLVertexAttribute).name = MDLVertexAttributeTangent
+        (mdlDescriptor.attributes[3] as! MDLVertexAttribute).name = MDLVertexAttributeTextureCoordinate
+        
+        // Create allocator
+        let allocator = MTKMeshBufferAllocator(device: device)
+        
+        // Load the USD asset
+        let asset = MDLAsset(url: url, vertexDescriptor: mdlDescriptor, bufferAllocator: allocator)
+        
+        guard asset.count > 0 else {
+            print("[USDLoader] Chest: No objects in asset")
+            return nil
+        }
+        
+        // Collect vertices into separate arrays for base and lid
+        var baseVertices: [TexturedVertex] = []
+        var lidVertices: [TexturedVertex] = []
+        var minBound = simd_float3(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxBound = simd_float3(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        var lidMinBound = simd_float3(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var lidMaxBound = simd_float3(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        
+        // Convert lid names to lowercase set for comparison
+        let lidNamesLower = Set(lidSubmeshNames.map { $0.lowercased() })
+        
+        print("[USDLoader] Chest: Loading with lid submesh names: \(lidSubmeshNames)")
+        
+        // Iterate through all objects in the asset
+        for i in 0..<asset.count {
+            let object = asset.object(at: i)
+            processChestObject(
+                object,
+                materialIndex: materialIndex,
+                lidSubmeshNames: lidNamesLower,
+                baseVertices: &baseVertices,
+                lidVertices: &lidVertices,
+                minBound: &minBound,
+                maxBound: &maxBound,
+                lidMinBound: &lidMinBound,
+                lidMaxBound: &lidMaxBound
+            )
+        }
+        
+        guard !baseVertices.isEmpty else {
+            print("[USDLoader] Chest: No base vertices extracted")
+            return nil
+        }
+        
+        // Create base vertex buffer
+        guard let baseBuffer = device.makeBuffer(bytes: baseVertices,
+                                                  length: MemoryLayout<TexturedVertex>.stride * baseVertices.count,
+                                                  options: .storageModeShared) else {
+            print("[USDLoader] Chest: Failed to create base vertex buffer")
+            return nil
+        }
+        
+        // Create lid vertex buffer (may be empty if no lid found)
+        let lidBuffer: MTLBuffer
+        if !lidVertices.isEmpty {
+            guard let buffer = device.makeBuffer(bytes: lidVertices,
+                                                  length: MemoryLayout<TexturedVertex>.stride * lidVertices.count,
+                                                  options: .storageModeShared) else {
+                print("[USDLoader] Chest: Failed to create lid vertex buffer")
+                return nil
+            }
+            lidBuffer = buffer
+        } else {
+            // Create empty buffer if no lid
+            lidBuffer = device.makeBuffer(length: 16, options: .storageModeShared)!
+            print("[USDLoader] Chest: Warning - no lid vertices found")
+        }
+        
+        // Calculate hinge position - back center of the lid at its lowest point
+        // For a Y-up model: X = left-right, Y = up-down, Z = front-back
+        // The hinge is at the back (min or max Z) and bottom (min Y) of the lid
+        let hingeOffset: simd_float3
+        if !lidVertices.isEmpty {
+            // Hinge is at the back-bottom of the lid bounds
+            // For Y-up: bottom = minY, back = maxZ (assuming +Z is back)
+            hingeOffset = simd_float3(
+                (lidMinBound.x + lidMaxBound.x) / 2,  // Center X (left-right)
+                lidMinBound.y,                         // Bottom of lid (min Y)
+                lidMaxBound.z                          // Back of lid (max Z)
+            )
+        } else {
+            hingeOffset = simd_float3(0, 0, 0)
+        }
+        
+        print("[USDLoader] Chest: Loaded with \(baseVertices.count) base vertices, \(lidVertices.count) lid vertices")
+        print("[USDLoader] Chest: Overall bounds: min=\(minBound), max=\(maxBound)")
+        print("[USDLoader] Chest: Lid bounds: min=\(lidMinBound), max=\(lidMaxBound)")
+        print("[USDLoader] Chest: Hinge offset: \(hingeOffset)")
+        
+        return LoadedChestModel(
+            baseVertexBuffer: baseBuffer,
+            baseVertexCount: baseVertices.count,
+            lidVertexBuffer: lidBuffer,
+            lidVertexCount: lidVertices.count,
+            boundingBox: (minBound, maxBound),
+            lidBounds: (lidMinBound, lidMaxBound),
+            hingeOffset: hingeOffset
+        )
+    }
+    
+    /// Recursively process MDL objects for chest, separating lid and base
+    private func processChestObject(
+        _ object: MDLObject,
+        materialIndex: UInt32,
+        lidSubmeshNames: Set<String>,
+        baseVertices: inout [TexturedVertex],
+        lidVertices: inout [TexturedVertex],
+        minBound: inout simd_float3,
+        maxBound: inout simd_float3,
+        lidMinBound: inout simd_float3,
+        lidMaxBound: inout simd_float3
+    ) {
+        if let mesh = object as? MDLMesh {
+            extractChestMeshVertices(
+                mesh,
+                materialIndex: materialIndex,
+                lidSubmeshNames: lidSubmeshNames,
+                baseVertices: &baseVertices,
+                lidVertices: &lidVertices,
+                minBound: &minBound,
+                maxBound: &maxBound,
+                lidMinBound: &lidMinBound,
+                lidMaxBound: &lidMaxBound
+            )
+        }
+        
+        // Also check the object name - some models have submesh names in the object
+        let objectName = object.name.lowercased()
+        let isLidObject = lidSubmeshNames.contains { objectName.contains($0) }
+        
+        // Process children
+        for child in object.children.objects {
+            if isLidObject {
+                // If parent is a lid object, all children go to lid
+                processChestObjectAsLid(child, materialIndex: materialIndex, lidVertices: &lidVertices, lidMinBound: &lidMinBound, lidMaxBound: &lidMaxBound, overallMin: &minBound, overallMax: &maxBound)
+            } else {
+                processChestObject(child, materialIndex: materialIndex, lidSubmeshNames: lidSubmeshNames, baseVertices: &baseVertices, lidVertices: &lidVertices, minBound: &minBound, maxBound: &maxBound, lidMinBound: &lidMinBound, lidMaxBound: &lidMaxBound)
+            }
+        }
+    }
+    
+    /// Process an object that is known to be part of the lid
+    private func processChestObjectAsLid(
+        _ object: MDLObject,
+        materialIndex: UInt32,
+        lidVertices: inout [TexturedVertex],
+        lidMinBound: inout simd_float3,
+        lidMaxBound: inout simd_float3,
+        overallMin: inout simd_float3,
+        overallMax: inout simd_float3
+    ) {
+        if let mesh = object as? MDLMesh {
+            extractMeshVertices(mesh, materialIndex: materialIndex, vertices: &lidVertices, minBound: &lidMinBound, maxBound: &lidMaxBound)
+            // Also update overall bounds
+            overallMin = simd_min(overallMin, lidMinBound)
+            overallMax = simd_max(overallMax, lidMaxBound)
+        }
+        
+        for child in object.children.objects {
+            processChestObjectAsLid(child, materialIndex: materialIndex, lidVertices: &lidVertices, lidMinBound: &lidMinBound, lidMaxBound: &lidMaxBound, overallMin: &overallMin, overallMax: &overallMax)
+        }
+    }
+    
+    /// Extract vertices from a chest mesh, separating lid and base based on submesh names
+    private func extractChestMeshVertices(
+        _ mesh: MDLMesh,
+        materialIndex: UInt32,
+        lidSubmeshNames: Set<String>,
+        baseVertices: inout [TexturedVertex],
+        lidVertices: inout [TexturedVertex],
+        minBound: inout simd_float3,
+        maxBound: inout simd_float3,
+        lidMinBound: inout simd_float3,
+        lidMaxBound: inout simd_float3
+    ) {
+        // Get vertex buffers
+        let vertexBuffers = mesh.vertexBuffers
+        guard !vertexBuffers.isEmpty else { return }
+        
+        let vertexBuffer = vertexBuffers[0]
+        let vertexData = vertexBuffer.map()
+        
+        guard let layout = mesh.vertexDescriptor.layouts[0] as? MDLVertexBufferLayout else { return }
+        let stride = layout.stride
+        
+        // Get attribute offsets
+        var positionOffset = 0
+        var normalOffset = 12
+        var texCoordOffset = 36
+        
+        for attr in mesh.vertexDescriptor.attributes as! [MDLVertexAttribute] {
+            switch attr.name {
+            case MDLVertexAttributePosition:
+                positionOffset = attr.offset
+            case MDLVertexAttributeNormal:
+                normalOffset = attr.offset
+            case MDLVertexAttributeTextureCoordinate:
+                texCoordOffset = attr.offset
+            default:
+                break
+            }
+        }
+        
+        guard let submeshes = mesh.submeshes as? [MDLSubmesh] else { return }
+        
+        for submesh in submeshes {
+            let submeshNameLower = submesh.name.lowercased()
+            let isLid = lidSubmeshNames.contains { submeshNameLower.contains($0) }
+            
+            print("[USDLoader] Chest submesh: '\(submesh.name)' -> \(isLid ? "LID" : "BASE")")
+            
+            let indexBuffer = submesh.indexBuffer
+            let indexData = indexBuffer.map()
+            let indexCount = submesh.indexCount
+            
+            // Process triangles - reverse winding order to match Metal's coordinate system
+            // This matches the standard extractMeshVertices method used for cabin/trees
+            for i in Swift.stride(from: 0, to: indexCount, by: 3) {
+                var indices: [Int] = []
+                
+                switch submesh.indexType {
+                case .uInt16:
+                    let ptr = indexData.bytes.bindMemory(to: UInt16.self, capacity: indexCount)
+                    indices = [Int(ptr[i]), Int(ptr[i+2]), Int(ptr[i+1])]  // Reversed winding
+                case .uInt32:
+                    let ptr = indexData.bytes.bindMemory(to: UInt32.self, capacity: indexCount)
+                    indices = [Int(ptr[i]), Int(ptr[i+2]), Int(ptr[i+1])]  // Reversed winding
+                case .uInt8:
+                    let ptr = indexData.bytes.bindMemory(to: UInt8.self, capacity: indexCount)
+                    indices = [Int(ptr[i]), Int(ptr[i+2]), Int(ptr[i+1])]  // Reversed winding
+                default:
+                    continue
+                }
+                
+                // First pass: read positions for all 3 vertices
+                var positions: [simd_float3] = []
+                for idx in indices {
+                    let basePtr = vertexData.bytes.advanced(by: idx * stride)
+                    let posPtr = basePtr.advanced(by: positionOffset).bindMemory(to: Float.self, capacity: 3)
+                    let position = simd_float3(posPtr[0], posPtr[1], posPtr[2])
+                    positions.append(position)
+                }
+                
+                // Calculate face normal from triangle vertices (as fallback)
+                let edge1 = positions[1] - positions[0]
+                let edge2 = positions[2] - positions[0]
+                var faceNormal = simd_normalize(simd_cross(edge1, edge2))
+                if faceNormal.x.isNaN || faceNormal.y.isNaN || faceNormal.z.isNaN {
+                    faceNormal = simd_float3(0, 1, 0)
+                }
+                
+                // Calculate tangent from first edge
+                var tangent = simd_normalize(edge1)
+                if tangent.x.isNaN || tangent.y.isNaN || tangent.z.isNaN {
+                    tangent = simd_float3(1, 0, 0)
+                }
+                
+                // Second pass: create vertices - read normals from model when available (like skeletal loader)
+                for (vertIdx, idx) in indices.enumerated() {
+                    let position = positions[vertIdx]
+                    let basePtr = vertexData.bytes.advanced(by: idx * stride)
+                    
+                    // Read normal from model data if available, otherwise use face normal
+                    var normal = faceNormal
+                    if normalOffset >= 0 && normalOffset < stride - 8 {
+                        let normPtr = basePtr.advanced(by: normalOffset).bindMemory(to: Float.self, capacity: 3)
+                        let modelNormal = simd_float3(normPtr[0], normPtr[1], normPtr[2])
+                        // Only use model normal if it's valid (non-zero length)
+                        if simd_length(modelNormal) > 0.001 {
+                            normal = simd_normalize(modelNormal)
+                        }
+                    }
+                    
+                    // Read texCoord
+                    var texCoord = simd_float2(0, 0)
+                    var hasValidUV = false
+                    if texCoordOffset < stride - 4 {
+                        let texPtr = basePtr.advanced(by: texCoordOffset).bindMemory(to: Float.self, capacity: 2)
+                        texCoord = simd_float2(texPtr[0], texPtr[1])
+                        if abs(texPtr[0]) > 0.001 || abs(texPtr[1]) > 0.001 {
+                            hasValidUV = true
+                        }
+                    }
+                    
+                    // Generate procedural UVs if model doesn't have valid ones
+                    if !hasValidUV {
+                        let uvScale: Float = 0.08
+                        let absNormal = simd_abs(faceNormal)
+                        if absNormal.y > absNormal.x && absNormal.y > absNormal.z {
+                            texCoord = simd_float2(position.x * uvScale, position.z * uvScale)
+                        } else if absNormal.x > absNormal.z {
+                            texCoord = simd_float2(position.z * uvScale, position.y * uvScale)
+                        } else {
+                            texCoord = simd_float2(position.x * uvScale, position.y * uvScale)
+                        }
+                    }
+                    
+                    let vertex = TexturedVertex(
+                        position: position,
+                        normal: normal,
+                        tangent: tangent,
+                        texCoord: texCoord,
+                        materialIndex: materialIndex
+                    )
+                    
+                    // Add to appropriate array and update bounds
+                    if isLid {
+                        lidVertices.append(vertex)
+                        lidMinBound = simd_min(lidMinBound, position)
+                        lidMaxBound = simd_max(lidMaxBound, position)
+                    } else {
+                        baseVertices.append(vertex)
+                    }
+                    
+                    // Always update overall bounds
+                    minBound = simd_min(minBound, position)
+                    maxBound = simd_max(maxBound, position)
                 }
             }
         }
