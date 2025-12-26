@@ -63,6 +63,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let respawnInterval: Float = 5.0  // Seconds between respawn checks
     private let minSpawnDistance: Float = 30.0  // Minimum distance from player to spawn
     
+    // Skeletal enemy animation
+    private var enemySkeletalMesh: SkeletalMesh?
+    private var animatedEnemies: [UUID: AnimatedEnemy] = [:]  // Map enemy ID to animated instance
+    private var useSkeletalEnemies: Bool = false
+    private var enemyModelMatrix: simd_float4x4 = matrix_identity_float4x4
+    private var enemyModelScale: Float = 1.0
+    
     // MARK: - NPCs
     
     private var vendorTexture: MTLTexture!
@@ -91,6 +98,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     var jumpPressed: Bool = false
     var interactPressed: Bool = false
     var attackPressed: Bool = false
+    var runPressed: Bool = false  // Hold to run
     var savePressed: Bool = false
     private var saveWasPressed: Bool = false
     
@@ -103,6 +111,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let baseAttackCooldownTime: Float = 0.3  // Time between attacks (base)
     private var attackWasPressed: Bool = false
     private var currentSwingType: SwingType = .mittelhaw
+    private var hasPerformedHitCheck: Bool = false  // Track if hit check done this attack
     
     /// Effective attack cooldown based on dexterity
     /// Higher dexterity = faster recovery = lower cooldown
@@ -120,6 +129,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Slightly faster swings with higher dex
         let reduction = max(0.5, 1.0 - (dex - 10) * 0.02)
         return baseAttackDuration * reduction
+    }
+    
+    /// Animation speed multiplier for attacks based on dexterity
+    /// Higher dexterity = faster attack animation
+    private var attackAnimationSpeed: Float {
+        let dex = Float(player.effectiveDexterity)
+        // Same formula as effectiveAttackDuration, but inverted
+        // So animation plays faster to match the shorter attack duration
+        let reduction = max(0.5, 1.0 - (dex - 10) * 0.02)
+        return 1.0 / reduction  // Invert: 0.5 reduction = 2.0x speed
     }
     
     // MARK: - HUD Reference
@@ -154,10 +173,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let gravity: Float = 20.0
     
     // Movement config (base values, modified by player stats)
-    private let baseCharacterSpeed: Float = 6.0
+    private let baseCharacterSpeed: Float = 3.5  // Reduced to match walking animation
+    private let runSpeedMultiplier: Float = 2.0  // Running is 2x walking speed
     private let acceleration: Float = 40.0
     private let deceleration: Float = 25.0
     private let turnSpeed: Float = 15.0
+    
+    /// Whether the player is currently running
+    private var isRunning: Bool = false
     
     /// Effective character speed modified by player dexterity
     private var characterSpeed: Float {
@@ -483,6 +506,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Load skeletal player model (must be after super.init)
         loadPlayerModel()
+        
+        // Load skeletal enemy model
+        loadEnemyModel()
         
         // Spawn enemies (higher chance near treasure chests)
         // Must be after super.init() to call instance method
@@ -1263,12 +1289,18 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Update skeletal animation based on player state
             if isAttacking {
                 animChar.setAnimationState(.attacking)
+                // Speed up attack animation based on dexterity
+                animChar.animationSpeed = attackAnimationSpeed
             } else if isJumping {
                 animChar.setAnimationState(.jumping)
+                animChar.animationSpeed = 1.0
             } else if isMoving {
-                animChar.setAnimationState(.walking)
+                // Use running animation when holding run key
+                animChar.setAnimationState(isRunning ? .running : .walking)
+                animChar.animationSpeed = 1.0
             } else {
                 animChar.setAnimationState(.idle)
+                animChar.animationSpeed = 1.0
             }
             
             animChar.hasShieldEquipped = hasShield
@@ -1365,7 +1397,14 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.setVertexBuffer(animChar.mesh.vertexBuffer, offset: 0, index: 0)
             encoder.setVertexBuffer(animChar.uniformBuffer, offset: 0, index: 1)
             encoder.setVertexBuffer(animChar.mesh.boneMatrixBuffer, offset: 0, index: 2)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: animChar.mesh.vertexCount)
+            
+            // Draw with equipment visibility based on player state
+            let showShield = player.equipment.hasShieldEquipped
+            let showWeapon = player.equipment.hasSwordEquipped
+            let drawRanges = animChar.mesh.getDrawRanges(showShield: showShield, showWeapon: showWeapon)
+            for range in drawRanges {
+                encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
+            }
             
             encoder.setRenderPipelineState(shadowPipelineState)
         } else if useSkeletalAnimation, playerModelVertexCount > 0, let playerBuffer = playerModelVertexBuffer {
@@ -1388,6 +1427,41 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
+        }
+        
+        // Enemy shadows
+        if useSkeletalEnemies, let skeletalMesh = enemySkeletalMesh, let skinnedShadowPipeline = skinnedShadowPipelineState {
+            encoder.setRenderPipelineState(skinnedShadowPipeline)
+            
+            let enemies = enemyManager.enemies.filter { $0.isAlive || $0.stateTimer < 60.0 }
+            
+            for enemy in enemies {
+                if let animatedEnemy = animatedEnemies[enemy.id] {
+                    let worldMatrix = translation(enemy.position.x, enemy.position.y, enemy.position.z) *
+                                     rotationY(enemy.yaw) *
+                                     enemyModelMatrix
+                    
+                    var skinnedUniforms = SkinnedUniforms()
+                    skinnedUniforms.modelMatrix = worldMatrix
+                    skinnedUniforms.viewProjectionMatrix = vp
+                    skinnedUniforms.lightViewProjectionMatrix = lightViewProjectionMatrix
+                    skinnedUniforms.lightDirection = currentLightDir
+                    skinnedUniforms.cameraPosition = cameraPosition
+                    skinnedUniforms.ambientIntensity = ambientIntensity
+                    skinnedUniforms.diffuseIntensity = diffuseIntensity
+                    skinnedUniforms.timeOfDay = timeOfDay
+                    
+                    memcpy(animatedEnemy.uniformBuffer.contents(), &skinnedUniforms, MemoryLayout<SkinnedUniforms>.stride)
+                    
+                    encoder.setVertexBuffer(skeletalMesh.vertexBuffer, offset: 0, index: 0)
+                    encoder.setVertexBuffer(animatedEnemy.uniformBuffer, offset: 0, index: 1)
+                    encoder.setVertexBuffer(animatedEnemy.boneMatrixBuffer, offset: 0, index: 2)  // Use enemy's own bone matrices
+                    
+                    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: skeletalMesh.vertexCount)
+                }
+            }
+            
+            encoder.setRenderPipelineState(shadowPipelineState)
         }
         
         encoder.endEncoding()
@@ -1494,7 +1568,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 activePointLights.append(PointLight(position: pos, intensity: lanternIntensity))
             }
             
-            // Draw the animated character
+            // Draw the animated character with equipment visibility based on player state
             animChar.draw(
                 encoder: encoder,
                 modelMatrix: fullModelMatrix,
@@ -1505,7 +1579,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                 ambientIntensity: litUniforms.ambientIntensity,
                 diffuseIntensity: litUniforms.diffuseIntensity,
                 timeOfDay: timeOfDay,
-                pointLights: activePointLights
+                pointLights: activePointLights,
+                showShield: player.equipment.hasShieldEquipped,
+                showWeapon: player.equipment.hasSwordEquipped
             )
             
             // Restore lit pipeline and uniform buffer
@@ -1629,50 +1705,114 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     /// Draw all enemies
     private func drawEnemies(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
-        guard enemyMesh.vertexCount > 0 else { return }
-        
         // Draw each enemy with its own model matrix
         let enemies = enemyManager.enemies.filter { $0.isAlive || $0.stateTimer < 60.0 }
+        guard !enemies.isEmpty else { return }
         
-        encoder.setVertexBuffer(enemyMesh.vertexBuffer, offset: 0, index: 0)
-        
-        // 256-byte aligned stride for uniform buffer offsets
-        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
-        
-        // First pass: write all enemy uniforms to buffer
-        let bufferBase = enemyUniformBuffer.contents()
-        for (index, enemy) in enemies.enumerated() {
-            guard index < 100 else { break }  // Max 100 enemies
+        // Use skeletal animation if available
+        if useSkeletalEnemies, let skeletalMesh = enemySkeletalMesh, skinnedPipelineState != nil {
+            // Switch to skinned pipeline for skeletal enemies
+            encoder.setRenderPipelineState(skinnedPipelineState!)
             
-            let enemyModelMatrix = translation(enemy.position.x, enemy.position.y, enemy.position.z) * rotationY(enemy.yaw)
+            // Bind the enemy texture (from USDZ or fallback to procedural)
+            // Enemy vertices have materialIndex=12, which maps to texture slot 17 in the shader
+            if let texture = skeletalMesh.texture {
+                encoder.setFragmentTexture(texture, index: 17)  // Enemy texture slot (materialIndex 12)
+            } else {
+                // Fallback to procedural enemy texture if USDZ doesn't have one
+                encoder.setFragmentTexture(enemyTexture, index: 17)
+            }
             
-            var enemyUniforms = litUniforms
-            enemyUniforms.modelMatrix = enemyModelMatrix
+            // Extract point lights from litUniforms
+            var pointLights: [PointLight] = []
+            if litUniforms.pointLightCount > 0 {
+                pointLights.append(PointLight(position: simd_float3(litUniforms.pointLight0.x, litUniforms.pointLight0.y, litUniforms.pointLight0.z), intensity: litUniforms.pointLight0.w))
+            }
+            if litUniforms.pointLightCount > 1 {
+                pointLights.append(PointLight(position: simd_float3(litUniforms.pointLight1.x, litUniforms.pointLight1.y, litUniforms.pointLight1.z), intensity: litUniforms.pointLight1.w))
+            }
+            if litUniforms.pointLightCount > 2 {
+                pointLights.append(PointLight(position: simd_float3(litUniforms.pointLight2.x, litUniforms.pointLight2.y, litUniforms.pointLight2.z), intensity: litUniforms.pointLight2.w))
+            }
+            if litUniforms.pointLightCount > 3 {
+                pointLights.append(PointLight(position: simd_float3(litUniforms.pointLight3.x, litUniforms.pointLight3.y, litUniforms.pointLight3.z), intensity: litUniforms.pointLight3.w))
+            }
             
-            // Write to this enemy's slot in the buffer
-            let offset = index * uniformStride
-            let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
-            ptr.pointee = enemyUniforms
+            // Draw each enemy with skeletal animation
+            for enemy in enemies {
+                if let animatedEnemy = animatedEnemies[enemy.id] {
+                    // Create model matrix for this enemy
+                    let worldMatrix = translation(enemy.position.x, enemy.position.y, enemy.position.z) *
+                                     rotationY(enemy.yaw) *
+                                     enemyModelMatrix
+                    
+                    // Draw the animated enemy
+                    animatedEnemy.draw(
+                        encoder: encoder,
+                        modelMatrix: worldMatrix,
+                        viewProjectionMatrix: projectionMatrix * viewMatrix,
+                        lightViewProjectionMatrix: litUniforms.lightViewProjectionMatrix,
+                        lightDirection: litUniforms.lightDirection,
+                        cameraPosition: litUniforms.cameraPosition,
+                        ambientIntensity: litUniforms.ambientIntensity,
+                        diffuseIntensity: litUniforms.diffuseIntensity,
+                        timeOfDay: litUniforms.timeOfDay,
+                        pointLights: pointLights
+                    )
+                }
+            }
+            
+            // Restore regular pipeline
+            encoder.setRenderPipelineState(litPipelineState)
+            
+            // Restore landscape uniform buffer
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+            
+        } else {
+            // Fallback: Draw procedural enemy meshes
+            guard enemyMesh.vertexCount > 0 else { return }
+            
+            encoder.setVertexBuffer(enemyMesh.vertexBuffer, offset: 0, index: 0)
+            
+            // 256-byte aligned stride for uniform buffer offsets
+            let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
+            
+            // First pass: write all enemy uniforms to buffer
+            let bufferBase = enemyUniformBuffer.contents()
+            for (index, enemy) in enemies.enumerated() {
+                guard index < 100 else { break }  // Max 100 enemies
+                
+                let enemyModelMatrix = translation(enemy.position.x, enemy.position.y, enemy.position.z) * rotationY(enemy.yaw)
+                
+                var enemyUniforms = litUniforms
+                enemyUniforms.modelMatrix = enemyModelMatrix
+                
+                // Write to this enemy's slot in the buffer
+                let offset = index * uniformStride
+                let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
+                ptr.pointee = enemyUniforms
+            }
+            
+            // Second pass: draw each enemy using its uniform offset
+            for (index, _) in enemies.enumerated() {
+                guard index < enemyMesh.enemyVertexRanges.count else { break }
+                guard index < 100 else { break }
+                
+                let range = enemyMesh.enemyVertexRanges[index]
+                guard range.count > 0 else { continue }
+                
+                let offset = index * uniformStride
+                encoder.setVertexBuffer(enemyUniformBuffer, offset: offset, index: 1)
+                encoder.setFragmentBuffer(enemyUniformBuffer, offset: offset, index: 1)
+                
+                encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
+            }
+            
+            // Restore landscape uniform buffer
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
         }
-        
-        // Second pass: draw each enemy using its uniform offset
-        for (index, _) in enemies.enumerated() {
-            guard index < enemyMesh.enemyVertexRanges.count else { break }
-            guard index < 100 else { break }
-            
-            let range = enemyMesh.enemyVertexRanges[index]
-            guard range.count > 0 else { continue }
-            
-            let offset = index * uniformStride
-            encoder.setVertexBuffer(enemyUniformBuffer, offset: offset, index: 1)
-            encoder.setFragmentBuffer(enemyUniformBuffer, offset: offset, index: 1)
-            
-            encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
-        }
-        
-        // Restore landscape uniform buffer
-        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
-        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
     }
     
     /// Draw all NPCs (vendors)
@@ -1745,7 +1885,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         let forwardX = sin(characterYaw)
         let forwardZ = -cos(characterYaw)
         
-        let targetSpeed = abs(forwardInput) * characterSpeed
+        // Apply running speed if R is held while moving forward
+        isRunning = runPressed && forwardInput > 0.1
+        let speedMultiplier: Float = isRunning ? runSpeedMultiplier : 1.0
+        let targetSpeed = abs(forwardInput) * characterSpeed * speedMultiplier
         isMoving = targetSpeed > 0.1
         
         // Update footstep audio based on movement (only when grounded)
@@ -1970,14 +2113,29 @@ final class Renderer: NSObject, MTKViewDelegate {
         if isAttacking {
             attackPhase += dt / effectiveAttackDuration
             
-            if attackPhase >= 1.0 {
+            // Check for attack completion
+            var attackComplete = false
+            
+            if useSkeletalAnimation, let animChar = animatedCharacter {
+                // Use actual animation completion for skeletal animation
+                attackComplete = animChar.isAnimationComplete
+            } else {
+                // Use phase-based completion for procedural animation
+                attackComplete = attackPhase >= 1.0
+            }
+            
+            // Perform hit check partway through attack (at impact point ~40%)
+            if !hasPerformedHitCheck && attackPhase >= 0.4 {
+                performAttackHitCheck()
+                hasPerformedHitCheck = true
+            }
+            
+            if attackComplete {
                 // Attack finished
                 isAttacking = false
                 attackPhase = 0
                 attackCooldown = effectiveAttackCooldown
-                
-                // Check for hits (damage enemies in range)
-                performAttackHitCheck()
+                hasPerformedHitCheck = false
             }
         }
     }
@@ -2094,6 +2252,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Clean up dead enemies (always run to avoid buildup)
         enemyManager.removeDeadEnemies()
+        
+        // Update skeletal animation for enemies
+        if useSkeletalEnemies {
+            for enemy in enemyManager.enemies {
+                if let animatedEnemy = getAnimatedEnemy(for: enemy) {
+                    updateEnemyAnimationState(animatedEnemy: animatedEnemy, enemy: enemy)
+                    animatedEnemy.update(deltaTime: dt)
+                }
+            }
+            
+            // Clean up animated enemies for removed enemies
+            cleanupAnimatedEnemies()
+        }
     }
     
     /// Project world position to screen position (in SwiftUI points, not pixels)
@@ -2341,8 +2512,28 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Try to load as skeletal mesh first
         let skeletalLoader = SkeletalMeshLoader(device: device)
-        if let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: finalURL, materialIndex: MaterialIndex.character.rawValue) {
+        
+        // First, try loading from the new Paladin animations
+        var baseAnimationURL: URL? = nil
+        
+        // Try to find the idle animation as the base (it has the full mesh + skeleton)
+        if let url = Bundle.main.url(forResource: "sword-and-shield-idle", withExtension: "usdz") {
+            baseAnimationURL = url
+            print("[Player] Found sword-and-shield-idle.usdz as base")
+        } else if let url = Bundle.main.url(forResource: "sword-and-shield-idle", withExtension: "usdz", subdirectory: "Animations") {
+            baseAnimationURL = url
+            print("[Player] Found sword-and-shield-idle.usdz in Animations subdirectory")
+        }
+        
+        // Use the new base animation URL if found, otherwise fall back to original
+        let meshURL = baseAnimationURL ?? finalURL
+        
+        if let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: meshURL, materialIndex: MaterialIndex.character.rawValue) {
             print("[Player] Successfully loaded skeletal mesh!")
+            
+            // Load additional animations from the Animations folder
+            loadAdditionalAnimations(into: skeletalMesh, loader: skeletalLoader)
+            
             animatedCharacter = AnimatedCharacter(device: device, mesh: skeletalMesh)
             
             // Calculate model transform based on bounds
@@ -2350,10 +2541,18 @@ final class Renderer: NSObject, MTKViewDelegate {
             let modelSize = bounds.max - bounds.min
             let modelCenter = (bounds.max + bounds.min) / 2
             
-            // Detect coordinate system
-            let isYUp = modelSize.y > modelSize.z && modelSize.y > modelSize.x
+            print("[Player] Model bounds: min=\(bounds.min), max=\(bounds.max)")
+            print("[Player] Model size: \(modelSize)")
             
-            if isYUp {
+            // Detect coordinate system for Mixamo models:
+            // - Y-up: min.y is near zero (feet on ground), max.y is positive (head)
+            // - Z-up: min.z is near zero, max.z is positive
+            // Don't use size comparison as characters with arms/weapons can be wider than tall
+            let isYUp = abs(bounds.min.y) < abs(bounds.max.y) * 0.1 && bounds.max.y > bounds.max.z
+            let isZUp = abs(bounds.min.z) < abs(bounds.max.z) * 0.1 && bounds.max.z > bounds.max.y
+            
+            if isYUp || (!isZUp && modelSize.y > 50) {
+                // Y-up model (typical for Mixamo exports)
                 let modelHeight = modelSize.y
                 let targetHeight: Float = 2.0
                 let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
@@ -2364,8 +2563,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                                    scaling(scale, scale, scale) *
                                    translation(-modelCenter.x, 0, -modelCenter.z)
                 
-                print("[Player] Y-up skeletal model. Scale: \(scale)")
-            } else {
+                print("[Player] Y-up skeletal model. Height: \(modelHeight), Scale: \(scale)")
+            } else if isZUp {
+                // Z-up model
                 let modelHeight = modelSize.z
                 let targetHeight: Float = 2.0
                 let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
@@ -2377,13 +2577,27 @@ final class Renderer: NSObject, MTKViewDelegate {
                                    scaling(scale, scale, scale) *
                                    translation(-modelCenter.x, -modelCenter.y, 0)
                 
-                print("[Player] Z-up skeletal model. Scale: \(scale)")
+                print("[Player] Z-up skeletal model. Height: \(modelHeight), Scale: \(scale)")
+            } else {
+                // Fallback: assume Y-up for humanoid models
+                let modelHeight = modelSize.y
+                let targetHeight: Float = 2.0
+                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+                let scaledMinHeight = bounds.min.y * scale
+                
+                playerModelMatrix = translation(0, -scaledMinHeight, 0) *
+                                   rotationY(.pi) *
+                                   scaling(scale, scale, scale) *
+                                   translation(-modelCenter.x, 0, -modelCenter.z)
+                
+                print("[Player] Unknown orientation, assuming Y-up. Height: \(modelHeight), Scale: \(scale)")
             }
             
             playerModelTexture = characterTexture
             useSkeletalAnimation = true
             
             print("[Player] ✅ Skeletal animation enabled with \(skeletalMesh.bones.count) bones!")
+            print("[Player] ✅ Loaded \(skeletalMesh.animations.count) animations")
             return
         }
         
@@ -2456,6 +2670,332 @@ final class Renderer: NSObject, MTKViewDelegate {
             print("[Player] ✅ Player model loaded with \(playerModelVertexCount) vertices")
         } else {
             print("[Player] Failed to load player model, using procedural character")
+        }
+    }
+    
+    /// Load additional animations from USDZ files in the bundle
+    private func loadAdditionalAnimations(into mesh: SkeletalMesh, loader: SkeletalMeshLoader) {
+        // List of animation files to load (name -> filename without extension)
+        let animationFiles: [(name: String, filename: String)] = [
+            // Idle animations
+            ("sword-and-shield-idle", "sword-and-shield-idle"),
+            ("sword-and-shield-idle-2", "sword-and-shield-idle-2"),
+            ("sword-and-shield-idle-3", "sword-and-shield-idle-3"),
+            ("sword-and-shield-idle-4", "sword-and-shield-idle-4"),
+            
+            // Walk/Run animations
+            ("sword-and-shield-walk", "sword-and-shield-walk"),
+            ("sword-and-shield-walk-2", "sword-and-shield-walk-2"),
+            ("sword-and-shield-run", "sword-and-shield-run"),
+            ("sword-and-shield-run-2", "sword-and-shield-run-2"),
+            
+            // Strafe animations
+            ("sword-and-shield-strafe", "sword-and-shield-strafe"),
+            ("sword-and-shield-strafe-2", "sword-and-shield-strafe-2"),
+            ("sword-and-shield-strafe-3", "sword-and-shield-strafe-3"),
+            ("sword-and-shield-strafe-4", "sword-and-shield-strafe-4"),
+            
+            // Attack animations (slashes and attacks)
+            ("sword-and-shield-slash", "sword-and-shield-slash"),
+            ("sword-and-shield-slash-2", "sword-and-shield-slash-2"),
+            ("sword-and-shield-slash-3", "sword-and-shield-slash-3"),
+            ("sword-and-shield-slash-4", "sword-and-shield-slash-4"),
+            ("sword-and-shield-slash-5", "sword-and-shield-slash-5"),
+            ("sword-and-shield-attack", "sword-and-shield-attack"),
+            ("sword-and-shield-attack-2", "sword-and-shield-attack-2"),
+            ("sword-and-shield-attack-3", "sword-and-shield-attack-3"),
+            ("sword-and-shield-attack-4", "sword-and-shield-attack-4"),
+            ("sword-and-shield-kick", "sword-and-shield-kick"),
+            
+            // Block animations
+            ("sword-and-shield-block", "sword-and-shield-block"),
+            ("sword-and-shield-block-2", "sword-and-shield-block-2"),
+            ("sword-and-shield-block-idle", "sword-and-shield-block-idle"),
+            
+            // Crouch animations
+            ("sword-and-shield-crouch", "sword-and-shield-crouch"),
+            ("sword-and-shield-crouch-idle", "sword-and-shield-crouch-idle"),
+            ("sword-and-shield-crouch-block", "sword-and-shield-crouch-block"),
+            ("sword-and-shield-crouch-block-2", "sword-and-shield-crouch-block-2"),
+            ("sword-and-shield-crouch-block-idle", "sword-and-shield-crouch-block-idle"),
+            ("sword-and-shield-crouching", "sword-and-shield-crouching"),
+            ("sword-and-shield-crouching-2", "sword-and-shield-crouching-2"),
+            ("sword-and-shield-crouching-3", "sword-and-shield-crouching-3"),
+            
+            // Jump animations
+            ("sword-and-shield-jump", "sword-and-shield-jump"),
+            ("sword-and-shield-jump-2", "sword-and-shield-jump-2"),
+            
+            // Death animations
+            ("sword-and-shield-death", "sword-and-shield-death"),
+            ("sword-and-shield-death-2", "sword-and-shield-death-2"),
+            
+            // Impact/Hit reactions
+            ("sword-and-shield-impact", "sword-and-shield-impact"),
+            ("sword-and-shield-impact-2", "sword-and-shield-impact-2"),
+            ("sword-and-shield-impact-3", "sword-and-shield-impact-3"),
+            
+            // Turn animations
+            ("sword-and-shield-turn", "sword-and-shield-turn"),
+            ("sword-and-shield-turn-2", "sword-and-shield-turn-2"),
+            ("sword-and-shield-180-turn", "sword-and-shield-180-turn"),
+            ("sword-and-shield-180-turn-2", "sword-and-shield-180-turn-2"),
+            
+            // Special animations
+            ("sword-and-shield-casting", "sword-and-shield-casting"),
+            ("sword-and-shield-casting-2", "sword-and-shield-casting-2"),
+            ("sword-and-shield-power-up", "sword-and-shield-power-up"),
+            
+            // Draw/Sheath sword animations
+            ("draw-sword-1", "draw-sword-1"),
+            ("draw-sword-2", "draw-sword-2"),
+            ("sheath-sword-1", "sheath-sword-1"),
+            ("sheath-sword-2", "sheath-sword-2"),
+        ]
+        
+        var loadedCount = 0
+        
+        for (name, filename) in animationFiles {
+            // Skip if this animation was already loaded with the mesh
+            if mesh.animations[name] != nil {
+                continue
+            }
+            
+            // Try to find the file in bundle
+            var url: URL? = nil
+            
+            // Try directly in bundle
+            if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz") {
+                url = bundleURL
+            }
+            // Try in Animations subdirectory
+            else if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz", subdirectory: "Animations") {
+                url = bundleURL
+            }
+            
+            if let animURL = url {
+                if loader.loadAnimationIntoMesh(from: animURL, name: name, mesh: mesh) {
+                    loadedCount += 1
+                }
+            }
+        }
+        
+        print("[Player] Loaded \(loadedCount) additional animations")
+        print("[Player] Available animations: \(mesh.animations.keys.sorted().joined(separator: ", "))")
+    }
+    
+    // MARK: - Enemy Skeletal Animation Loading
+    
+    /// Load the enemy skeletal model
+    private func loadEnemyModel() {
+        let skeletalLoader = SkeletalMeshLoader(device: device)
+        
+        // Try to find the idle animation as the base (it has the full mesh + skeleton)
+        var baseAnimationURL: URL? = nil
+        
+        // Try to find mutant-idle as the base enemy model
+        if let url = Bundle.main.url(forResource: "mutant-idle", withExtension: "usdz") {
+            baseAnimationURL = url
+            print("[Enemy] Found mutant-idle.usdz as base")
+        } else if let url = Bundle.main.url(forResource: "mutant-idle", withExtension: "usdz", subdirectory: "Animations") {
+            baseAnimationURL = url
+            print("[Enemy] Found mutant-idle.usdz in Animations subdirectory")
+        }
+        
+        guard let meshURL = baseAnimationURL else {
+            print("[Enemy] Could not find mutant-idle.usdz")
+            // List available enemy animation files
+            if let resourcePath = Bundle.main.resourcePath {
+                let fileManager = FileManager.default
+                if let enumerator = fileManager.enumerator(atPath: resourcePath) {
+                    print("[Enemy] Searching bundle for mutant files...")
+                    while let file = enumerator.nextObject() as? String {
+                        if file.lowercased().contains("mutant") {
+                            print("[Enemy]   Found: \(file)")
+                        }
+                    }
+                }
+            }
+            return
+        }
+        
+        if let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: meshURL, materialIndex: MaterialIndex.enemy.rawValue) {
+            print("[Enemy] Successfully loaded skeletal mesh!")
+            
+            // Load additional enemy animations
+            loadEnemyAnimations(into: skeletalMesh, loader: skeletalLoader)
+            
+            // Store the mesh
+            enemySkeletalMesh = skeletalMesh
+            
+            // Calculate model transform based on bounds
+            let bounds = skeletalMesh.boundingBox
+            let modelSize = bounds.max - bounds.min
+            let modelCenter = (bounds.max + bounds.min) / 2
+            
+            print("[Enemy] Model bounds: min=\(bounds.min), max=\(bounds.max)")
+            print("[Enemy] Model size: \(modelSize)")
+            
+            // Detect coordinate system (same as player)
+            let isYUp = abs(bounds.min.y) < abs(bounds.max.y) * 0.1 && bounds.max.y > bounds.max.z
+            
+            let modelHeight: Float
+            let targetHeight: Float = 2.2  // Enemies slightly taller than player
+            
+            if isYUp {
+                modelHeight = modelSize.y
+            } else {
+                modelHeight = modelSize.z
+            }
+            
+            enemyModelScale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+            let scaledMinHeight = (isYUp ? bounds.min.y : bounds.min.z) * enemyModelScale
+            
+            if isYUp {
+                enemyModelMatrix = translation(0, -scaledMinHeight, 0) *
+                                   rotationY(.pi) *
+                                   scaling(enemyModelScale, enemyModelScale, enemyModelScale) *
+                                   translation(-modelCenter.x, 0, -modelCenter.z)
+            } else {
+                enemyModelMatrix = translation(0, -scaledMinHeight, 0) *
+                                   rotationY(.pi) *
+                                   rotationX(.pi / 2) *
+                                   scaling(enemyModelScale, enemyModelScale, enemyModelScale) *
+                                   translation(-modelCenter.x, -modelCenter.y, 0)
+            }
+            
+            useSkeletalEnemies = true
+            
+            print("[Enemy] ✅ Skeletal animation enabled with \(skeletalMesh.bones.count) bones!")
+            print("[Enemy] ✅ Loaded \(skeletalMesh.animations.count) animations")
+            print("[Enemy] Model scale: \(enemyModelScale)")
+            if skeletalMesh.texture != nil {
+                print("[Enemy] ✅ Texture loaded from USDZ")
+            } else {
+                print("[Enemy] ⚠️ No texture in USDZ, will use fallback texture")
+            }
+        } else {
+            print("[Enemy] Failed to load skeletal mesh, using procedural enemies")
+        }
+    }
+    
+    /// Load additional enemy animations from USDZ files
+    private func loadEnemyAnimations(into mesh: SkeletalMesh, loader: SkeletalMeshLoader) {
+        // List of enemy animation files
+        let animationFiles: [(name: String, filename: String)] = [
+            // Idle animations
+            ("mutant-idle", "mutant-idle"),
+            ("mutant-idle-2", "mutant-idle-2"),
+            ("mutant-breathing-idle", "mutant-breathing-idle"),
+            
+            // Movement animations
+            ("mutant-walking", "mutant-walking"),
+            ("mutant-run", "mutant-run"),
+            
+            // Attack animations
+            ("mutant-punch", "mutant-punch"),
+            ("mutant-swiping", "mutant-swiping"),
+            ("mutant-jump-attack", "mutant-jump-attack"),
+            
+            // Roar/aggro animations
+            ("mutant-roaring", "mutant-roaring"),
+            ("mutant-flexing-muscles", "mutant-flexing-muscles"),
+            
+            // Death animation
+            ("mutant-dying", "mutant-dying"),
+            
+            // Jump animations
+            ("mutant-jumping", "mutant-jumping"),
+            ("mutant-jumping-2", "mutant-jumping-2"),
+            
+            // Turn animations
+            ("mutant-left-turn-45", "mutant-left-turn-45"),
+            ("mutant-right-turn-45", "mutant-right-turn-45"),
+            ("mutant-right-turn-45-2", "mutant-right-turn-45-2"),
+            ("mutant-right-turn-90", "mutant-right-turn-90"),
+        ]
+        
+        var loadedCount = 0
+        
+        for (name, filename) in animationFiles {
+            // Skip if already loaded
+            if mesh.animations[name] != nil {
+                continue
+            }
+            
+            // Try to find the file in bundle
+            var url: URL? = nil
+            
+            // Try directly in bundle
+            if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz") {
+                url = bundleURL
+            }
+            // Try in Animations subdirectory
+            else if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz", subdirectory: "Animations") {
+                url = bundleURL
+            }
+            
+            if let animURL = url {
+                if loader.loadAnimationIntoMesh(from: animURL, name: name, mesh: mesh) {
+                    loadedCount += 1
+                }
+            }
+        }
+        
+        print("[Enemy] Loaded \(loadedCount) additional animations")
+        print("[Enemy] Available animations: \(mesh.animations.keys.sorted().joined(separator: ", "))")
+    }
+    
+    /// Create or get an AnimatedEnemy instance for a given enemy
+    private func getAnimatedEnemy(for enemy: Enemy) -> AnimatedEnemy? {
+        if let existing = animatedEnemies[enemy.id] {
+            return existing
+        }
+        
+        guard let mesh = enemySkeletalMesh else { return nil }
+        
+        let animatedEnemy = AnimatedEnemy(device: device, mesh: mesh)
+        animatedEnemies[enemy.id] = animatedEnemy
+        return animatedEnemy
+    }
+    
+    /// Update animation state for an enemy based on its AI state
+    private func updateEnemyAnimationState(animatedEnemy: AnimatedEnemy, enemy: Enemy) {
+        let newState: EnemyAnimationState
+        
+        switch enemy.state {
+        case .idle:
+            newState = .idle
+        case .patrolling:
+            newState = .walking
+        case .chasing:
+            newState = .running
+        case .attacking:
+            newState = .attacking
+        case .hurt:
+            newState = .hurt
+        case .dead:
+            if animatedEnemy.animationState == .dying && animatedEnemy.isAnimationComplete {
+                newState = .dead
+            } else if animatedEnemy.animationState != .dying && animatedEnemy.animationState != .dead {
+                newState = .dying
+            } else {
+                newState = animatedEnemy.animationState
+            }
+        }
+        
+        animatedEnemy.setAnimationState(newState)
+    }
+    
+    /// Clean up animated enemies that are no longer needed
+    private func cleanupAnimatedEnemies() {
+        let activeEnemyIDs = Set(enemyManager.enemies.map { $0.id })
+        
+        // Remove animated enemies for dead enemies that have been removed from manager
+        for enemyID in animatedEnemies.keys {
+            if !activeEnemyIDs.contains(enemyID) {
+                animatedEnemies.removeValue(forKey: enemyID)
+            }
         }
     }
     

@@ -17,26 +17,46 @@ enum CharacterAnimationState {
     case walking
     case running
     case attacking
+    case blocking
     case jumping
     case dying
     case dead
+    case impact  // Hit reaction
     
+    /// The animation file name (without extension) for this state
     var animationName: String {
         switch self {
-        case .idle: return "idle"
-        case .walking: return "walk"
-        case .running: return "run"
-        case .attacking: return "attack"
-        case .jumping: return "jump"
-        case .dying: return "die"
-        case .dead: return "dead"
+        case .idle: return "sword-and-shield-idle"
+        case .walking: return "sword-and-shield-walk"
+        case .running: return "sword-and-shield-run"
+        case .attacking: return "sword-and-shield-slash"
+        case .blocking: return "sword-and-shield-block"
+        case .jumping: return "sword-and-shield-jump"
+        case .dying: return "sword-and-shield-death"
+        case .dead: return "sword-and-shield-death"
+        case .impact: return "sword-and-shield-impact"
+        }
+    }
+    
+    /// Fallback animation names if primary isn't found
+    var fallbackNames: [String] {
+        switch self {
+        case .idle: return ["sword-and-shield-idle-2", "sword-and-shield-idle-3", "idle", "walk"]
+        case .walking: return ["sword-and-shield-walk-2", "walk", "sword-and-shield-run"]
+        case .running: return ["sword-and-shield-run-2", "run", "sword-and-shield-walk"]
+        case .attacking: return ["sword-and-shield-slash-2", "sword-and-shield-attack", "attack"]
+        case .blocking: return ["sword-and-shield-block-2", "sword-and-shield-block-idle", "block"]
+        case .jumping: return ["sword-and-shield-jump-2", "jump"]
+        case .dying: return ["sword-and-shield-death-2", "die", "death"]
+        case .dead: return ["sword-and-shield-death-2", "dead", "death"]
+        case .impact: return ["sword-and-shield-impact-2", "sword-and-shield-impact-3", "hit"]
         }
     }
     
     var isLooping: Bool {
         switch self {
-        case .idle, .walking, .running: return true
-        case .attacking, .jumping, .dying, .dead: return false
+        case .idle, .walking, .running, .blocking: return true
+        case .attacking, .jumping, .dying, .dead, .impact: return false
         }
     }
 }
@@ -173,16 +193,23 @@ final class AnimatedCharacter {
     
     /// Get the current bone transforms from the active animation
     private func getCurrentBoneTransforms() -> [simd_float4x4]? {
-        let animName = animationState.animationName
         let boneCount = mesh.bones.count
         
-        if let animation = mesh.animations[animName] {
+        // Try primary animation name
+        if let animation = mesh.animations[animationState.animationName] {
             return animation.getBoneTransforms(at: animationTime, boneCount: boneCount)
         }
         
-        // Fallback to idle
-        if let idleAnim = mesh.animations["idle"] {
-            return idleAnim.getBoneTransforms(at: animationTime, boneCount: boneCount)
+        // Try fallback names
+        for fallbackName in animationState.fallbackNames {
+            if let animation = mesh.animations[fallbackName] {
+                return animation.getBoneTransforms(at: animationTime, boneCount: boneCount)
+            }
+        }
+        
+        // Last resort: use any available animation (for debugging)
+        if let firstAnim = mesh.animations.values.first {
+            return firstAnim.getBoneTransforms(at: animationTime, boneCount: boneCount)
         }
         
         return nil
@@ -201,7 +228,7 @@ final class AnimatedCharacter {
     
     // MARK: - Rendering
     
-    /// Draw the animated character
+    /// Draw the animated character with optional equipment visibility control
     func draw(encoder: MTLRenderCommandEncoder,
               modelMatrix: simd_float4x4,
               viewProjectionMatrix: simd_float4x4,
@@ -211,7 +238,9 @@ final class AnimatedCharacter {
               ambientIntensity: Float,
               diffuseIntensity: Float,
               timeOfDay: Float,
-              pointLights: [PointLight]) {
+              pointLights: [PointLight],
+              showShield: Bool = true,
+              showWeapon: Bool = true) {
         
         // Update uniforms (matches SkinnedUniforms structure in shader)
         var uniforms = SkinnedUniforms()
@@ -248,8 +277,11 @@ final class AnimatedCharacter {
         encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(mesh.boneMatrixBuffer, offset: 0, index: 2)
         
-        // Draw
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: mesh.vertexCount)
+        // Draw using submesh ranges for selective equipment rendering
+        let drawRanges = mesh.getDrawRanges(showShield: showShield, showWeapon: showWeapon)
+        for range in drawRanges {
+            encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
+        }
     }
 }
 
@@ -300,4 +332,5 @@ private func lerpMatrix(_ a: simd_float4x4, _ b: simd_float4x4, t: Float) -> sim
         simd_mix(a.columns.3, b.columns.3, simd_float4(repeating: t))
     )
 }
+
 

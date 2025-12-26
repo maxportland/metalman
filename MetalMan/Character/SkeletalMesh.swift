@@ -130,6 +130,38 @@ private func lerpMatrix(_ a: simd_float4x4, _ b: simd_float4x4, t: Float) -> sim
     )
 }
 
+// MARK: - Submesh Info
+
+/// Equipment type for submesh classification
+enum SubmeshEquipmentType {
+    case none      // Body/armor - always rendered
+    case shield    // Shield - rendered when shield equipped
+    case weapon    // Weapon/sword - rendered when sword equipped
+}
+
+/// Tracks information about a submesh within the skeletal mesh
+struct SubmeshInfo {
+    let name: String           // Name from material or submesh
+    let vertexStart: Int       // Starting vertex index
+    let vertexCount: Int       // Number of vertices in this submesh
+    var equipmentType: SubmeshEquipmentType = .none  // Classified equipment type
+    
+    /// Check if this submesh likely represents a shield
+    var isShield: Bool {
+        if equipmentType == .shield { return true }
+        let lowercaseName = name.lowercased()
+        return lowercaseName.contains("shield") || lowercaseName.contains("buckler")
+    }
+    
+    /// Check if this submesh likely represents a weapon/sword
+    var isWeapon: Bool {
+        if equipmentType == .weapon { return true }
+        let lowercaseName = name.lowercased()
+        return lowercaseName.contains("sword") || lowercaseName.contains("weapon") || 
+               lowercaseName.contains("blade") || lowercaseName.contains("axe")
+    }
+}
+
 // MARK: - Skeletal Mesh
 
 /// A loaded skeletal mesh with skeleton and optional animations
@@ -138,7 +170,7 @@ final class SkeletalMesh {
     let vertexCount: Int
     let bones: [Bone]
     let boneNameToIndex: [String: Int]
-    let animations: [String: AnimationClip]
+    var animations: [String: AnimationClip]  // var to allow adding animations
     let boundingBox: (min: simd_float3, max: simd_float3)
     
     /// Texture extracted from the USDZ file (if available)
@@ -150,6 +182,9 @@ final class SkeletalMesh {
     /// Buffer containing bone transform matrices (updated each frame)
     let boneMatrixBuffer: MTLBuffer
     
+    /// Information about submeshes (for selective rendering)
+    let submeshes: [SubmeshInfo]
+    
     /// Maximum number of bones supported
     static let maxBones = 128
     
@@ -160,14 +195,24 @@ final class SkeletalMesh {
          animations: [String: AnimationClip] = [:], 
          boundingBox: (min: simd_float3, max: simd_float3),
          texture: MTLTexture? = nil,
-         hasValidJointData: Bool = false) {
+         hasValidJointData: Bool = false,
+         submeshes: [SubmeshInfo] = []) {
         
         self.texture = texture
         self.hasValidJointData = hasValidJointData
+        self.submeshes = submeshes
         
         // Use actual MemoryLayout stride to ensure buffer matches array layout
         let actualStride = MemoryLayout<SkinnedVertex>.stride
         print("[SkeletalMesh] Creating vertex buffer with \(vertices.count) vertices, stride=\(actualStride)")
+        
+        // Log submesh info
+        if !submeshes.isEmpty {
+            print("[SkeletalMesh] Submeshes:")
+            for (i, sub) in submeshes.enumerated() {
+                print("[SkeletalMesh]   [\(i)] '\(sub.name)' - vertices \(sub.vertexStart)..<\(sub.vertexStart + sub.vertexCount) (shield=\(sub.isShield), weapon=\(sub.isWeapon))")
+            }
+        }
         
         self.vertexBuffer = device.makeBuffer(
             bytes: vertices,
@@ -191,6 +236,28 @@ final class SkeletalMesh {
         
         // Initialize with bind pose
         resetToBindPose()
+    }
+    
+    /// Get vertex ranges to draw, optionally excluding shield/weapon
+    func getDrawRanges(showShield: Bool = true, showWeapon: Bool = true) -> [(start: Int, count: Int)] {
+        if submeshes.isEmpty {
+            // No submesh info - draw everything
+            return [(0, vertexCount)]
+        }
+        
+        var ranges: [(start: Int, count: Int)] = []
+        for sub in submeshes {
+            // Skip shield if not equipped
+            if sub.isShield && !showShield {
+                continue
+            }
+            // Skip weapon if not equipped
+            if sub.isWeapon && !showWeapon {
+                continue
+            }
+            ranges.append((sub.vertexStart, sub.vertexCount))
+        }
+        return ranges
     }
     
     /// Reset all bones to bind pose (identity - no deformation)
@@ -389,13 +456,15 @@ final class SkeletalMeshLoader {
         var minBound = simd_float3(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
         var maxBound = simd_float3(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
         var hasValidJointData = false
+        var submeshInfos: [SubmeshInfo] = []
         
         for mesh in meshObjects {
             extractSkinnedVertices(mesh, materialIndex: materialIndex, 
                                    boneNameToIndex: boneNameToIndex,
                                    vertices: &vertices, 
                                    minBound: &minBound, maxBound: &maxBound,
-                                   hasValidJointData: &hasValidJointData)
+                                   hasValidJointData: &hasValidJointData,
+                                   submeshInfos: &submeshInfos)
         }
         
         if vertices.isEmpty {
@@ -456,6 +525,45 @@ final class SkeletalMeshLoader {
         
         print("[SkeletalLoader] Total animations: \(animations.count)")
         
+        // Classify submeshes by size if name-based detection didn't work
+        // For Mixamo characters: smaller submeshes are typically equipment (sword, shield)
+        var classifiedSubmeshes = submeshInfos
+        
+        // Check if any submeshes were already detected by name
+        let hasNameBasedDetection = classifiedSubmeshes.contains { $0.isShield || $0.isWeapon }
+        
+        if !hasNameBasedDetection && classifiedSubmeshes.count >= 2 {
+            // Sort by vertex count to find the smallest submeshes (likely equipment)
+            let sortedBySize = classifiedSubmeshes.enumerated()
+                .sorted { $0.element.vertexCount < $1.element.vertexCount }
+            
+            // The two smallest submeshes are likely shield and weapon
+            // Shield typically has more vertices than sword
+            if sortedBySize.count >= 2 {
+                let smallestIdx = sortedBySize[0].offset
+                let secondSmallestIdx = sortedBySize[1].offset
+                
+                let smallest = classifiedSubmeshes[smallestIdx]
+                let secondSmallest = classifiedSubmeshes[secondSmallestIdx]
+                
+                // Only classify if they're significantly smaller than the main body
+                // (less than 5% of total vertices each)
+                let totalVerts = classifiedSubmeshes.reduce(0) { $0 + $1.vertexCount }
+                let smallestRatio = Float(smallest.vertexCount) / Float(totalVerts)
+                let secondSmallestRatio = Float(secondSmallest.vertexCount) / Float(totalVerts)
+                
+                if smallestRatio < 0.05 && secondSmallestRatio < 0.05 {
+                    // Smallest is shield, second smallest is sword (based on Paladin model)
+                    classifiedSubmeshes[smallestIdx].equipmentType = .shield
+                    classifiedSubmeshes[secondSmallestIdx].equipmentType = .weapon
+                    
+                    print("[SkeletalLoader] Size-based equipment detection:")
+                    print("[SkeletalLoader]   Shield: submesh[\(smallestIdx)] '\(smallest.name)' (\(smallest.vertexCount) verts)")
+                    print("[SkeletalLoader]   Weapon: submesh[\(secondSmallestIdx)] '\(secondSmallest.name)' (\(secondSmallest.vertexCount) verts)")
+                }
+            }
+        }
+        
         return SkeletalMesh(
             device: device,
             vertices: vertices,
@@ -464,7 +572,8 @@ final class SkeletalMeshLoader {
             animations: animations,
             boundingBox: (minBound, maxBound),
             texture: texture,
-            hasValidJointData: hasValidJointData
+            hasValidJointData: hasValidJointData,
+            submeshes: classifiedSubmeshes
         )
     }
     
@@ -922,7 +1031,8 @@ final class SkeletalMeshLoader {
                                         boneNameToIndex: [String: Int],
                                         vertices: inout [SkinnedVertex],
                                         minBound: inout simd_float3, maxBound: inout simd_float3,
-                                        hasValidJointData: inout Bool) {
+                                        hasValidJointData: inout Bool,
+                                        submeshInfos: inout [SubmeshInfo]) {
         
         let vertexBuffers = mesh.vertexBuffers
         guard !vertexBuffers.isEmpty else { return }
@@ -985,6 +1095,11 @@ final class SkeletalMeshLoader {
         guard let submeshes = mesh.submeshes as? [MDLSubmesh] else { return }
         
         for submesh in submeshes {
+            // Track submesh info for selective rendering
+            let submeshStartVertex = vertices.count
+            let submeshName = submesh.material?.name ?? submesh.name
+            print("[SkeletalLoader] Processing submesh: '\(submeshName)'")
+            
             let indexBuffer = submesh.indexBuffer
             let indexData = indexBuffer.map()
             let indexCount = submesh.indexCount
@@ -1097,6 +1212,18 @@ final class SkeletalMeshLoader {
                     )
                     vertices.append(vertex)
                 }
+            }
+            
+            // Record submesh info for selective rendering
+            let submeshVertexCount = vertices.count - submeshStartVertex
+            if submeshVertexCount > 0 {
+                let info = SubmeshInfo(
+                    name: submeshName,
+                    vertexStart: submeshStartVertex,
+                    vertexCount: submeshVertexCount
+                )
+                submeshInfos.append(info)
+                print("[SkeletalLoader] Submesh '\(submeshName)': \(submeshVertexCount) vertices (shield=\(info.isShield), weapon=\(info.isWeapon))")
             }
         }
     }
@@ -1605,5 +1732,92 @@ final class SkeletalMeshLoader {
             simd_float4(rotation.columns.2, 0),
             simd_float4(translation, 1)
         )
+    }
+    
+    // MARK: - Load Additional Animations
+    
+    /// Load animation from a USDZ file and add it to an existing SkeletalMesh
+    /// - Parameters:
+    ///   - url: URL of the animation USDZ file
+    ///   - name: Name to give the animation (used for lookup)
+    ///   - mesh: The SkeletalMesh to add the animation to
+    /// - Returns: True if animation was loaded successfully
+    func loadAnimationIntoMesh(from url: URL, name: String, mesh: SkeletalMesh) -> Bool {
+        print("[SkeletalLoader] Loading animation '\(name)' from: \(url.lastPathComponent)")
+        print("[SkeletalLoader] Full path: \(url.path)")
+        
+        // Create a FRESH allocator for each animation to avoid caching issues
+        let allocator = MTKMeshBufferAllocator(device: device)
+        
+        // Load the USDZ asset - use the full URL to ensure distinct loading
+        let asset = MDLAsset(url: url, vertexDescriptor: nil, bufferAllocator: allocator)
+        
+        // Debug: Print asset object pointer to verify it's distinct
+        let assetPtr = Unmanaged.passUnretained(asset).toOpaque()
+        print("[SkeletalLoader] Asset object: \(assetPtr)")
+        
+        // Check time range
+        let duration = asset.endTime - asset.startTime
+        print("[SkeletalLoader] Asset time range: \(asset.startTime) to \(asset.endTime) (duration: \(duration)s)")
+        
+        if duration <= 0 {
+            print("[SkeletalLoader] No animation duration in file")
+            return false
+        }
+        
+        // Extract animations using ModelIO
+        let extractedAnimations = ModelIOAnimationExtractor.extractFromMDLAsset(asset, device: device)
+        
+        if extractedAnimations.isEmpty {
+            print("[SkeletalLoader] No animations found in '\(url.lastPathComponent)'")
+            return false
+        }
+        
+        // Convert extracted animations to AnimationClip and add to mesh
+        for extracted in extractedAnimations {
+            var keyframes: [AnimationKeyframe] = []
+            
+            for extractedKF in extracted.keyframes {
+                keyframes.append(AnimationKeyframe(time: extractedKF.time, boneTransforms: extractedKF.localTransforms))
+            }
+            
+            if !keyframes.isEmpty {
+                let clip = AnimationClip(name: name, duration: extracted.duration, keyframes: keyframes)
+                mesh.animations[name] = clip
+                print("[SkeletalLoader] ✅ Added animation '\(name)' (\(keyframes.count) keyframes, \(extracted.duration)s)")
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    /// Load multiple animations from USDZ files in a directory
+    /// - Parameters:
+    ///   - directory: URL of the directory containing animation USDZ files
+    ///   - mesh: The SkeletalMesh to add animations to
+    /// - Returns: Number of animations successfully loaded
+    func loadAnimationsFromDirectory(at directory: URL, into mesh: SkeletalMesh) -> Int {
+        var loadedCount = 0
+        
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+            print("[SkeletalLoader] Cannot read directory: \(directory.path)")
+            return 0
+        }
+        
+        let usdzFiles = contents.filter { $0.pathExtension.lowercased() == "usdz" }
+        print("[SkeletalLoader] Found \(usdzFiles.count) USDZ files in \(directory.lastPathComponent)")
+        
+        for fileURL in usdzFiles {
+            // Use filename (without extension) as animation name
+            let animName = fileURL.deletingPathExtension().lastPathComponent
+            
+            if loadAnimationIntoMesh(from: fileURL, name: animName, mesh: mesh) {
+                loadedCount += 1
+            }
+        }
+        
+        print("[SkeletalLoader] Loaded \(loadedCount) of \(usdzFiles.count) animations")
+        return loadedCount
     }
 }

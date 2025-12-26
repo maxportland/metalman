@@ -489,6 +489,9 @@ class ModelIOAnimationExtractor {
         let animJointPaths = animation.jointPaths
         let animJointCount = animJointPaths.count
         
+        // Debug: Print unique identifier for this animation object
+        let animPtr = Unmanaged.passUnretained(animation).toOpaque()
+        print("[ModelIO-Deep] Packed animation object: \(animPtr)")
         print("[ModelIO-Deep] Packed animation has \(animJointCount) joints")
         print("[ModelIO-Deep] Animation joint paths (first 10):")
         for (i, path) in animJointPaths.prefix(10).enumerated() {
@@ -526,13 +529,12 @@ class ModelIOAnimationExtractor {
         
         print("[ModelIO-Deep] Mapped \(animToSkeletonMap.count) of \(animJointCount) animation joints to skeleton")
         
-        // For Mixamo walk animations, only use frames 1-32 (the walk cycle loop)
-        // Frame 1 starts at 1/30 = 0.033s, Frame 32 ends at 32/30 = 1.067s
+        // Sample at 30fps for the full animation duration
         let sampleRate: Float = 30.0
-        let walkCycleFrames = 32  // Only use first 32 frames for looping walk
-        let walkCycleDuration = Float(walkCycleFrames) / sampleRate  // ~1.067 seconds
+        let totalFrames = Int(Float(duration) * sampleRate)
+        let animDuration = Float(duration)
         
-        print("[ModelIO-Deep] Extracting walk cycle: \(walkCycleFrames) frames, duration: \(walkCycleDuration)s")
+        print("[ModelIO-Deep] Extracting animation: \(totalFrames) frames, duration: \(animDuration)s")
         
         var keyframes: [ExtractedKeyframe] = []
         
@@ -541,17 +543,36 @@ class ModelIOAnimationExtractor {
         let firstTimeRotations = animation.rotations.floatQuaternionArray(atTime: 0)
         let firstTimeScales = animation.scales.float3Array(atTime: 0)
         
-        print("[ModelIO-Deep] First frame sample:")
+        print("[ModelIO-Deep] First frame sample (t=0):")
         print("[ModelIO-Deep]   Translations count: \(firstTimeTranslations.count)")
         print("[ModelIO-Deep]   Rotations count: \(firstTimeRotations.count)")
         print("[ModelIO-Deep]   Scales count: \(firstTimeScales.count)")
         
         if !firstTimeTranslations.isEmpty {
-            print("[ModelIO-Deep]   First joint trans: \(firstTimeTranslations[0])")
+            print("[ModelIO-Deep]   Joint 0 trans: \(firstTimeTranslations[0])")
         }
         if !firstTimeRotations.isEmpty {
             let q = firstTimeRotations[0]
-            print("[ModelIO-Deep]   First joint rot: (x:\(q.imag.x), y:\(q.imag.y), z:\(q.imag.z), w:\(q.real))")
+            print("[ModelIO-Deep]   Joint 0 rot: (x:\(q.imag.x), y:\(q.imag.y), z:\(q.imag.z), w:\(q.real))")
+        }
+        
+        // Sample mid-animation to verify data changes over time
+        let midTime = duration / 2.0
+        let midTranslations = animation.translations.float3Array(atTime: midTime)
+        let midRotations = animation.rotations.floatQuaternionArray(atTime: midTime)
+        
+        print("[ModelIO-Deep] Mid frame sample (t=\(midTime)):")
+        if !midTranslations.isEmpty {
+            print("[ModelIO-Deep]   Joint 0 trans: \(midTranslations[0])")
+            // Check if first and mid frames differ
+            if !firstTimeTranslations.isEmpty {
+                let diff = simd_distance(firstTimeTranslations[0], midTranslations[0])
+                print("[ModelIO-Deep]   Trans difference from frame 0: \(diff)")
+            }
+        }
+        if !midRotations.isEmpty {
+            let q = midRotations[0]
+            print("[ModelIO-Deep]   Joint 0 rot: (x:\(q.imag.x), y:\(q.imag.y), z:\(q.imag.z), w:\(q.real))")
         }
         
         // Find the root bone (Hips) index for stripping root motion
@@ -576,8 +597,8 @@ class ModelIOAnimationExtractor {
             }
         }
         
-        // Only sample the walk cycle portion (frames 0 to walkCycleFrames-1)
-        for sampleIdx in 0..<walkCycleFrames {
+        // Sample all frames of the animation
+        for sampleIdx in 0..<totalFrames {
             let time = TimeInterval(Float(sampleIdx) / sampleRate)
             
             // Get translation, rotation, scale at this time
@@ -637,10 +658,10 @@ class ModelIOAnimationExtractor {
             return nil
         }
         
-        print("[ModelIO-Deep] ✅ Extracted \(keyframes.count) keyframes from packed animation (walk cycle only)")
+        print("[ModelIO-Deep] ✅ Extracted \(keyframes.count) keyframes from packed animation")
         return ExtractedAnimation(
-            name: "walk",
-            duration: walkCycleDuration,
+            name: "animation",
+            duration: animDuration,
             jointNames: jointNames,
             keyframes: keyframes
         )

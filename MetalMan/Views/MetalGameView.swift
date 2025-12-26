@@ -368,6 +368,9 @@ struct MetalGameView: NSViewRepresentable {
             // Attack with F key (keyCode 3)
             renderer.attackPressed = pressedKeys.contains(3)
             
+            // Run with R key (keyCode 15)
+            renderer.runPressed = pressedKeys.contains(15)
+            
             // Toggle inventory with I key (keyCode 34)
             let inventoryKeyPressed = pressedKeys.contains(34)
             if inventoryKeyPressed && !inventoryKeyWasPressed {
