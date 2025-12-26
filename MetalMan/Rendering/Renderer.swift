@@ -102,7 +102,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var treeModels: [TreeModel] = []
     private var treeInstances: [TreeInstance] = []
     private var treeUniformBuffer: MTLBuffer!
-    private var useModelTrees: Bool = false
     
     // MARK: - Textures (Normal Maps)
     
@@ -339,8 +338,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     private var groundVertexBuffer: MTLBuffer
     private var groundVertexCount: Int = 0
-    private var treeVertexBuffer: MTLBuffer
-    private var treeVertexCount: Int = 0
     private var rockVertexBuffer: MTLBuffer
     private var rockVertexCount: Int = 0
     private var poleVertexBuffer: MTLBuffer
@@ -459,10 +456,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         structureVertexCount = structureResult.1
         allColliders.append(contentsOf: structureResult.2)
         
-        // 2. Trees second (medium-large objects)
+        // 2. Trees - generate colliders and camera blockers (rendering now uses USD models)
         let treeResult = GeometryGenerator.makeTreeMeshes(device: device)
-        treeVertexBuffer = treeResult.0
-        treeVertexCount = treeResult.1
+        // treeResult.0 and .1 (vertex buffer/count) no longer used - USD models render trees
         allColliders.append(contentsOf: treeResult.2)
         cameraBlockers.append(contentsOf: treeResult.3)
         
@@ -1639,11 +1635,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         encoder.setVertexBuffer(groundVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: groundVertexCount)
         
-        // Only draw procedural trees if we're not using USD model trees
-        if !useModelTrees {
-            encoder.setVertexBuffer(treeVertexBuffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: treeVertexCount)
-        }
+        // Trees are now rendered via drawTrees() using USD models
         
         encoder.setVertexBuffer(rockVertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: rockVertexCount)
@@ -3110,17 +3102,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         print("[Trees] Successfully loaded \(treeModels.count) / \(treeNames.count) tree models")
         
         guard !treeModels.isEmpty else {
-            print("[Trees] ❌ No tree models loaded, falling back to procedural trees")
+            print("[Trees] ❌ No tree models loaded - trees will not be displayed")
             print("[Trees] ==========================================")
             return
         }
         
-        // Generate tree instances using the same placement logic as procedural trees
+        // Generate tree instances
         print("[Trees] Generating tree instances...")
         generateTreeInstances()
         
-        useModelTrees = true
-        print("[Trees] ✅ Tree model system enabled")
+        print("[Trees] ✅ Tree model system ready")
         print("[Trees] Total instances: \(treeInstances.count)")
         print("[Trees] ==========================================")
     }
@@ -3129,7 +3120,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         print("[Trees] generateTreeInstances() starting...")
         print("[Trees] Number of loaded tree models: \(treeModels.count)")
         
-        // Use the same seeded random placement as procedural trees
+        // Use seeded random placement for consistent tree positions
         func seededRandom(_ seed: Int) -> Float {
             var s = UInt64(seed &* 1103515245 &+ 12345)
             s = (s &* 1103515245 &+ 12345)
@@ -3196,7 +3187,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 } else {
                     skippedRandom += 1
                 }
-                seed += 6  // Match the seed increment from procedural tree generation
+                seed += 6  // Increment seed for next tree position
             }
         }
         
@@ -3232,7 +3223,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Log only once at startup
         if treeDrawLogCount == 0 {
             print("[Trees] drawTrees() called for first time")
-            print("[Trees]   useModelTrees: \(useModelTrees)")
             print("[Trees]   treeInstances.count: \(treeInstances.count)")
             print("[Trees]   treeModels.count: \(treeModels.count)")
             
@@ -3255,9 +3245,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         
-        guard useModelTrees && !treeInstances.isEmpty else {
+        guard !treeInstances.isEmpty else {
             if treeDrawLogCount == 0 {
-                print("[Trees]   ❌ Early return: useModelTrees=\(useModelTrees), instances=\(treeInstances.count)")
+                print("[Trees]   ❌ Early return: no tree instances")
             }
             treeDrawLogCount += 1
             return
