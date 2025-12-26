@@ -1163,7 +1163,9 @@ enum ItemTemplates {
 // MARK: - Save Game System
 
 /// Represents a saved game state
-struct SaveGameData: Codable {
+struct SaveGameData: Codable, Identifiable {
+    let id: UUID
+    let saveName: String  // User-provided or auto-generated name
     let timestamp: Date
     let playerName: String
     let level: Int
@@ -1182,6 +1184,19 @@ struct SaveGameData: Codable {
     let yaw: Float
     let inventoryItems: [SavedItemStack]
     let equippedItems: [String: SavedItem]  // slotName -> item
+    
+    /// Formatted timestamp for display
+    var formattedTimestamp: String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: timestamp)
+    }
+    
+    /// Summary for display in save list
+    var displaySummary: String {
+        "Level \(level) • \(gold) Gold • HP: \(currentHP)/\(maxHP)"
+    }
     
     struct SavedItem: Codable {
         let name: String
@@ -1211,20 +1226,63 @@ struct SaveGameData: Codable {
 final class SaveGameManager {
     static let shared = SaveGameManager()
     
-    private let saveFileName = "MetalMan_SaveGame.json"
+    private let savesDirectoryName = "MetalMan_Saves"
+    private let quickSaveFileName = "QuickSave.json"
     
-    private var saveFileURL: URL {
+    private var savesDirectoryURL: URL {
         let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documentsPath.appendingPathComponent(saveFileName)
+        return documentsPath.appendingPathComponent(savesDirectoryName)
     }
     
-    /// Check if a save game exists
+    private var quickSaveURL: URL {
+        savesDirectoryURL.appendingPathComponent(quickSaveFileName)
+    }
+    
+    private init() {
+        // Ensure saves directory exists
+        try? FileManager.default.createDirectory(at: savesDirectoryURL, withIntermediateDirectories: true)
+    }
+    
+    /// Check if any save game exists
     var hasSaveGame: Bool {
-        FileManager.default.fileExists(atPath: saveFileURL.path)
+        !getAllSaves().isEmpty
     }
     
-    /// Save the current game state
-    func saveGame(player: PlayerCharacter, position: simd_float3, yaw: Float) -> Bool {
+    /// Check if quick save exists
+    var hasQuickSave: Bool {
+        FileManager.default.fileExists(atPath: quickSaveURL.path)
+    }
+    
+    /// Get all saved games sorted by timestamp (newest first)
+    func getAllSaves() -> [SaveGameData] {
+        var saves: [SaveGameData] = []
+        
+        guard let files = try? FileManager.default.contentsOfDirectory(at: savesDirectoryURL, includingPropertiesForKeys: nil) else {
+            return saves
+        }
+        
+        for file in files where file.pathExtension == "json" {
+            if let data = try? Data(contentsOf: file),
+               let saveData = try? JSONDecoder().decode(SaveGameData.self, from: data) {
+                saves.append(saveData)
+            }
+        }
+        
+        return saves.sorted { $0.timestamp > $1.timestamp }
+    }
+    
+    /// Generate default save name with date/time
+    func generateDefaultSaveName() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: Date())
+    }
+    
+    /// Save the current game state with a name
+    func saveGame(player: PlayerCharacter, position: simd_float3, yaw: Float, saveName: String? = nil) -> Bool {
+        let name = saveName ?? generateDefaultSaveName()
+        let saveId = UUID()
+        
         // Convert inventory to saveable format
         var savedInventory: [SaveGameData.SavedItemStack] = []
         for slot in player.inventory.slots {
@@ -1245,6 +1303,67 @@ final class SaveGameManager {
         }
         
         let saveData = SaveGameData(
+            id: saveId,
+            saveName: name,
+            timestamp: Date(),
+            playerName: player.name,
+            level: player.vitals.level,
+            currentHP: player.vitals.currentHP,
+            maxHP: player.vitals.maxHP,
+            currentXP: player.vitals.currentXP,
+            xpToNextLevel: player.vitals.xpToNextLevel,
+            gold: player.inventory.gold,
+            strength: player.attributes.strength,
+            dexterity: player.attributes.dexterity,
+            intelligence: player.attributes.intelligence,
+            unspentPoints: player.unspentAttributePoints,
+            positionX: position.x,
+            positionY: position.y,
+            positionZ: position.z,
+            yaw: yaw,
+            inventoryItems: savedInventory,
+            equippedItems: savedEquipment
+        )
+        
+        let fileURL = savesDirectoryURL.appendingPathComponent("\(saveId.uuidString).json")
+        
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .prettyPrinted
+            let data = try encoder.encode(saveData)
+            try data.write(to: fileURL)
+            print("[SaveGame] Game saved successfully as '\(name)' to \(fileURL.path)")
+            return true
+        } catch {
+            print("[SaveGame] Failed to save game: \(error)")
+            return false
+        }
+    }
+    
+    /// Quick save (overwrites previous quick save)
+    func quickSave(player: PlayerCharacter, position: simd_float3, yaw: Float) -> Bool {
+        // Convert inventory to saveable format
+        var savedInventory: [SaveGameData.SavedItemStack] = []
+        for slot in player.inventory.slots {
+            if let stack = slot {
+                savedInventory.append(SaveGameData.SavedItemStack(
+                    item: convertItem(stack.item),
+                    quantity: stack.quantity
+                ))
+            }
+        }
+        
+        // Convert equipment to saveable format
+        var savedEquipment: [String: SaveGameData.SavedItem] = [:]
+        for slot in EquipmentSlot.allCases {
+            if let item = player.equipment.itemIn(slot) {
+                savedEquipment[slot.displayName] = convertItem(item)
+            }
+        }
+        
+        let saveData = SaveGameData(
+            id: UUID(),
+            saveName: "Quick Save",
             timestamp: Date(),
             playerName: player.name,
             level: player.vitals.level,
@@ -1269,27 +1388,28 @@ final class SaveGameManager {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .prettyPrinted
             let data = try encoder.encode(saveData)
-            try data.write(to: saveFileURL)
-            print("[SaveGame] Game saved successfully to \(saveFileURL.path)")
+            try data.write(to: quickSaveURL)
+            print("[SaveGame] Quick save successful")
             return true
         } catch {
-            print("[SaveGame] Failed to save game: \(error)")
+            print("[SaveGame] Failed to quick save: \(error)")
             return false
         }
     }
     
-    /// Load the saved game state
-    func loadGame() -> SaveGameData? {
-        guard hasSaveGame else {
-            print("[SaveGame] No save game found")
+    /// Load a specific save by ID
+    func loadGame(id: UUID) -> SaveGameData? {
+        let fileURL = savesDirectoryURL.appendingPathComponent("\(id.uuidString).json")
+        
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            print("[SaveGame] Save file not found for ID: \(id)")
             return nil
         }
         
         do {
-            let data = try Data(contentsOf: saveFileURL)
-            let decoder = JSONDecoder()
-            let saveData = try decoder.decode(SaveGameData.self, from: data)
-            print("[SaveGame] Game loaded successfully")
+            let data = try Data(contentsOf: fileURL)
+            let saveData = try JSONDecoder().decode(SaveGameData.self, from: data)
+            print("[SaveGame] Game loaded successfully: \(saveData.saveName)")
             return saveData
         } catch {
             print("[SaveGame] Failed to load game: \(error)")
@@ -1297,14 +1417,62 @@ final class SaveGameManager {
         }
     }
     
-    /// Delete the save game
-    func deleteSaveGame() {
-        do {
-            try FileManager.default.removeItem(at: saveFileURL)
-            print("[SaveGame] Save game deleted")
-        } catch {
-            print("[SaveGame] Failed to delete save game: \(error)")
+    /// Load the quick save
+    func loadQuickSave() -> SaveGameData? {
+        guard hasQuickSave else {
+            print("[SaveGame] No quick save found")
+            return nil
         }
+        
+        do {
+            let data = try Data(contentsOf: quickSaveURL)
+            let saveData = try JSONDecoder().decode(SaveGameData.self, from: data)
+            print("[SaveGame] Quick save loaded successfully")
+            return saveData
+        } catch {
+            print("[SaveGame] Failed to load quick save: \(error)")
+            return nil
+        }
+    }
+    
+    /// Load the most recent save (for backwards compatibility)
+    func loadGame() -> SaveGameData? {
+        // Try quick save first
+        if let quickSave = loadQuickSave() {
+            return quickSave
+        }
+        // Otherwise load most recent save
+        return getAllSaves().first
+    }
+    
+    /// Delete a specific save by ID
+    func deleteSave(id: UUID) {
+        let fileURL = savesDirectoryURL.appendingPathComponent("\(id.uuidString).json")
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+            print("[SaveGame] Save deleted: \(id)")
+        } catch {
+            print("[SaveGame] Failed to delete save: \(error)")
+        }
+    }
+    
+    /// Delete the quick save
+    func deleteQuickSave() {
+        do {
+            try FileManager.default.removeItem(at: quickSaveURL)
+            print("[SaveGame] Quick save deleted")
+        } catch {
+            print("[SaveGame] Failed to delete quick save: \(error)")
+        }
+    }
+    
+    /// Delete all saves
+    func deleteAllSaves() {
+        for save in getAllSaves() {
+            deleteSave(id: save.id)
+        }
+        deleteQuickSave()
+        print("[SaveGame] All saves deleted")
     }
     
     /// Convert an Item to SavedItem format

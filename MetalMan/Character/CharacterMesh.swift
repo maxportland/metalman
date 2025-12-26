@@ -169,7 +169,7 @@ class CharacterMesh {
         let torsoCenter = simd_float3(hipShiftX * 0.5, (hipY + shoulderY) / 2, hipShiftZ * 0.5 - torsoLean * 0.08)
         addRotatedBox(center: torsoCenter, size: simd_float3(0.4, shoulderY - hipY, 0.22),
                       yaw: torsoTwist, pitch: torsoLean, roll: torsoTilt,
-                      uvYStart: 0.5, uvYEnd: 0.75, material: matChar, vertices: &vertices)
+               uvYStart: 0.5, uvYEnd: 0.75, material: matChar, vertices: &vertices)
         
         // ========== ARMS ==========
         let shoulderWidth: Float = 0.25
@@ -194,21 +194,21 @@ class CharacterMesh {
             let leftShoulderPos = simd_float3(-shoulderWidth, shoulderY - 0.05, 0)
             let leftElbowPos = leftShoulderPos + simd_float3(-0.1, upperArmLength * 0.7, -0.05)
             let leftHandPos = leftElbowPos + simd_float3(-0.05, forearmLength * 0.5, 0.1)
-            
-            addLimb(from: leftShoulderPos, to: leftElbowPos, radius: 0.07, segments: 6,
-                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-            addLimb(from: leftElbowPos, to: leftHandPos, radius: 0.06, segments: 6,
-                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-            addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
-                      uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-            
+        
+        addLimb(from: leftShoulderPos, to: leftElbowPos, radius: 0.07, segments: 6,
+                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        addLimb(from: leftElbowPos, to: leftHandPos, radius: 0.06, segments: 6,
+                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        addSphere(center: leftHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
+                  uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        
             // Shield in left hand (if equipped) - held in front during jump
             if hasShieldEquipped {
                 addShield(at: leftHandPos, facingAngle: 0, isBlocking: false, vertices: &vertices)
             }
             
             // Right arm - raised up
-            let rightShoulderPos = simd_float3(shoulderWidth, shoulderY - 0.05, 0)
+        let rightShoulderPos = simd_float3(shoulderWidth, shoulderY - 0.05, 0)
             let rightElbowPos = rightShoulderPos + simd_float3(0.1, upperArmLength * 0.7, -0.05)
             let rightHandPos = rightElbowPos + simd_float3(0.05, forearmLength * 0.5, 0.1)
             
@@ -354,13 +354,13 @@ class CharacterMesh {
                 rightElbowPos = simd_float3(shoulderWidth + 0.08, shoulderY - 0.35, rightArmSwing * 0.3)
                 rightHandPos = simd_float3(shoulderWidth + 0.05, shoulderY - 0.65, rightArmSwing * 0.5)
             }
-            
-            addLimb(from: rightShoulderPos, to: rightElbowPos, radius: 0.07, segments: 6,
-                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-            addLimb(from: rightElbowPos, to: rightHandPos, radius: 0.06, segments: 6,
-                    uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
-            addSphere(center: rightHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
-                      uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        
+        addLimb(from: rightShoulderPos, to: rightElbowPos, radius: 0.07, segments: 6,
+                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        addLimb(from: rightElbowPos, to: rightHandPos, radius: 0.06, segments: 6,
+                uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
+        addSphere(center: rightHandPos, radius: 0.08, latSegments: 4, lonSegments: 6,
+                  uvYStart: 0.25, uvYEnd: 0.5, material: matChar, vertices: &vertices)
             
             // Sword in right hand (if equipped)
             if hasSwordEquipped {
@@ -381,7 +381,7 @@ class CharacterMesh {
             let kneeFlexion: Float = 1.7  // radians (~100 degrees)
             
             // Left leg - tucked
-            let leftHipPos = simd_float3(-legSeparation, hipY, 0)
+        let leftHipPos = simd_float3(-legSeparation, hipY, 0)
             // Thigh goes forward and up (hip flexion)
             let leftThighDir = simd_float3(0, -cos(hipFlexion), -sin(hipFlexion))
             let leftKneePos = leftHipPos + leftThighDir * thighLength
@@ -491,14 +491,14 @@ class CharacterMesh {
             let leftKneePos = simd_float3(-legSeparation - stanceWiden, leftKneeHeight, leftLegSwing * 0.4) + leftHipOffset * 0.5
             let leftFootHeight: Float = 0.08 + leftLegForward * 0.12
             let leftFootPos = simd_float3(-legSeparation - stanceWiden, leftFootHeight, leftLegSwing * 0.6) + leftHipOffset * 0.3
-            
-            addLimb(from: leftHipPos, to: leftKneePos, radius: 0.09, segments: 6,
-                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-            addLimb(from: leftKneePos, to: leftFootPos, radius: 0.07, segments: 6,
-                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-            addBox(center: leftFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
-                   uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-            
+        
+        addLimb(from: leftHipPos, to: leftKneePos, radius: 0.09, segments: 6,
+                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        addLimb(from: leftKneePos, to: leftFootPos, radius: 0.07, segments: 6,
+                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        addBox(center: leftFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
+               uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        
             // Right leg with attack adjustments
             let rightHipPos = simd_float3(legSeparation + stanceWiden, hipY, 0) + rightHipOffset
             let rightLegForward = max(0, -rightLegSwing / legSwingAmount)
@@ -506,13 +506,13 @@ class CharacterMesh {
             let rightKneePos = simd_float3(legSeparation + stanceWiden, rightKneeHeight, rightLegSwing * 0.4) + rightHipOffset * 0.5
             let rightFootHeight: Float = 0.08 + rightLegForward * 0.12
             let rightFootPos = simd_float3(legSeparation + stanceWiden, rightFootHeight, rightLegSwing * 0.6) + rightHipOffset * 0.3
-            
-            addLimb(from: rightHipPos, to: rightKneePos, radius: 0.09, segments: 6,
-                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-            addLimb(from: rightKneePos, to: rightFootPos, radius: 0.07, segments: 6,
-                    uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
-            addBox(center: rightFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
-                   uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        
+        addLimb(from: rightHipPos, to: rightKneePos, radius: 0.09, segments: 6,
+                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        addLimb(from: rightKneePos, to: rightFootPos, radius: 0.07, segments: 6,
+                uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
+        addBox(center: rightFootPos + simd_float3(0, -0.03, -0.05), size: simd_float3(0.1, 0.06, 0.18),
+               uvYStart: 0.75, uvYEnd: 1.0, material: matChar, vertices: &vertices)
         }
         
         // Copy to buffer

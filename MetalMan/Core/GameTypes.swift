@@ -62,7 +62,31 @@ struct LitUniforms {
     var skyColorHorizon: simd_float3
     var sunColor: simd_float3
     var timeOfDay: Float          // 0-24 hours
+    
+    // Point lights (lanterns on poles) - xyz = position, w = intensity
+    var pointLight0: simd_float4 = .zero
+    var pointLight1: simd_float4 = .zero
+    var pointLight2: simd_float4 = .zero
+    var pointLight3: simd_float4 = .zero
+    var pointLight4: simd_float4 = .zero
+    var pointLight5: simd_float4 = .zero
+    var pointLight6: simd_float4 = .zero
+    var pointLight7: simd_float4 = .zero
+    var pointLightCount: Int32 = 0
     var padding2: simd_float3 = .zero  // Alignment padding
+}
+
+// MARK: - Point Light
+
+/// Point light source (e.g., lanterns)
+struct PointLight {
+    var position: simd_float3
+    var intensity: Float
+    
+    init(position: simd_float3, intensity: Float) {
+        self.position = position
+        self.intensity = intensity
+    }
 }
 
 // MARK: - Collision Types
@@ -185,6 +209,16 @@ struct Terrain {
         let distFromCenter = sqrt(x * x + z * z)
         let flattenFactor = max(0, 1 - distFromCenter / 15.0)
         height *= (1 - flattenFactor * 0.8)
+        
+        // Flatten area for cabin at (8, 10)
+        let cabinX: Float = 8
+        let cabinZ: Float = 10
+        let cabinRadius: Float = 12.0  // Flat area radius around cabin
+        let distFromCabin = sqrt((x - cabinX) * (x - cabinX) + (z - cabinZ) * (z - cabinZ))
+        if distFromCabin < cabinRadius {
+            let cabinFlattenFactor = 1.0 - (distFromCabin / cabinRadius)
+            height = height * (1 - cabinFlattenFactor)  // Blend towards 0 (flat)
+        }
         
         return height
     }

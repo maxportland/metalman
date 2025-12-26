@@ -14,10 +14,16 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let wireframePipelineState: MTLRenderPipelineState
     private let litPipelineState: MTLRenderPipelineState
     private let shadowPipelineState: MTLRenderPipelineState
+    private var skinnedPipelineState: MTLRenderPipelineState?  // For skeletal animation
+    private var skinnedShadowPipelineState: MTLRenderPipelineState?  // Shadow pass for skeletal
     private let depthStencilState: MTLDepthStencilState
     private let depthStencilStateNoWrite: MTLDepthStencilState
     private let depthStencilStateSkybox: MTLDepthStencilState
     private let shadowDepthStencilState: MTLDepthStencilState
+    
+    // Skeletal Animation
+    private var animatedCharacter: AnimatedCharacter?
+    private var useSkeletalAnimation: Bool = false  // Toggle between old/new character system
     
     // Samplers
     private let textureSampler: MTLSamplerState
@@ -296,6 +302,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var rockVertexCount: Int = 0
     private var poleVertexBuffer: MTLBuffer
     private var poleVertexCount: Int = 0
+    private var lanternPositions: [simd_float3] = []
     private var structureVertexBuffer: MTLBuffer
     private var structureVertexCount: Int = 0
     private var skyboxVertexBuffer: MTLBuffer
@@ -309,6 +316,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var litUniformBuffer: MTLBuffer
     private var characterUniformBuffer: MTLBuffer
     private var skyboxUniformBuffer: MTLBuffer
+    private var cabinUniformBuffer: MTLBuffer
     private var enemyUniformBuffer: MTLBuffer  // Large buffer for all enemies
     
     // Collision
@@ -429,6 +437,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         poleVertexBuffer = poleResult.0
         poleVertexCount = poleResult.1
         allColliders.append(contentsOf: poleResult.2)
+        lanternPositions = poleResult.3
         
         // 5. Create treasure chests
         self.interactables = Renderer.createTreasureChests()
@@ -439,8 +448,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         self.colliders = allColliders
         
-        // Create character mesh
+        // Create character mesh (fallback)
         self.characterMesh = CharacterMesh(device: device)
+        
+        // Try to create skinned pipelines and load skeletal character
+        self.skinnedPipelineState = Renderer.createSkinnedPipeline(device: device, library: library, view: view)
+        self.skinnedShadowPipelineState = Renderer.createSkinnedShadowPipeline(device: device, library: library)
         
         // Create enemy mesh and manager
         self.enemyMesh = EnemyMesh(device: device)
@@ -455,6 +468,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         litUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
         characterUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
         skyboxUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
+        cabinUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
         // Enemy uniform buffer - large enough for 100 enemies with proper alignment
         let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255  // 256-byte aligned
         enemyUniformBuffer = device.makeBuffer(length: uniformStride * 100, options: .storageModeShared)!
@@ -466,6 +480,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Load cabin USD model (must be after super.init)
         loadCabinModel()
+        
+        // Load skeletal player model (must be after super.init)
+        loadPlayerModel()
         
         // Spawn enemies (higher chance near treasure chests)
         // Must be after super.init() to call instance method
@@ -564,6 +581,105 @@ final class Renderer: NSObject, MTKViewDelegate {
         desc.vertexDescriptor = Renderer.texturedVertexDescriptor()
         
         return try! device.makeRenderPipelineState(descriptor: desc)
+    }
+    
+    /// Create pipeline for skeletal animation (skinned mesh)
+    private static func createSkinnedPipeline(device: MTLDevice, library: MTLLibrary, view: MTKView) -> MTLRenderPipelineState? {
+        guard let vertexFunc = library.makeFunction(name: "vertex_skinned"),
+              let fragmentFunc = library.makeFunction(name: "fragment_lit") else {
+            print("[Renderer] Could not find skinned vertex shader function")
+            return nil
+        }
+        
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vertexFunc
+        desc.fragmentFunction = fragmentFunc
+        desc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        desc.depthAttachmentPixelFormat = .depth32Float
+        desc.vertexDescriptor = Renderer.skinnedVertexDescriptor()
+        
+        do {
+            return try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            print("[Renderer] Failed to create skinned pipeline: \(error)")
+            return nil
+        }
+    }
+    
+    /// Create shadow pipeline for skeletal animation
+    private static func createSkinnedShadowPipeline(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        guard let vertexFunc = library.makeFunction(name: "vertex_skinned_shadow"),
+              let fragmentFunc = library.makeFunction(name: "fragment_shadow") else {
+            print("[Renderer] Could not find skinned shadow shader function")
+            return nil
+        }
+        
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vertexFunc
+        desc.fragmentFunction = fragmentFunc
+        desc.colorAttachments[0].pixelFormat = .invalid
+        desc.depthAttachmentPixelFormat = .depth32Float
+        desc.vertexDescriptor = Renderer.skinnedVertexDescriptor()
+        
+        do {
+            return try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            print("[Renderer] Failed to create skinned shadow pipeline: \(error)")
+            return nil
+        }
+    }
+    
+    /// Vertex descriptor for skinned vertices (packed layout - no SIMD padding)
+    private static func skinnedVertexDescriptor() -> MTLVertexDescriptor {
+        let desc = MTLVertexDescriptor()
+        
+        var offset = 0
+        
+        // Position (float3) - 12 bytes
+        desc.attributes[0].format = .float3
+        desc.attributes[0].offset = offset
+        desc.attributes[0].bufferIndex = 0
+        offset += 12
+        
+        // Normal (float3) - 12 bytes
+        desc.attributes[1].format = .float3
+        desc.attributes[1].offset = offset
+        desc.attributes[1].bufferIndex = 0
+        offset += 12
+        
+        // TexCoord (float2) - 8 bytes
+        desc.attributes[2].format = .float2
+        desc.attributes[2].offset = offset
+        desc.attributes[2].bufferIndex = 0
+        offset += 8
+        
+        // Bone indices (uint4) - 16 bytes
+        desc.attributes[3].format = .uint4
+        desc.attributes[3].offset = offset
+        desc.attributes[3].bufferIndex = 0
+        offset += 16
+        
+        // Bone weights (float4) - 16 bytes
+        desc.attributes[4].format = .float4
+        desc.attributes[4].offset = offset
+        desc.attributes[4].bufferIndex = 0
+        offset += 16
+        
+        // Material index (uint) - 4 bytes
+        desc.attributes[5].format = .uint
+        desc.attributes[5].offset = offset
+        desc.attributes[5].bufferIndex = 0
+        offset += 4
+        
+        // Padding - 4 bytes
+        offset += 4
+        
+        // Total stride should be 72 bytes
+        desc.layouts[0].stride = SkinnedVertex.stride
+        desc.layouts[0].stepRate = 1
+        desc.layouts[0].stepFunction = .perVertex
+        
+        return desc
     }
     
     private static func texturedVertexDescriptor() -> MTLVertexDescriptor {
@@ -771,9 +887,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     /// Spawn vendor NPCs at strategic locations
     private func spawnNPCs() {
-        // Place a vendor near the spawn area (but not too close)
-        let vendorX: Float = 12.0
-        let vendorZ: Float = 8.0
+        // Place a vendor near the cabin
+        let vendorX: Float = 3.5
+        let vendorZ: Float = 20.3
         let vendorY = Terrain.heightAt(x: vendorX, z: vendorZ)
         
         // Vendor faces toward spawn point
@@ -865,9 +981,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     // MARK: - Save/Load System
     
-    /// Save the current game state
-    func saveGame() {
-        let success = SaveGameManager.shared.saveGame(
+    /// Quick save the current game state
+    func quickSave() -> Bool {
+        let success = SaveGameManager.shared.quickSave(
             player: player,
             position: characterPosition,
             yaw: characterYaw
@@ -875,18 +991,40 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         if success {
             Task { @MainActor in
+                hudViewModel?.showLoot(gold: 0, itemName: "Quick Saved!", itemRarity: nil, title: "💾 Saved", icon: "bolt.fill")
+            }
+        }
+        return success
+    }
+    
+    /// Save the current game state with a name
+    func saveGame(name: String? = nil) -> Bool {
+        let success = SaveGameManager.shared.saveGame(
+            player: player,
+            position: characterPosition,
+            yaw: characterYaw,
+            saveName: name
+        )
+        
+        if success {
+            Task { @MainActor in
                 hudViewModel?.showLoot(gold: 0, itemName: "Game Saved!", itemRarity: nil, title: "💾 Saved", icon: "checkmark.circle.fill")
             }
         }
+        return success
     }
     
-    /// Load a saved game
+    /// Load the most recent saved game
     func loadGame() {
         guard let saveData = SaveGameManager.shared.loadGame() else {
             print("[SaveGame] No save data found")
             return
         }
-        
+        loadGame(from: saveData)
+    }
+    
+    /// Load a specific save game
+    func loadGame(from saveData: SaveGameData) {
         // Restore player state
         player.attributes.strength = saveData.strength
         player.attributes.dexterity = saveData.dexterity
@@ -993,6 +1131,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard index >= 0 && index < interactables.count else { return }
         guard !interactables[index].isOpen else { return }
         
+        // Play treasure chest open sound
+        AudioManager.shared.playTreasureChestOpen()
+        
         // Mark chest as open (visually) but don't give loot yet
         interactables[index].isOpen = true
         chestsNeedRebuild = true
@@ -1088,7 +1229,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Handle save input (F5 key)
         if savePressed && !saveWasPressed {
-            saveGame()
+            _ = saveGame()
         }
         saveWasPressed = savePressed
         
@@ -1103,7 +1244,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             updateCombat(deltaTime: dt)
             
             // Update character movement (only when not paused)
-            updateCharacter(deltaTime: dt)
+        updateCharacter(deltaTime: dt)
         }
         
         updateCamera(deltaTime: dt)
@@ -1114,14 +1255,32 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         
-        // Update character mesh animation
+        // Update character animation
         let hasSword = player.equipment.hasSwordEquipped
         let hasShield = player.equipment.hasShieldEquipped
-        characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
-                            hasSwordEquipped: hasSword,
-                            hasShieldEquipped: hasShield,
-                            isAttacking: isAttacking, attackPhase: attackPhase,
-                            swingType: currentSwingType)
+        
+        if useSkeletalAnimation, let animChar = animatedCharacter {
+            // Update skeletal animation based on player state
+            if isAttacking {
+                animChar.setAnimationState(.attacking)
+            } else if isJumping {
+                animChar.setAnimationState(.jumping)
+            } else if isMoving {
+                animChar.setAnimationState(.walking)
+            } else {
+                animChar.setAnimationState(.idle)
+            }
+            
+            animChar.hasShieldEquipped = hasShield
+            animChar.update(deltaTime: dt)
+        } else {
+            // Fallback: Procedural character mesh with animation
+            characterMesh.update(walkPhase: walkPhase, isJumping: isJumping, 
+                                hasSwordEquipped: hasSword,
+                                hasShieldEquipped: hasShield,
+                                isAttacking: isAttacking, attackPhase: attackPhase,
+                                swingType: currentSwingType)
+        }
         
         // Update enemies
         updateEnemies(deltaTime: dt)
@@ -1182,15 +1341,54 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         drawLandscape(encoder: encoder)
         
-        // Character with model matrix - use characterUniformBuffer
+        // Character shadow
         let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
-        let charShadowPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
-        charShadowPtr.pointee = shadowUniforms
-        charShadowPtr.pointee.modelMatrix = charModelMatrix
         
+        if useSkeletalAnimation, let animChar = animatedCharacter, let skinnedShadowPipeline = skinnedShadowPipelineState {
+            // Use skeletal animation for shadow
+            let fullModelMatrix = charModelMatrix * playerModelMatrix
+            
+            encoder.setRenderPipelineState(skinnedShadowPipeline)
+            
+            var skinnedUniforms = SkinnedUniforms()
+            skinnedUniforms.modelMatrix = fullModelMatrix
+            skinnedUniforms.viewProjectionMatrix = vp
+            skinnedUniforms.lightViewProjectionMatrix = lightViewProjectionMatrix
+            skinnedUniforms.lightDirection = currentLightDir
+            skinnedUniforms.cameraPosition = cameraPosition
+            skinnedUniforms.ambientIntensity = ambientIntensity
+            skinnedUniforms.diffuseIntensity = diffuseIntensity
+            skinnedUniforms.timeOfDay = timeOfDay
+            
+            memcpy(animChar.uniformBuffer.contents(), &skinnedUniforms, MemoryLayout<SkinnedUniforms>.stride)
+            
+            encoder.setVertexBuffer(animChar.mesh.vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(animChar.uniformBuffer, offset: 0, index: 1)
+            encoder.setVertexBuffer(animChar.mesh.boneMatrixBuffer, offset: 0, index: 2)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: animChar.mesh.vertexCount)
+            
+            encoder.setRenderPipelineState(shadowPipelineState)
+        } else if useSkeletalAnimation, playerModelVertexCount > 0, let playerBuffer = playerModelVertexBuffer {
+            // Fallback: Use loaded player model for shadow (static)
+            let fullModelMatrix = charModelMatrix * playerModelMatrix
+            
+            let charShadowPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
+            charShadowPtr.pointee = shadowUniforms
+            charShadowPtr.pointee.modelMatrix = fullModelMatrix
+            
+            encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
+            encoder.setVertexBuffer(playerBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: playerModelVertexCount)
+        } else if characterMesh.vertexCount > 0 {
+            // Fallback to procedural character shadow
+            let charShadowPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
+            charShadowPtr.pointee = shadowUniforms
+            charShadowPtr.pointee.modelMatrix = charModelMatrix
+            
         encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
+        }
         
         encoder.endEncoding()
     }
@@ -1246,6 +1444,28 @@ final class Renderer: NSObject, MTKViewDelegate {
             sunColor: currentSkyColors.sun,
             timeOfDay: timeOfDay
         )
+        
+        // Add point lights from lanterns
+        // Lanterns are brighter at night (when ambient is lower)
+        let lanternIntensity: Float = isDaytime ? 0.3 : 1.2
+        
+        // Find the 8 nearest lanterns to the camera for performance
+        let sortedLanterns = lanternPositions
+            .map { ($0, simd_distance($0, cameraPosition)) }
+            .sorted { $0.1 < $1.1 }
+            .prefix(8)
+        
+        let lanternArray = Array(sortedLanterns)
+        if lanternArray.count > 0 { litUniforms.pointLight0 = simd_float4(lanternArray[0].0, lanternIntensity) }
+        if lanternArray.count > 1 { litUniforms.pointLight1 = simd_float4(lanternArray[1].0, lanternIntensity) }
+        if lanternArray.count > 2 { litUniforms.pointLight2 = simd_float4(lanternArray[2].0, lanternIntensity) }
+        if lanternArray.count > 3 { litUniforms.pointLight3 = simd_float4(lanternArray[3].0, lanternIntensity) }
+        if lanternArray.count > 4 { litUniforms.pointLight4 = simd_float4(lanternArray[4].0, lanternIntensity) }
+        if lanternArray.count > 5 { litUniforms.pointLight5 = simd_float4(lanternArray[5].0, lanternIntensity) }
+        if lanternArray.count > 6 { litUniforms.pointLight6 = simd_float4(lanternArray[6].0, lanternIntensity) }
+        if lanternArray.count > 7 { litUniforms.pointLight7 = simd_float4(lanternArray[7].0, lanternIntensity) }
+        litUniforms.pointLightCount = Int32(min(lanternArray.count, 8))
+        
         memcpy(litUniformBuffer.contents(), &litUniforms, MemoryLayout<LitUniforms>.stride)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
         encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
@@ -1253,20 +1473,72 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Draw landscape
         drawLandscape(encoder: encoder)
         
-        // Draw character - use characterUniformBuffer with character's model matrix
-        if characterMesh.vertexCount > 0 {
-            let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
+        // Draw character
+        let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) * rotationY(characterYaw)
+        
+        if useSkeletalAnimation, let animChar = animatedCharacter, let skinnedPipeline = skinnedPipelineState {
+            // Use skeletal animation with skinned pipeline
+            let fullModelMatrix = charModelMatrix * playerModelMatrix
             
+            encoder.setRenderPipelineState(skinnedPipeline)
+            
+            // Set character texture (use mesh texture if available, otherwise keep existing characterTexture)
+            // Texture index 6 is characterTex in the fragment shader
+            if let meshTexture = animChar.mesh.texture {
+                encoder.setFragmentTexture(meshTexture, index: 6)
+            }
+            
+            // Get active point lights
+            var activePointLights: [PointLight] = []
+            for (pos, _) in lanternArray {
+                activePointLights.append(PointLight(position: pos, intensity: lanternIntensity))
+            }
+            
+            // Draw the animated character
+            animChar.draw(
+                encoder: encoder,
+                modelMatrix: fullModelMatrix,
+                viewProjectionMatrix: projectionMatrix * viewMatrix,
+                lightViewProjectionMatrix: lightViewProjectionMatrix,
+                lightDirection: isDaytime ? sunDirection : simd_normalize(simd_float3(0.3, -0.8, 0.2)),
+                cameraPosition: cameraPosition,
+                ambientIntensity: litUniforms.ambientIntensity,
+                diffuseIntensity: litUniforms.diffuseIntensity,
+                timeOfDay: timeOfDay,
+                pointLights: activePointLights
+            )
+            
+            // Restore lit pipeline and uniform buffer
+            encoder.setRenderPipelineState(litPipelineState)
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+        } else if useSkeletalAnimation, playerModelVertexCount > 0, let playerBuffer = playerModelVertexBuffer {
+            // Fallback: Use loaded player model as static mesh
+            let fullModelMatrix = charModelMatrix * playerModelMatrix
+            
+            let charBufferPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
+            charBufferPtr.pointee = litUniforms
+            charBufferPtr.pointee.modelMatrix = fullModelMatrix
+            
+            encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
+            encoder.setVertexBuffer(playerBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: playerModelVertexCount)
+            
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+        } else if characterMesh.vertexCount > 0 {
+            // Fallback to procedural character mesh
             // Write directly to characterUniformBuffer
             let charBufferPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
             charBufferPtr.pointee = litUniforms
             charBufferPtr.pointee.modelMatrix = charModelMatrix
             
             // Bind character's uniform buffer
-            encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
-            encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
-            encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
+        encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
+        encoder.setVertexBuffer(characterMesh.vertexBuffer, offset: 0, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: characterMesh.vertexCount)
             
             // Restore landscape uniform buffer for subsequent draws
             encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
@@ -1475,6 +1747,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         let targetSpeed = abs(forwardInput) * characterSpeed
         isMoving = targetSpeed > 0.1
+        
+        // Update footstep audio based on movement (only when grounded)
+        let isWalkingOnGround = isMoving && !isJumping
+        AudioManager.shared.updateFootsteps(isWalking: isWalkingOnGround)
         
         if isMoving {
             // Target velocity in the direction character is facing
@@ -1710,6 +1986,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         isAttacking = true
         attackPhase = 0
         
+        // Play sword swing sound
+        AudioManager.shared.playSwordSwing()
+        
         // Randomly select swing type
         let swingTypes = SwingType.allCases
         currentSwingType = swingTypes[Int.random(in: 0..<swingTypes.count)]
@@ -1735,7 +2014,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Dot product gives us angle - within 90 degree frontal arc
             let dot = simd_dot(charForward, dirToEnemy)
             if dot > 0.3 {  // Roughly 70 degree arc
-                // Hit! Calculate damage
+                // Hit! Play metal hit sound
+                AudioManager.shared.playMetalHit()
+                
+                // Calculate damage
                 let baseDamage = player.effectiveDamage
                 let isCritical = Float.random(in: 0...1) < 0.15  // 15% crit chance
                 let damage = isCritical ? baseDamage * 2 : baseDamage
@@ -1749,6 +2031,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                 
                 // Check if enemy died
                 if !enemy.isAlive {
+                    // Play death sound
+                    AudioManager.shared.playDie()
+                    
                     // Give XP and gold (scaled by enemy level)
                     player.gainXP(enemy.xpReward)
                     let goldDrop = Int.random(in: enemy.goldDropRange)
@@ -1790,6 +2075,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                 } else {
                     // Player takes damage (armor already reduces in takeDamage)
                     player.takeDamage(damage)
+                    
+                    // Play hurt sound
+                    AudioManager.shared.playHurt()
                     
                     // Show damage number on player
                     enemyManager.addDamageNumber(damage, at: characterPosition)
@@ -1891,6 +2179,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         Task { @MainActor in
             hudViewModel?.updateEnemyHealthBars(healthBars)
+            hudViewModel?.updatePlayerPosition(x: characterPosition.x, y: characterPosition.y, z: characterPosition.z)
         }
     }
     
@@ -1974,17 +2263,238 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     // MARK: - USD Model Loading
     
-    /// Load the cabin USD model
-    private func loadCabinModel() {
+    /// Load the cabin USD model (medieval wooden house)
+    // MARK: - Load Player Model (USD)
+    
+    /// Static player model data (when loaded from USDZ)
+    private var playerModelVertexBuffer: MTLBuffer?
+    private var playerModelVertexCount: Int = 0
+    private var playerModelMatrix: simd_float4x4 = matrix_identity_float4x4
+    private var playerModelTexture: MTLTexture?
+    
+    /// Load the player model from FBX (with skeleton and animations)
+    private func loadPlayerModel() {
         let loader = USDModelLoader(device: device)
         
-        // Try to load the cabin model from usdc subdirectory
-        guard let cabinURL = Bundle.main.url(forResource: "cabin", withExtension: "usdc", subdirectory: "usdc") else {
-            print("[Cabin] Could not find cabin.usdc in bundle (usdc subdirectory)")
+        // Try to find Walking.fbx (base character with walk animation)
+        var playerURL: URL?
+        
+        // Try 1: USDZ format (exported from Blender or Reality Converter)
+        if let url = Bundle.main.url(forResource: "Walking", withExtension: "usdz") {
+            playerURL = url
+            print("[Player] Found Walking.usdz directly in bundle")
+        }
+        // Try 2: USDZ in Animations subdirectory
+        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "usdz", subdirectory: "Animations") {
+            playerURL = url
+            print("[Player] Found Walking.usdz in Animations subdirectory")
+        }
+        // Try 3: GLB format
+        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "glb") {
+            playerURL = url
+            print("[Player] Found Walking.glb directly in bundle")
+        }
+        // Try 4: GLB in Animations subdirectory
+        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "glb", subdirectory: "Animations") {
+            playerURL = url
+            print("[Player] Found Walking.glb in Animations subdirectory")
+        }
+        // Try 5: FBX format
+        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "fbx") {
+            playerURL = url
+            print("[Player] Found Walking.fbx directly in bundle")
+        }
+        // Try 4: FBX in Animations subdirectory
+        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "fbx", subdirectory: "Animations") {
+            playerURL = url
+            print("[Player] Found Walking.fbx in Animations subdirectory")
+        }
+        // Try 6: Fallback to USDZ
+        else if let url = Bundle.main.url(forResource: "player-model", withExtension: "usdz") {
+            playerURL = url
+            print("[Player] Falling back to player-model.usdz")
+        }
+        else if let url = Bundle.main.url(forResource: "player-model", withExtension: "usdz", subdirectory: "usdc") {
+            playerURL = url
+            print("[Player] Falling back to player-model.usdz in usdc subdirectory")
+        }
+        else {
+            print("[Player] Could not find player model files in bundle")
+            // Search for any FBX or USDZ files
+            if let resourcePath = Bundle.main.resourcePath {
+                let fileManager = FileManager.default
+                if let enumerator = fileManager.enumerator(atPath: resourcePath) {
+                    while let file = enumerator.nextObject() as? String {
+                        if file.contains(".fbx") || file.contains(".usdz") {
+                            print("[Player]   Found: \(file)")
+                        }
+                    }
+                }
+            }
             return
         }
         
-        if let model = loader.loadModel(from: cabinURL, materialIndex: MaterialIndex.cabin.rawValue) {
+        guard let finalURL = playerURL else { return }
+        
+        // Print the asset hierarchy for debugging
+        loader.printAssetHierarchy(from: finalURL)
+        
+        // Try to load as skeletal mesh first
+        let skeletalLoader = SkeletalMeshLoader(device: device)
+        if let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: finalURL, materialIndex: MaterialIndex.character.rawValue) {
+            print("[Player] Successfully loaded skeletal mesh!")
+            animatedCharacter = AnimatedCharacter(device: device, mesh: skeletalMesh)
+            
+            // Calculate model transform based on bounds
+            let bounds = skeletalMesh.boundingBox
+            let modelSize = bounds.max - bounds.min
+            let modelCenter = (bounds.max + bounds.min) / 2
+            
+            // Detect coordinate system
+            let isYUp = modelSize.y > modelSize.z && modelSize.y > modelSize.x
+            
+            if isYUp {
+                let modelHeight = modelSize.y
+                let targetHeight: Float = 2.0
+                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+                let scaledMinHeight = bounds.min.y * scale
+                
+                playerModelMatrix = translation(0, -scaledMinHeight, 0) *
+                                   rotationY(.pi) *
+                                   scaling(scale, scale, scale) *
+                                   translation(-modelCenter.x, 0, -modelCenter.z)
+                
+                print("[Player] Y-up skeletal model. Scale: \(scale)")
+            } else {
+                let modelHeight = modelSize.z
+                let targetHeight: Float = 2.0
+                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+                let scaledMinHeight = bounds.min.z * scale
+                
+                playerModelMatrix = translation(0, -scaledMinHeight, 0) *
+                                   rotationY(.pi) *
+                                   rotationX(.pi / 2) *
+                                   scaling(scale, scale, scale) *
+                                   translation(-modelCenter.x, -modelCenter.y, 0)
+                
+                print("[Player] Z-up skeletal model. Scale: \(scale)")
+            }
+            
+            playerModelTexture = characterTexture
+            useSkeletalAnimation = true
+            
+            print("[Player] ✅ Skeletal animation enabled with \(skeletalMesh.bones.count) bones!")
+            return
+        }
+        
+        // Fallback: Load as static mesh
+        print("[Player] Falling back to static mesh loading...")
+        if let model = loader.loadModel(from: finalURL, materialIndex: MaterialIndex.character.rawValue) {
+            playerModelVertexBuffer = model.vertexBuffer
+            playerModelVertexCount = model.vertexCount
+            
+            // Calculate scale and orientation fix
+            let bounds = model.boundingBox
+            let modelSize = bounds.max - bounds.min
+            let modelCenter = (bounds.max + bounds.min) / 2
+            
+            print("[Player] Model bounds: min=\(bounds.min), max=\(bounds.max)")
+            print("[Player] Model size: \(modelSize)")
+            print("[Player] Vertex count: \(model.vertexCount)")
+            
+            // Check which axis is tallest to determine up-axis
+            let isYUp = modelSize.y > modelSize.z && modelSize.y > modelSize.x
+            let isZUp = modelSize.z > modelSize.y && modelSize.z > modelSize.x
+            
+            let modelHeight: Float
+            let scaledMinHeight: Float
+            
+            if isYUp {
+                // Model uses Y-up (like Blender export)
+                modelHeight = modelSize.y
+                let targetHeight: Float = 2.0
+                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+                scaledMinHeight = bounds.min.y * scale
+                
+                // Y-up: no rotation needed, just scale and position
+                playerModelMatrix = translation(0, -scaledMinHeight, 0) *  // Lift so feet are at ground
+                                   rotationY(.pi) *                        // Face forward
+                                   scaling(scale, scale, scale) *
+                                   translation(-modelCenter.x, 0, -modelCenter.z)  // Center horizontally
+                
+                print("[Player] Y-up model. Scale: \(scale), modelHeight: \(modelHeight)")
+            } else if isZUp {
+                // Model uses Z-up (like some other software)
+                modelHeight = modelSize.z
+                let targetHeight: Float = 2.0
+                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+                scaledMinHeight = bounds.min.z * scale
+                
+                // Z-up: rotate 90 degrees around X
+                playerModelMatrix = translation(0, -scaledMinHeight, 0) *
+                                   rotationY(.pi) *
+                                   rotationX(.pi / 2) *
+                                   scaling(scale, scale, scale) *
+                                   translation(-modelCenter.x, -modelCenter.y, 0)
+                
+                print("[Player] Z-up model. Scale: \(scale), modelHeight: \(modelHeight)")
+            } else {
+                // Fallback
+                modelHeight = max(modelSize.x, max(modelSize.y, modelSize.z))
+                let targetHeight: Float = 2.0
+                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+                
+                playerModelMatrix = scaling(scale, scale, scale)
+                print("[Player] Unknown orientation. Scale: \(scale)")
+            }
+            
+            // Use the existing character texture for now
+            playerModelTexture = characterTexture
+            
+            useSkeletalAnimation = true  // Repurposing this flag to mean "use loaded model"
+            
+            print("[Player] ✅ Player model loaded with \(playerModelVertexCount) vertices")
+        } else {
+            print("[Player] Failed to load player model, using procedural character")
+        }
+    }
+    
+    private func loadCabinModel() {
+        let loader = USDModelLoader(device: device)
+        
+        // Try to load the medieval wooden house model - check multiple possible locations
+        var cabinURL: URL?
+        
+        // Try 1: Direct in bundle (if added as group, files are flattened)
+        if let url = Bundle.main.url(forResource: "medieval_woodenhouse", withExtension: "usdc") {
+            cabinURL = url
+            print("[Cabin] Found medieval_woodenhouse.usdc directly in bundle: \(url.path)")
+        }
+        // Try 2: In usdc subdirectory (folder reference)
+        else if let url = Bundle.main.url(forResource: "medieval_woodenhouse", withExtension: "usdc", subdirectory: "usdc") {
+            cabinURL = url
+            print("[Cabin] Found medieval_woodenhouse.usdc in usdc subdirectory: \(url.path)")
+        }
+        // Try 3: List what's actually in the bundle for debugging
+        else {
+            print("[Cabin] Could not find medieval_woodenhouse.usdc - searching bundle...")
+            if let resourcePath = Bundle.main.resourcePath {
+                let fileManager = FileManager.default
+                if let enumerator = fileManager.enumerator(atPath: resourcePath) {
+                    while let file = enumerator.nextObject() as? String {
+                        if file.contains("medieval") || file.contains("woodenhouse") || file.contains("usdc") {
+                            print("[Cabin]   Found: \(file)")
+                        }
+                    }
+                }
+            }
+            print("[Cabin] medieval_woodenhouse.usdc not found in bundle")
+            return
+        }
+        
+        guard let finalURL = cabinURL else { return }
+        
+        if let model = loader.loadModel(from: finalURL, materialIndex: MaterialIndex.cabin.rawValue) {
             cabinVertexBuffer = model.vertexBuffer
             cabinVertexCount = model.vertexCount
             
@@ -1994,36 +2504,41 @@ final class Renderer: NSObject, MTKViewDelegate {
             let modelSize = bounds.max - bounds.min
             let modelCenter = (bounds.max + bounds.min) / 2
             
-            // Scale to reasonable size (about 5 units tall)
-            let targetHeight: Float = 5.0
-            let scale = targetHeight / max(modelSize.y, 0.1)
+            print("[Cabin] Model bounds: min=\(bounds.min), max=\(bounds.max)")
+            print("[Cabin] Model size: \(modelSize), center: \(modelCenter)")
+            print("[Cabin] Vertex count: \(model.vertexCount)")
+            
+            // Scale to reasonable size (about 15 units tall - 3x larger)
+            // USD models can be in various units (cm, m, etc.) so we normalize
+            let maxDimension = max(modelSize.x, max(modelSize.y, modelSize.z))
+            let targetSize: Float = 15.0
+            let scale = maxDimension > 0.001 ? targetSize / maxDimension : 1.0
             
             // Position near player spawn
-            let cabinPosition = simd_float3(8, Terrain.heightAt(x: 8, z: 10), 10)
+            let terrainY = Terrain.heightAt(x: 8, z: 10)
             
-            // Create model matrix: translate to position, center the model, scale
+            // After rotation, the model's Z extent becomes Y (height)
+            // We need to lift the model so its bottom sits on the ground
+            let scaledHeight = modelSize.z * scale  // Z becomes height after X rotation
+            let liftOffset = scaledHeight / 2  // Lift by half the height to put bottom at ground
+            
+            let cabinPosition = simd_float3(8, terrainY + liftOffset, 10)
+            
+            // Create model matrix: translate to position, rotate to fix orientation (Z-up to Y-up),
+            // scale, and center the model horizontally
             cabinModelMatrix = translation(cabinPosition.x, cabinPosition.y, cabinPosition.z) *
+                               rotationX(.pi / 2) *  // Convert Z-up to Y-up (positive rotation)
                                scaling(scale, scale, scale) *
-                               translation(-modelCenter.x, -bounds.min.y, -modelCenter.z)
+                               translation(-modelCenter.x, -modelCenter.y, -modelCenter.z)
             
             print("[Cabin] Loaded cabin model at position \(cabinPosition) with scale \(scale)")
         } else {
             print("[Cabin] Failed to load cabin model - file may not be in bundle")
         }
         
-        // Try to load the actual cabin texture from EXR
-        // Note: EXR may need to be converted to PNG for reliable loading
-        if let textureURL = Bundle.main.url(forResource: "color_0C0C0C", withExtension: "exr", subdirectory: "usdc/textures") {
-            if let texture = loader.loadTexture(from: textureURL) {
-                cabinTexture = texture
-                print("[Cabin] Loaded cabin texture from EXR")
-            }
-        } else if let textureURL = Bundle.main.url(forResource: "color_0C0C0C", withExtension: "png", subdirectory: "usdc/textures") {
-            if let texture = loader.loadTexture(from: textureURL) {
-                cabinTexture = texture
-                print("[Cabin] Loaded cabin texture from PNG")
-            }
-        }
+        // Note: The EXR texture "color_0C0C0C" is just a solid dark color placeholder
+        // We use the generated fallback texture which has wood grain detail instead
+        print("[Cabin] Using generated wood texture for cabin")
     }
     
     /// Draw the cabin model
@@ -2034,12 +2549,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         var cabinUniforms = litUniforms
         cabinUniforms.modelMatrix = cabinModelMatrix
         
-        // Use the character uniform buffer temporarily for the cabin
-        let bufferPtr = characterUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
+        // Use dedicated cabin uniform buffer (not character's!)
+        let bufferPtr = cabinUniformBuffer.contents().bindMemory(to: LitUniforms.self, capacity: 1)
         bufferPtr.pointee = cabinUniforms
         
-        encoder.setVertexBuffer(characterUniformBuffer, offset: 0, index: 1)
-        encoder.setFragmentBuffer(characterUniformBuffer, offset: 0, index: 1)
+        encoder.setVertexBuffer(cabinUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(cabinUniformBuffer, offset: 0, index: 1)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: cabinVertexCount)
         

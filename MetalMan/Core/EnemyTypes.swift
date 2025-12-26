@@ -91,6 +91,7 @@ final class Enemy: Identifiable {
     // AI State
     var state: EnemyState = .idle
     var stateTimer: Float = 0  // Time in current state
+    var hasSpottedPlayer: Bool = false  // Track if this enemy has spotted the player (for audio)
     
     // Patrol
     var patrolCenter: simd_float3
@@ -266,6 +267,11 @@ final class Enemy: Identifiable {
     private func updateIdle(dt: Float, distanceToPlayer: Float) {
         // Check if player is in detection range
         if distanceToPlayer < type.detectionRange {
+            // Play spotted sound if this is the first time spotting the player
+            if !hasSpottedPlayer {
+                hasSpottedPlayer = true
+                AudioManager.shared.playSpotted()
+            }
             state = .chasing
             stateTimer = 0
             return
@@ -282,6 +288,11 @@ final class Enemy: Identifiable {
     private func updatePatrol(dt: Float, distanceToPlayer: Float, terrain: Terrain) {
         // Check if player is in detection range
         if distanceToPlayer < type.detectionRange {
+            // Play spotted sound if this is the first time spotting the player
+            if !hasSpottedPlayer {
+                hasSpottedPlayer = true
+                AudioManager.shared.playSpotted()
+            }
             state = .chasing
             stateTimer = 0
             return
@@ -327,6 +338,7 @@ final class Enemy: Identifiable {
         if distanceToPlayer > type.detectionRange * 1.5 {
             state = .idle
             stateTimer = 0
+            hasSpottedPlayer = false  // Reset so they can spot again later
             return
         }
         

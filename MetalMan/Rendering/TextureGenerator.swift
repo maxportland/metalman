@@ -642,24 +642,24 @@ class TextureGenerator {
             for x in 0..<size {
                 let i = (y * size + x) * 4
                 
-                // Dark brown wood color (matches EXR texture name color_0C0C0C - very dark)
-                var r: Float = 0.15
-                var g: Float = 0.12
-                var b: Float = 0.08
+                // Warm brown wood color - brighter for visibility
+                var r: Float = 0.55
+                var g: Float = 0.40
+                var b: Float = 0.25
                 
                 // Wood grain horizontal lines
                 let grainY = sin(Float(y) * 0.5 + Float(x) * 0.05) * 0.5 + 0.5
-                r += grainY * 0.08
-                g += grainY * 0.06
-                b += grainY * 0.04
+                r += grainY * 0.12
+                g += grainY * 0.08
+                b += grainY * 0.05
                 
                 // Vertical board divisions
                 let boardWidth: Float = 16
                 let boardX = Float(x).truncatingRemainder(dividingBy: boardWidth) / boardWidth
                 if boardX < 0.05 || boardX > 0.95 {
-                    r *= 0.7
-                    g *= 0.7
-                    b *= 0.7
+                    r *= 0.8
+                    g *= 0.8
+                    b *= 0.8
                 }
                 
                 // Add subtle noise

@@ -44,6 +44,30 @@ func rotationY(_ angle: Float) -> simd_float4x4 {
     )
 }
 
+/// Creates a rotation matrix around the X axis
+func rotationX(_ angle: Float) -> simd_float4x4 {
+    let c = cos(angle)
+    let s = sin(angle)
+    return simd_float4x4(
+        simd_float4(1, 0, 0, 0),
+        simd_float4(0, c, -s, 0),
+        simd_float4(0, s, c, 0),
+        simd_float4(0, 0, 0, 1)
+    )
+}
+
+/// Creates a rotation matrix around the Z axis
+func rotationZ(_ angle: Float) -> simd_float4x4 {
+    let c = cos(angle)
+    let s = sin(angle)
+    return simd_float4x4(
+        simd_float4(c, -s, 0, 0),
+        simd_float4(s, c, 0, 0),
+        simd_float4(0, 0, 1, 0),
+        simd_float4(0, 0, 0, 1)
+    )
+}
+
 /// Creates a translation matrix
 func translation(_ x: Float, _ y: Float, _ z: Float) -> simd_float4x4 {
     return simd_float4x4(

@@ -5,9 +5,15 @@ import MetalKit
 import simd
 
 struct MetalGameView: UIViewRepresentable {
-    
+
     /// HUD view model to bind to the player
     var hudViewModel: GameHUDViewModel
+    
+    /// Initial save data to load (nil for new game)
+    var initialSaveData: SaveGameData?
+    
+    /// Callback to return to main menu
+    var onReturnToMainMenu: () -> Void
 
     // MARK: - Coordinator
     class Coordinator: NSObject, MTKViewDelegate {
@@ -18,6 +24,9 @@ struct MetalGameView: UIViewRepresentable {
         
         /// Reference to HUD view model for updates
         weak var hudViewModel: GameHUDViewModel?
+        
+        /// Callback to return to main menu
+        var onReturnToMainMenu: () -> Void = {}
 
         // Input state
         var movementVector = SIMD2<Float>(0, 0)
@@ -26,11 +35,11 @@ struct MetalGameView: UIViewRepresentable {
         private var activeMovementTouch: UITouch?
         private var activeLookTouch: UITouch?
         private var lastLookTouchLocation: CGPoint?
-        
+
         // Frame counter for HUD updates
         private var frameCount: Int = 0
 
-        init(preferredFPS: Int, hudViewModel: GameHUDViewModel) {
+        init(preferredFPS: Int, hudViewModel: GameHUDViewModel, initialSaveData: SaveGameData?, onReturnToMainMenu: @escaping () -> Void) {
             let device = MTLCreateSystemDefaultDevice()!
             self.device = device
             self.mtkView = TouchForwardingMTKView(frame: .zero, device: device)
@@ -40,6 +49,7 @@ struct MetalGameView: UIViewRepresentable {
             self.mtkView.isPaused = false
             self.mtkView.enableSetNeedsDisplay = false
             self.hudViewModel = hudViewModel
+            self.onReturnToMainMenu = onReturnToMainMenu
 
             // Create renderer with both device and view
             let renderer = Renderer(device: device, view: self.mtkView)
@@ -50,9 +60,15 @@ struct MetalGameView: UIViewRepresentable {
             self.mtkView.delegate = self
             self.mtkView.touchDelegate = self
             
+            // Load save data if provided
+            if let saveData = initialSaveData {
+                renderer.loadGame(from: saveData)
+            }
+            
             // Bind HUD to player and renderer (on main actor)
             let player = renderer.player
             let rendererRef = renderer
+            let returnToMenu = onReturnToMainMenu
             Task { @MainActor in
                 hudViewModel.bind(to: player)
                 
@@ -66,6 +82,15 @@ struct MetalGameView: UIViewRepresentable {
                 // Set up chest looting callback
                 hudViewModel.onChestLooted = { chestIndex, goldTaken, itemsTaken in
                     rendererRef.finalizeChestLoot(chestIndex: chestIndex, goldTaken: goldTaken, itemsTaken: itemsTaken)
+                }
+                // Set up main menu callback
+                hudViewModel.onReturnToMainMenu = returnToMenu
+                // Set up save game callbacks
+                hudViewModel.onQuickSave = {
+                    return rendererRef.quickSave()
+                }
+                hudViewModel.onSaveGame = { name in
+                    return rendererRef.saveGame(name: name)
                 }
             }
             renderer.hudViewModel = hudViewModel
@@ -182,7 +207,7 @@ struct MetalGameView: UIViewRepresentable {
 
     // MARK: - UIViewRepresentable
     func makeCoordinator() -> Coordinator {
-        return Coordinator(preferredFPS: 60, hudViewModel: hudViewModel)
+        return Coordinator(preferredFPS: 60, hudViewModel: hudViewModel, initialSaveData: initialSaveData, onReturnToMainMenu: onReturnToMainMenu)
     }
 
     func makeUIView(context: UIViewRepresentableContext<MetalGameView>) -> MTKView {
@@ -203,6 +228,12 @@ struct MetalGameView: NSViewRepresentable {
     
     /// HUD view model to bind to the player
     var hudViewModel: GameHUDViewModel
+    
+    /// Initial save data to load (nil for new game)
+    var initialSaveData: SaveGameData?
+    
+    /// Callback to return to main menu
+    var onReturnToMainMenu: () -> Void
 
     // MARK: - Keyboard-handling MTKView
     class KeyboardMTKView: MTKView {
@@ -228,6 +259,9 @@ struct MetalGameView: NSViewRepresentable {
         
         /// Reference to HUD view model for updates
         weak var hudViewModel: GameHUDViewModel?
+        
+        /// Callback to return to main menu
+        var onReturnToMainMenu: () -> Void = {}
 
         // Input state
         var movementVector = SIMD2<Float>(0, 0)
@@ -235,11 +269,11 @@ struct MetalGameView: NSViewRepresentable {
         
         // Track pressed keys
         private var pressedKeys: Set<UInt16> = []
-        
+
         // Frame counter for HUD updates (don't update every frame)
         private var frameCount: Int = 0
 
-        init(preferredFPS: Int, hudViewModel: GameHUDViewModel) {
+        init(preferredFPS: Int, hudViewModel: GameHUDViewModel, initialSaveData: SaveGameData?, onReturnToMainMenu: @escaping () -> Void) {
             let device = MTLCreateSystemDefaultDevice()!
             self.device = device
             let mtkView = KeyboardMTKView(frame: .zero, device: device)
@@ -250,6 +284,7 @@ struct MetalGameView: NSViewRepresentable {
             mtkView.enableSetNeedsDisplay = false
             self.mtkView = mtkView
             self.hudViewModel = hudViewModel
+            self.onReturnToMainMenu = onReturnToMainMenu
 
             // Create renderer with both device and view (before super.init)
             self.renderer = Renderer(device: device, view: mtkView)
@@ -259,9 +294,15 @@ struct MetalGameView: NSViewRepresentable {
             self.mtkView.delegate = self
             self.mtkView.keyboardDelegate = self
             
+            // Load save data if provided
+            if let saveData = initialSaveData {
+                renderer.loadGame(from: saveData)
+            }
+            
             // Bind HUD to player and renderer (on main actor)
             let player = renderer.player
             let rendererRef = renderer
+            let returnToMenu = onReturnToMainMenu
             Task { @MainActor in
                 hudViewModel.bind(to: player)
                 
@@ -275,6 +316,15 @@ struct MetalGameView: NSViewRepresentable {
                 // Set up chest looting callback
                 hudViewModel.onChestLooted = { chestIndex, goldTaken, itemsTaken in
                     rendererRef.finalizeChestLoot(chestIndex: chestIndex, goldTaken: goldTaken, itemsTaken: itemsTaken)
+                }
+                // Set up main menu callback
+                hudViewModel.onReturnToMainMenu = returnToMenu
+                // Set up save game callbacks
+                hudViewModel.onQuickSave = {
+                    return rendererRef.quickSave()
+                }
+                hudViewModel.onSaveGame = { name in
+                    return rendererRef.saveGame(name: name)
                 }
             }
             renderer.hudViewModel = hudViewModel
@@ -327,11 +377,13 @@ struct MetalGameView: NSViewRepresentable {
             }
             inventoryKeyWasPressed = inventoryKeyPressed
             
-            // Escape key (keyCode 53) closes open panels
+            // Escape key (keyCode 53) closes open panels or opens pause menu
             let escapeKeyPressed = pressedKeys.contains(53)
             if escapeKeyPressed && !escapeKeyWasPressed {
                 Task { @MainActor in
-                    if hudViewModel?.isInventoryOpen == true {
+                    if hudViewModel?.isPauseMenuOpen == true {
+                        hudViewModel?.closePauseMenu()
+                    } else if hudViewModel?.isInventoryOpen == true {
                         hudViewModel?.toggleInventory()
                     } else if hudViewModel?.isHelpMenuOpen == true {
                         hudViewModel?.toggleHelpMenu()
@@ -341,6 +393,9 @@ struct MetalGameView: NSViewRepresentable {
                         hudViewModel?.closeLevelUpMenu()
                     } else if hudViewModel?.isShopOpen == true {
                         hudViewModel?.closeShop()
+                    } else if hudViewModel?.isPlayerDead == false {
+                        // Open pause menu if no other menu is open and player is alive
+                        hudViewModel?.openPauseMenu()
                     }
                 }
             }
@@ -408,7 +463,7 @@ struct MetalGameView: NSViewRepresentable {
 
     // MARK: - NSViewRepresentable
     func makeCoordinator() -> Coordinator {
-        return Coordinator(preferredFPS: 60, hudViewModel: hudViewModel)
+        return Coordinator(preferredFPS: 60, hudViewModel: hudViewModel, initialSaveData: initialSaveData, onReturnToMainMenu: onReturnToMainMenu)
     }
 
     func makeNSView(context: NSViewRepresentableContext<MetalGameView>) -> MTKView {

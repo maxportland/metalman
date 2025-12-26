@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Instant Tooltip Modifier
 
@@ -42,6 +43,36 @@ extension View {
     /// Adds an instant tooltip that appears immediately on hover
     func instantTooltip(_ text: String) -> some View {
         modifier(InstantTooltip(text: text))
+    }
+    
+    /// Adds a tap gesture that plays a tick sound
+    func onTapWithSound(perform action: @escaping () -> Void) -> some View {
+        self.onTapGesture {
+            AudioManager.shared.playTick()
+            action()
+        }
+    }
+}
+
+// MARK: - Tick Button Style
+
+/// A button style that plays a tick sound when pressed
+struct TickButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+            .onChange(of: configuration.isPressed) { _, isPressed in
+                if isPressed {
+                    AudioManager.shared.playTick()
+                }
+            }
+    }
+}
+
+extension View {
+    /// Apply tick sound button style
+    func withTickSound() -> some View {
+        self.buttonStyle(TickButtonStyle())
     }
 }
 
@@ -157,7 +188,7 @@ struct InventoryItemDisplay: Identifiable {
 
 /// HUD overlay displaying player stats, health, and XP
 struct GameHUD: View {
-    var viewModel: GameHUDViewModel
+    @Bindable var viewModel: GameHUDViewModel
     
     var body: some View {
         ZStack {
@@ -201,6 +232,12 @@ struct GameHUD: View {
             // Level up menu overlay
             if viewModel.isLevelUpMenuOpen {
                 levelUpMenuOverlay
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+            
+            // Pause menu overlay
+            if viewModel.isPauseMenuOpen {
+                pauseMenuOverlay
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
             
@@ -444,6 +481,7 @@ struct GameHUD: View {
             Color.black.opacity(0.7)
                 .ignoresSafeArea()
                 .onTapGesture {
+                    AudioManager.shared.playTick()
                     viewModel.toggleHelpMenu()
                 }
             
@@ -473,6 +511,7 @@ struct GameHUD: View {
                     helpRow(key: "I", action: "Open/Close Inventory")
                     helpRow(key: "L", action: "Open Level Up Menu (when points available)")
                     helpRow(key: "H", action: "Open/Close This Help Menu")
+                    helpRow(key: "ESC", action: "Pause Menu / Close Menus")
                     helpRow(key: "Esc", action: "Close Current Panel")
                     helpRow(key: "F5", action: "Quick Save")
                 }
@@ -546,6 +585,7 @@ struct GameHUD: View {
             Color.black.opacity(0.6)
                 .ignoresSafeArea()
                 .onTapGesture {
+                    AudioManager.shared.playTick()
                     viewModel.closeShop()
                 }
             
@@ -616,6 +656,7 @@ struct GameHUD: View {
                 
                 // Close button
                 Button(action: {
+                    AudioManager.shared.playTick()
                     viewModel.closeShop()
                 }) {
                     HStack {
@@ -652,6 +693,7 @@ struct GameHUD: View {
             Color.black.opacity(0.6)
                 .ignoresSafeArea()
                 .onTapGesture {
+                    AudioManager.shared.playTick()
                     viewModel.closeShop()
                     viewModel.toggleInventory()
                 }
@@ -726,6 +768,7 @@ struct GameHUD: View {
             
             // Close button
             Button(action: {
+                AudioManager.shared.playTick()
                 viewModel.closeShop()
             }) {
                 HStack {
@@ -805,6 +848,7 @@ struct GameHUD: View {
             
             // Close inventory button
             Button(action: {
+                AudioManager.shared.playTick()
                 viewModel.toggleInventory()
             }) {
                 HStack {
@@ -889,6 +933,7 @@ struct GameHUD: View {
                 
                 // Buy button
                 Button(action: {
+                    AudioManager.shared.playTick()
                     viewModel.purchaseItem(at: index)
                 }) {
                     Text("Buy")
@@ -946,6 +991,7 @@ struct GameHUD: View {
             Color.black.opacity(0.7)
                 .ignoresSafeArea()
                 .onTapGesture {
+                    AudioManager.shared.playTick()
                     viewModel.closeLevelUpMenu()
                 }
             
@@ -1022,6 +1068,7 @@ struct GameHUD: View {
                 
                 // Close button
                 Button(action: {
+                    AudioManager.shared.playTick()
                     viewModel.closeLevelUpMenu()
                 }) {
                     Text("Done")
@@ -1092,6 +1139,7 @@ struct GameHUD: View {
             
             // Allocate button
             Button(action: {
+                AudioManager.shared.playTick()
                 viewModel.allocatePoint(to: attributeType)
             }) {
                 Image(systemName: "plus.circle.fill")
@@ -1109,6 +1157,301 @@ struct GameHUD: View {
                     RoundedRectangle(cornerRadius: 12)
                         .stroke(color.opacity(0.3), lineWidth: 1)
                 )
+        )
+    }
+    
+    // MARK: - Pause Menu
+    
+    private var pauseMenuOverlay: some View {
+        ZStack {
+            // Dark background
+            Color.black.opacity(0.8)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    if !viewModel.showSaveDialog && !viewModel.showLoadMenu {
+                        AudioManager.shared.playTick()
+                        viewModel.closePauseMenu()
+                    }
+                }
+            
+            if viewModel.showSaveDialog {
+                saveGameDialog
+            } else if viewModel.showLoadMenu {
+                loadGamePanel
+            } else {
+                pauseMenuPanel
+            }
+        }
+    }
+    
+    private var pauseMenuPanel: some View {
+        VStack(spacing: 20) {
+            // Title
+            Text("PAUSED")
+                .font(.system(size: 36, weight: .black, design: .rounded))
+                .foregroundColor(.white)
+                .shadow(color: .cyan.opacity(0.5), radius: 10)
+            
+            Spacer().frame(height: 20)
+            
+            // Menu buttons
+            VStack(spacing: 12) {
+                pauseMenuButton(title: "Resume", icon: "play.fill", color: .green) {
+                    viewModel.closePauseMenu()
+                }
+                
+                pauseMenuButton(title: "Quick Save", icon: "bolt.fill", color: .yellow) {
+                    if viewModel.onQuickSave?() == true {
+                        viewModel.closePauseMenu()
+                    }
+                }
+                
+                pauseMenuButton(title: "Save Game", icon: "square.and.arrow.down.fill", color: .blue) {
+                    viewModel.saveGameName = SaveGameManager.shared.generateDefaultSaveName()
+                    viewModel.showSaveDialog = true
+                }
+                
+                pauseMenuButton(title: "Load Game", icon: "folder.fill", color: .cyan) {
+                    viewModel.availableSaves = SaveGameManager.shared.getAllSaves()
+                    viewModel.showLoadMenu = true
+                }
+                
+                Divider()
+                    .background(Color.white.opacity(0.3))
+                    .padding(.vertical, 8)
+                
+                pauseMenuButton(title: "Main Menu", icon: "house.fill", color: .orange) {
+                    viewModel.onReturnToMainMenu?()
+                }
+                
+                pauseMenuButton(title: "Quit Game", icon: "xmark.circle.fill", color: .red) {
+                    NSApplication.shared.terminate(nil)
+                }
+            }
+            .frame(width: 280)
+        }
+        .padding(40)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color(white: 0.1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(Color.cyan.opacity(0.5), lineWidth: 2)
+                )
+        )
+        .shadow(color: .cyan.opacity(0.3), radius: 20)
+    }
+    
+    private func pauseMenuButton(title: String, icon: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: {
+            AudioManager.shared.playTick()
+            action()
+        }) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(color)
+                    .frame(width: 24)
+                
+                Text(title)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(.white)
+                
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(color.opacity(0.3), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private var saveGameDialog: some View {
+        VStack(spacing: 20) {
+            Text("Save Game")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(.white)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Save Name:")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.gray)
+                
+                TextField("Enter save name...", text: $viewModel.saveGameName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16))
+                    .foregroundColor(.white)
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.white.opacity(0.1))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.cyan.opacity(0.5), lineWidth: 1)
+                            )
+                    )
+            }
+            
+            HStack(spacing: 16) {
+                Button(action: {
+                    AudioManager.shared.playTick()
+                    viewModel.showSaveDialog = false
+                }) {
+                    Text("Cancel")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.gray.opacity(0.3))
+                        )
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    AudioManager.shared.playTick()
+                    let name = viewModel.saveGameName.isEmpty ? nil : viewModel.saveGameName
+                    if viewModel.onSaveGame?(name) == true {
+                        viewModel.showSaveDialog = false
+                        viewModel.closePauseMenu()
+                    }
+                }) {
+                    Text("Save")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.green)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(30)
+        .frame(width: 350)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(white: 0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.cyan.opacity(0.5), lineWidth: 2)
+                )
+        )
+    }
+    
+    private var loadGamePanel: some View {
+        VStack(spacing: 16) {
+            // Header
+            HStack {
+                Button(action: {
+                    AudioManager.shared.playTick()
+                    viewModel.showLoadMenu = false
+                }) {
+                    HStack {
+                        Image(systemName: "chevron.left")
+                        Text("Back")
+                    }
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(.plain)
+                
+                Spacer()
+                
+                Text("Load Game")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(.white)
+                
+                Spacer()
+                
+                // Spacer for centering
+                Text("Back")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.clear)
+            }
+            .padding(.horizontal)
+            
+            Divider()
+                .background(Color.white.opacity(0.2))
+            
+            // Save list
+            if viewModel.availableSaves.isEmpty {
+                Text("No saved games found")
+                    .font(.system(size: 16))
+                    .foregroundColor(.gray)
+                    .padding(.vertical, 40)
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(viewModel.availableSaves) { save in
+                            loadGameRow(save: save)
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .padding(20)
+        .frame(width: 450)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(white: 0.12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.cyan.opacity(0.5), lineWidth: 2)
+                )
+        )
+    }
+    
+    private func loadGameRow(save: SaveGameData) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(save.saveName)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+                
+                Text(save.formattedTimestamp)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(.cyan.opacity(0.8))
+                
+                Text(save.displaySummary)
+                    .font(.system(size: 11))
+                    .foregroundColor(.gray)
+            }
+            
+            Spacer()
+            
+            Button(action: {
+                AudioManager.shared.playTick()
+                viewModel.loadSaveGame(save)
+            }) {
+                Text("Load")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.green)
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.05))
         )
     }
     
@@ -1149,6 +1492,7 @@ struct GameHUD: View {
                     // Load Save button (only if save exists)
                     if viewModel.hasSaveGame {
                         Button(action: {
+                            AudioManager.shared.playTick()
                             viewModel.onLoadSaveGame?()
                         }) {
                             HStack(spacing: 12) {
@@ -1171,6 +1515,7 @@ struct GameHUD: View {
                     
                     // Restart button
                     Button(action: {
+                        AudioManager.shared.playTick()
                         viewModel.onRestartGame?()
                     }) {
                         HStack(spacing: 12) {
@@ -1208,6 +1553,7 @@ struct GameHUD: View {
             Color.black.opacity(0.6)
                 .ignoresSafeArea()
                 .onTapGesture {
+                    AudioManager.shared.playTick()
                     viewModel.closeLootPanel()
                 }
             
@@ -1256,6 +1602,7 @@ struct GameHUD: View {
                         Spacer()
                         
                         Button(action: {
+                            AudioManager.shared.playTick()
                             viewModel.lootGold()
                         }) {
                             Text("Take")
@@ -1299,6 +1646,7 @@ struct GameHUD: View {
                 // Action buttons
                 HStack(spacing: 12) {
                     Button(action: {
+                        AudioManager.shared.playTick()
                         viewModel.lootAll()
                     }) {
                         HStack {
@@ -1315,6 +1663,7 @@ struct GameHUD: View {
                     .buttonStyle(.plain)
                     
                     Button(action: {
+                        AudioManager.shared.playTick()
                         viewModel.closeLootPanel()
                     }) {
                         HStack {
@@ -1390,6 +1739,7 @@ struct GameHUD: View {
         .opacity(lootItem.isLooted ? 0.5 : 1.0)
         .instantTooltip(tooltipForLootItem(lootItem))
         .onTapGesture {
+            AudioManager.shared.playTick()
             if !lootItem.isLooted {
                 viewModel.lootItem(at: index)
             }
@@ -1423,6 +1773,7 @@ struct GameHUD: View {
         .frame(width: 80, height: 80)
         .instantTooltip(item?.tooltipText ?? slotName)
         .onTapGesture(count: 2) {
+            AudioManager.shared.playTick()
             if item != nil {
                 viewModel.unequipSlot(slot)
             }
@@ -1481,6 +1832,7 @@ struct GameHUD: View {
         }
         .instantTooltip(slot.item?.tooltipText ?? "")
         .onTapGesture(count: 2) {
+            AudioManager.shared.playTick()
             print("[UI] Double-clicked slot \(slot.id), hasItem: \(slot.item != nil)")
             if slot.item != nil {
                 viewModel.equipItem(at: slot.id)
@@ -1531,6 +1883,7 @@ struct GameHUD: View {
                 
                 // Discard one
                 Button(role: .destructive) {
+                    AudioManager.shared.playTick()
                     viewModel.discardItem(at: slot.id, quantity: 1)
                 } label: {
                     Label("Discard 1", systemImage: "trash")
@@ -1539,6 +1892,7 @@ struct GameHUD: View {
                 // Discard all (if quantity > 1)
                 if item.quantity > 1 {
                     Button(role: .destructive) {
+                        AudioManager.shared.playTick()
                         viewModel.discardItem(at: slot.id, quantity: item.quantity)
                     } label: {
                         Label("Discard All (\(item.quantity))", systemImage: "trash.fill")
@@ -1721,6 +2075,7 @@ struct GameHUD: View {
                     // Attribute points indicator (clickable to open level up menu)
                     if viewModel.unspentPoints > 0 {
                         Button(action: {
+                            AudioManager.shared.playTick()
                             viewModel.openLevelUpMenu()
                         }) {
                             HStack(spacing: 4) {
@@ -1752,7 +2107,7 @@ struct GameHUD: View {
             
             Spacer()
             
-            // Bottom bar - Mini attribute display and help hint
+            // Bottom bar - Mini attribute display, coordinates, and help hint
             HStack {
                 HStack(spacing: 20) {
                     AttributeDisplay(name: "STR", value: viewModel.strength, color: .red)
@@ -1761,6 +2116,26 @@ struct GameHUD: View {
                 }
                 
                 Spacer()
+                
+                // Player coordinates (debug) - click to copy
+                Button(action: {
+                    AudioManager.shared.playTick()
+                    let coords = String(format: "X: %.1f, Y: %.1f, Z: %.1f", viewModel.playerX, viewModel.playerY, viewModel.playerZ)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(coords, forType: .string)
+                }) {
+                    Text(String(format: "X: %.1f  Y: %.1f  Z: %.1f", viewModel.playerX, viewModel.playerY, viewModel.playerZ))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(.cyan.opacity(0.8))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.black.opacity(0.4))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Click to copy coordinates")
                 
                 // Help hint
                 Text("Press H for Help")
@@ -1927,6 +2302,11 @@ final class GameHUDViewModel {
     var intelligence: Int = 10
     var unspentPoints: Int = 0
     
+    // Debug: Player position
+    var playerX: Float = 0
+    var playerY: Float = 0
+    var playerZ: Float = 0
+    
     // Loot notification
     var currentLoot: LootNotification? = nil
     private var lootDismissTask: Task<Void, Never>?
@@ -1958,6 +2338,16 @@ final class GameHUDViewModel {
     var hasSaveGame: Bool = false
     var onRestartGame: (() -> Void)?
     var onLoadSaveGame: (() -> Void)?
+    var onReturnToMainMenu: (() -> Void)?
+    var onSaveGame: ((String?) -> Bool)?
+    var onQuickSave: (() -> Bool)?
+    
+    // Pause menu state
+    var isPauseMenuOpen: Bool = false
+    var showSaveDialog: Bool = false
+    var saveGameName: String = ""
+    var showLoadMenu: Bool = false
+    var availableSaves: [SaveGameData] = []
     
     // Help menu state
     var isHelpMenuOpen: Bool = false
@@ -1971,7 +2361,7 @@ final class GameHUDViewModel {
     
     /// Returns true if the game should be paused (UI menus are open)
     var isGamePaused: Bool {
-        isInventoryOpen || isLevelUpMenuOpen || isShopOpen || isPlayerDead
+        isInventoryOpen || isLevelUpMenuOpen || isShopOpen || isPlayerDead || isPauseMenuOpen
     }
     
     // Level up announcement
@@ -2037,6 +2427,9 @@ final class GameHUDViewModel {
     func showDeathScreen() {
         isPlayerDead = true
         hasSaveGame = SaveGameManager.shared.hasSaveGame
+        
+        // Play death sounds
+        AudioManager.shared.playPlayerDeath()
         
         // Close any open panels
         isInventoryOpen = false
@@ -2109,6 +2502,13 @@ final class GameHUDViewModel {
         enemyHealthBars = bars
     }
     
+    /// Update player position - called each frame by the renderer
+    func updatePlayerPosition(x: Float, y: Float, z: Float) {
+        playerX = x
+        playerY = y
+        playerZ = z
+    }
+    
     /// Show a block notification (when shield blocks an attack)
     func showBlockNotification() {
         // Show block notification using the loot notification system
@@ -2163,6 +2563,52 @@ final class GameHUDViewModel {
         }
     }
     
+    // MARK: - Pause Menu
+    
+    /// Toggle the pause menu
+    func togglePauseMenu() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            if isPauseMenuOpen {
+                closePauseMenu()
+            } else {
+                openPauseMenu()
+            }
+        }
+    }
+    
+    /// Open the pause menu
+    func openPauseMenu() {
+        // Close other menus first
+        isInventoryOpen = false
+        isHelpMenuOpen = false
+        isLevelUpMenuOpen = false
+        isShopOpen = false
+        isLootPanelOpen = false
+        
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            isPauseMenuOpen = true
+            showSaveDialog = false
+            showLoadMenu = false
+        }
+    }
+    
+    /// Close the pause menu
+    func closePauseMenu() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            isPauseMenuOpen = false
+            showSaveDialog = false
+            showLoadMenu = false
+        }
+    }
+    
+    /// Load a save game from the pause menu
+    func loadSaveGame(_ save: SaveGameData) {
+        closePauseMenu()
+        // Return to main menu - the save will be loaded when starting a new game session
+        // This ensures a clean state for loading
+        onReturnToMainMenu?()
+    }
+    
     /// Allocate a point to an attribute
     func allocatePoint(to attribute: AttributeType) {
         guard let player = player else { return }
@@ -2181,6 +2627,9 @@ final class GameHUDViewModel {
     func showLevelUpAnnouncementEffect() {
         // Cancel any existing animation
         levelUpAnnouncementTask?.cancel()
+        
+        // Play level up sound
+        AudioManager.shared.playLevelUp()
         
         // Reset and show
         announcementOpacity = 1.0
@@ -2321,6 +2770,9 @@ final class GameHUDViewModel {
         
         // Apply the consumable's effect
         if item.healAmount > 0 {
+            // Play drink potion sound
+            AudioManager.shared.playDrinkPotion()
+            
             let healed = player.heal(item.healAmount)
             print("[Inventory] Consumed '\(item.name)', healed \(healed) HP")
             // Show heal notification
@@ -2475,6 +2927,9 @@ final class GameHUDViewModel {
     /// Open the loot panel for a corpse
     func openLootPanel(for enemy: Enemy) {
         guard !enemy.isLooted else { return }
+        
+        // Play loot menu sound
+        AudioManager.shared.playLootMenu()
         
         currentLootingEnemy = enemy
         currentLootingChestIndex = nil

@@ -1731,9 +1731,10 @@ class GeometryGenerator {
     
     // MARK: - Pole Meshes
     
-    static func makePoleMeshes(device: MTLDevice) -> (MTLBuffer, Int, [Collider]) {
+    static func makePoleMeshes(device: MTLDevice) -> (MTLBuffer, Int, [Collider], [simd_float3]) {
         var vertices: [TexturedVertex] = []
         var colliders: [Collider] = []
+        var lanternPositions: [simd_float3] = []
         
         // No center marker - keep spawn area clear
         
@@ -1741,11 +1742,14 @@ class GeometryGenerator {
         let positions: [(Float, Float)] = [(-95, -95), (95, -95), (-95, 95), (95, 95)]
         for (x, z) in positions {
             let poleRadius: Float = 0.15
+            let height: Float = 4.0
             // Check if position is clear (boundary markers probably won't conflict, but check anyway)
             if isPositionClear(x: x, z: z, radius: poleRadius + 0.5) {
                 markOccupied(x: x, z: z, radius: poleRadius + 0.5)
                 let y = Terrain.heightAt(x: x, z: z)
-                addPole(at: simd_float3(x, y, z), height: 4.0, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                addPole(at: simd_float3(x, y, z), height: height, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                // Lantern is at top of pole
+                lanternPositions.append(simd_float3(x, y + height, z))
             }
         }
         
@@ -1757,25 +1761,28 @@ class GeometryGenerator {
                 let x2: Float = 2.5
                 let z2 = Float(i)
                 let poleRadius: Float = 0.1
+                let height: Float = 2.5
                 
                 // Check first pole position
                 if isPositionClear(x: x1, z: z1, radius: poleRadius + 0.5) {
                     markOccupied(x: x1, z: z1, radius: poleRadius + 0.5)
                     let y1 = Terrain.heightAt(x: x1, z: z1)
-                    addPole(at: simd_float3(x1, y1, z1), height: 2.5, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                    addPole(at: simd_float3(x1, y1, z1), height: height, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                    lanternPositions.append(simd_float3(x1, y1 + height, z1))
                 }
                 
                 // Check second pole position
                 if isPositionClear(x: x2, z: z2, radius: poleRadius + 0.5) {
                     markOccupied(x: x2, z: z2, radius: poleRadius + 0.5)
                     let y2 = Terrain.heightAt(x: x2, z: z2)
-                    addPole(at: simd_float3(x2, y2, z2), height: 2.5, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                    addPole(at: simd_float3(x2, y2, z2), height: height, radius: poleRadius, vertices: &vertices, colliders: &colliders)
+                    lanternPositions.append(simd_float3(x2, y2 + height, z2))
                 }
             }
         }
         
         let buffer = device.makeBuffer(bytes: vertices, length: MemoryLayout<TexturedVertex>.stride * vertices.count, options: [])!
-        return (buffer, vertices.count, colliders)
+        return (buffer, vertices.count, colliders, lanternPositions)
     }
     
     private static func addPole(at pos: simd_float3, height: Float, radius: Float, vertices: inout [TexturedVertex], colliders: inout [Collider]) {

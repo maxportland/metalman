@@ -34,6 +34,91 @@ final class USDModelLoader {
         return loadModel(from: url, materialIndex: materialIndex)
     }
     
+    /// Print the full hierarchy of a USD asset for debugging
+    func printAssetHierarchy(from url: URL) {
+        let allocator = MTKMeshBufferAllocator(device: device)
+        let asset = MDLAsset(url: url, vertexDescriptor: nil, bufferAllocator: allocator)
+        
+        print("\n[USDLoader] ========== ASSET HIERARCHY ==========")
+        print("[USDLoader] URL: \(url.lastPathComponent)")
+        print("[USDLoader] Object count: \(asset.count)")
+        
+        for i in 0..<asset.count {
+            let object = asset.object(at: i)
+            printObjectHierarchy(object, indent: 0)
+        }
+        print("[USDLoader] ======================================\n")
+    }
+    
+    private func printObjectHierarchy(_ object: MDLObject, indent: Int) {
+        let indentStr = String(repeating: "  ", count: indent)
+        let typeName = String(describing: type(of: object))
+        
+        var info = "\(indentStr)[\(typeName)] \(object.name)"
+        
+        // Check for transform
+        if let transform = object.transform {
+            let matrix = transform.matrix
+            let pos = simd_float3(matrix.columns.3.x, matrix.columns.3.y, matrix.columns.3.z)
+            info += " pos=(\(String(format: "%.2f", pos.x)), \(String(format: "%.2f", pos.y)), \(String(format: "%.2f", pos.z)))"
+        }
+        
+        // Check for mesh info
+        if let mesh = object as? MDLMesh {
+            info += " vertices=\(mesh.vertexCount)"
+            if let submeshes = mesh.submeshes as? [MDLSubmesh] {
+                info += " submeshes=\(submeshes.count)"
+            }
+        }
+        
+        // Check for skeleton
+        if let skeleton = object as? MDLSkeleton {
+            info += " SKELETON"
+            print(info)
+            // Print joint paths
+            let jointPaths = skeleton.jointPaths
+            print("\(indentStr)  Joint count: \(jointPaths.count)")
+            for (i, path) in jointPaths.enumerated() {
+                if i < 20 {  // Print first 20 joints
+                    print("\(indentStr)    [\(i)] \(path)")
+                } else if i == 20 {
+                    print("\(indentStr)    ... and \(jointPaths.count - 20) more joints")
+                }
+            }
+            
+            // Print children and return
+            for child in object.children.objects {
+                printObjectHierarchy(child, indent: indent + 1)
+            }
+            return
+        }
+        
+        // Check components
+        if object.components.count > 0 {
+            var componentNames: [String] = []
+            for i in 0..<object.components.count {
+                let comp = object.components[i]
+                componentNames.append(String(describing: type(of: comp)))
+                
+                // Check for animation bind component
+                if let animBind = comp as? MDLAnimationBindComponent {
+                    info += " HAS_ANIMATION_BIND"
+                    if let skeleton = animBind.skeleton {
+                        info += " skeleton=\(skeleton.name)"
+                    }
+                }
+            }
+            info += " components=[\(componentNames.joined(separator: ", "))]"
+        }
+        
+        print(info)
+        
+        // Print children
+        for child in object.children.objects {
+            printObjectHierarchy(child, indent: indent + 1)
+        }
+    }
+    
     /// Load a USD model from a URL
     func loadModel(from url: URL, materialIndex: UInt32) -> LoadedModel? {
         // Create a Metal vertex descriptor matching our TexturedVertex layout
@@ -169,57 +254,89 @@ final class USDModelLoader {
             for i in Swift.stride(from: 0, to: indexCount, by: 3) {
                 var indices: [Int] = []
                 
+                // Reverse winding order (swap indices 1 and 2) to fix inverted faces
                 switch submesh.indexType {
                 case .invalid:
                     continue
                 case .uInt16:
                     let ptr = indexData.bytes.bindMemory(to: UInt16.self, capacity: indexCount)
-                    indices = [Int(ptr[i]), Int(ptr[i+1]), Int(ptr[i+2])]
+                    indices = [Int(ptr[i]), Int(ptr[i+2]), Int(ptr[i+1])]  // Reversed winding
                 case .uInt32:
                     let ptr = indexData.bytes.bindMemory(to: UInt32.self, capacity: indexCount)
-                    indices = [Int(ptr[i]), Int(ptr[i+1]), Int(ptr[i+2])]
+                    indices = [Int(ptr[i]), Int(ptr[i+2]), Int(ptr[i+1])]  // Reversed winding
                 case .uInt8:
                     let ptr = indexData.bytes.bindMemory(to: UInt8.self, capacity: indexCount)
-                    indices = [Int(ptr[i]), Int(ptr[i+1]), Int(ptr[i+2])]
+                    indices = [Int(ptr[i]), Int(ptr[i+2]), Int(ptr[i+1])]  // Reversed winding
                 @unknown default:
                     continue
                 }
                 
+                // First pass: read positions for all 3 vertices
+                var positions: [simd_float3] = []
                 for idx in indices {
                     let basePtr = vertexData.bytes.advanced(by: idx * stride)
-                    
-                    // Read position
                     let posPtr = basePtr.advanced(by: positionOffset).bindMemory(to: Float.self, capacity: 3)
                     let position = simd_float3(posPtr[0], posPtr[1], posPtr[2])
+                    positions.append(position)
                     
                     // Update bounds
                     minBound = simd_min(minBound, position)
                     maxBound = simd_max(maxBound, position)
+                }
+                
+                // Calculate face normal from triangle vertices
+                let edge1 = positions[1] - positions[0]
+                let edge2 = positions[2] - positions[0]
+                var faceNormal = simd_normalize(simd_cross(edge1, edge2))
+                
+                // Handle degenerate triangles
+                if faceNormal.x.isNaN || faceNormal.y.isNaN || faceNormal.z.isNaN {
+                    faceNormal = simd_float3(0, 1, 0)
+                }
+                
+                // Calculate tangent from first edge
+                var tangent = simd_normalize(edge1)
+                if tangent.x.isNaN || tangent.y.isNaN || tangent.z.isNaN {
+                    tangent = simd_float3(1, 0, 0)
+                }
+                
+                // Second pass: create vertices with calculated normal
+                for (vertIdx, idx) in indices.enumerated() {
+                    let position = positions[vertIdx]
+                    let basePtr = vertexData.bytes.advanced(by: idx * stride)
                     
-                    // Read normal (with fallback)
-                    var normal = simd_float3(0, 1, 0)
-                    if normalOffset < stride - 8 {
-                        let normPtr = basePtr.advanced(by: normalOffset).bindMemory(to: Float.self, capacity: 3)
-                        normal = simd_float3(normPtr[0], normPtr[1], normPtr[2])
-                    }
-                    
-                    // Read tangent (with fallback)
-                    var tangent = simd_float3(1, 0, 0)
-                    if tangentOffset < stride - 8 {
-                        let tanPtr = basePtr.advanced(by: tangentOffset).bindMemory(to: Float.self, capacity: 3)
-                        tangent = simd_float3(tanPtr[0], tanPtr[1], tanPtr[2])
-                    }
-                    
-                    // Read texCoord (with fallback)
+                    // Read texCoord (with fallback to procedural UVs based on position)
                     var texCoord = simd_float2(0, 0)
+                    var hasValidUV = false
                     if texCoordOffset < stride - 4 {
                         let texPtr = basePtr.advanced(by: texCoordOffset).bindMemory(to: Float.self, capacity: 2)
                         texCoord = simd_float2(texPtr[0], texPtr[1])
+                        // Check if UV is valid (not all zeros or extreme values)
+                        if abs(texPtr[0]) > 0.001 || abs(texPtr[1]) > 0.001 {
+                            hasValidUV = true
+                        }
+                    }
+                    
+                    // Generate procedural UVs if model doesn't have valid ones
+                    // Use triplanar-style mapping based on normal direction
+                    if !hasValidUV {
+                        let uvScale: Float = 0.08  // Smaller = more texture repetition
+                        let absNormal = simd_abs(faceNormal)
+                        if absNormal.y > absNormal.x && absNormal.y > absNormal.z {
+                            // Top/bottom facing - use XZ
+                            texCoord = simd_float2(position.x * uvScale, position.z * uvScale)
+                        } else if absNormal.x > absNormal.z {
+                            // Left/right facing - use YZ
+                            texCoord = simd_float2(position.z * uvScale, position.y * uvScale)
+                        } else {
+                            // Front/back facing - use XY
+                            texCoord = simd_float2(position.x * uvScale, position.y * uvScale)
+                        }
                     }
                     
                     let vertex = TexturedVertex(
                         position: position,
-                        normal: normal,
+                        normal: faceNormal,
                         tangent: tangent,
                         texCoord: texCoord,
                         materialIndex: materialIndex

@@ -65,6 +65,17 @@ struct LitUniforms {
     float3 skyColorHorizon;
     float3 sunColor;
     float timeOfDay;          // 0-24 hours
+    
+    // Point lights (lanterns on poles) - xyz = position, w = intensity
+    float4 pointLight0;
+    float4 pointLight1;
+    float4 pointLight2;
+    float4 pointLight3;
+    float4 pointLight4;
+    float4 pointLight5;
+    float4 pointLight6;
+    float4 pointLight7;
+    int pointLightCount;
     float3 padding2;          // Alignment padding
 };
 
@@ -256,9 +267,48 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
     // Shadow
     float shadow = calculateShadow(in.lightSpacePosition, shadowMap, shadowSampler);
     
-    // Final color
+    // Base lighting from sun/moon
     float lighting = uniforms.ambientIntensity + uniforms.diffuseIntensity * NdotL * shadow;
-    float3 finalColor = texColor.rgb * lighting;
+    
+    // Point lights contribution (lanterns)
+    float3 pointLightContrib = float3(0.0);
+    float3 worldPos = in.worldPosition;
+    // Reuse 'normal' calculated above from TBN matrix
+    
+    // Warm lantern color (orange/yellow glow)
+    float3 lanternColor = float3(1.0, 0.7, 0.3);
+    
+    // Calculate contribution from each active point light
+    float4 pointLights[8] = {
+        uniforms.pointLight0, uniforms.pointLight1, uniforms.pointLight2, uniforms.pointLight3,
+        uniforms.pointLight4, uniforms.pointLight5, uniforms.pointLight6, uniforms.pointLight7
+    };
+    
+    for (int i = 0; i < uniforms.pointLightCount && i < 8; i++) {
+        float3 lightPos = pointLights[i].xyz;
+        float intensity = pointLights[i].w;
+        
+        float3 toLight = lightPos - worldPos;
+        float dist = length(toLight);
+        float3 lightDir = toLight / dist;
+        
+        // Attenuation (inverse square with cutoff)
+        float radius = 15.0;  // Light radius
+        float attenuation = saturate(1.0 - dist / radius);
+        attenuation *= attenuation;  // Quadratic falloff
+        
+        // Diffuse contribution
+        float NdotL_point = max(dot(normal, lightDir), 0.0);
+        
+        pointLightContrib += lanternColor * intensity * attenuation * NdotL_point;
+    }
+    
+    // Darken cabin (material 14) by 50%
+    if (in.materialIndex == 14) {
+        lighting *= 0.5;
+    }
+    
+    float3 finalColor = texColor.rgb * lighting + texColor.rgb * pointLightContrib;
     
     return float4(finalColor, texColor.a);
 }
@@ -272,5 +322,111 @@ vertex float4 vertex_shadow(TexturedVertexIn in [[stage_in]],
 
 fragment void fragment_shadow() {
     // Depth-only pass, no color output
+}
+
+// ====================================================================
+// SKELETAL ANIMATION SHADERS
+// ====================================================================
+
+// Maximum bones per skeletal mesh
+constant int MAX_BONES = 128;
+
+// Skinned vertex input with bone weights
+struct SkinnedVertexIn {
+    float3 position [[attribute(0)]];
+    float3 normal [[attribute(1)]];
+    float2 texCoord [[attribute(2)]];
+    uint4 boneIndices [[attribute(3)]];
+    float4 boneWeights [[attribute(4)]];
+    uint materialIndex [[attribute(5)]];
+};
+
+// Uniforms for skeletal animation
+struct SkinnedUniforms {
+    float4x4 modelMatrix;
+    float4x4 viewProjectionMatrix;
+    float4x4 lightViewProjectionMatrix;
+    float3 lightDirection;
+    float3 cameraPosition;
+    float ambientIntensity;
+    float diffuseIntensity;
+    
+    // Sky colors (for consistency with LitUniforms)
+    float3 skyColorTop;
+    float3 skyColorHorizon;
+    float3 sunColor;
+    float timeOfDay;
+    
+    // Point lights
+    float4 pointLight0;
+    float4 pointLight1;
+    float4 pointLight2;
+    float4 pointLight3;
+    float4 pointLight4;
+    float4 pointLight5;
+    float4 pointLight6;
+    float4 pointLight7;
+    int pointLightCount;
+    float3 padding2;
+};
+
+// Skinned vertex shader - applies bone transforms to vertices
+vertex LitVertexOut vertex_skinned(SkinnedVertexIn in [[stage_in]],
+                                   constant SkinnedUniforms &uniforms [[buffer(1)]],
+                                   constant float4x4 *boneMatrices [[buffer(2)]]) {
+    LitVertexOut out;
+    
+    // Get bone transforms
+    float4x4 bone0 = boneMatrices[in.boneIndices.x];
+    float4x4 bone1 = boneMatrices[in.boneIndices.y];
+    float4x4 bone2 = boneMatrices[in.boneIndices.z];
+    float4x4 bone3 = boneMatrices[in.boneIndices.w];
+    
+    // Blend position using bone weights
+    float4 pos = float4(in.position, 1.0);
+    float4 skinnedPos = bone0 * pos * in.boneWeights.x +
+                        bone1 * pos * in.boneWeights.y +
+                        bone2 * pos * in.boneWeights.z +
+                        bone3 * pos * in.boneWeights.w;
+    
+    // Blend normal using bone weights (no translation, just rotation)
+    float3 norm = in.normal;
+    float3 skinnedNorm = (bone0 * float4(norm, 0.0) * in.boneWeights.x +
+                          bone1 * float4(norm, 0.0) * in.boneWeights.y +
+                          bone2 * float4(norm, 0.0) * in.boneWeights.z +
+                          bone3 * float4(norm, 0.0) * in.boneWeights.w).xyz;
+    
+    // Transform to world space
+    float4 worldPos = uniforms.modelMatrix * skinnedPos;
+    out.worldPosition = worldPos.xyz;
+    out.position = uniforms.viewProjectionMatrix * worldPos;
+    out.normal = normalize((uniforms.modelMatrix * float4(skinnedNorm, 0.0)).xyz);
+    out.tangent = float3(1, 0, 0); // Generate tangent from normal
+    out.texCoord = in.texCoord;
+    out.lightSpacePosition = uniforms.lightViewProjectionMatrix * worldPos;
+    out.materialIndex = in.materialIndex;
+    
+    return out;
+}
+
+// Shadow pass for skinned meshes
+vertex float4 vertex_skinned_shadow(SkinnedVertexIn in [[stage_in]],
+                                    constant SkinnedUniforms &uniforms [[buffer(1)]],
+                                    constant float4x4 *boneMatrices [[buffer(2)]]) {
+    // Get bone transforms
+    float4x4 bone0 = boneMatrices[in.boneIndices.x];
+    float4x4 bone1 = boneMatrices[in.boneIndices.y];
+    float4x4 bone2 = boneMatrices[in.boneIndices.z];
+    float4x4 bone3 = boneMatrices[in.boneIndices.w];
+    
+    // Blend position using bone weights
+    float4 pos = float4(in.position, 1.0);
+    float4 skinnedPos = bone0 * pos * in.boneWeights.x +
+                        bone1 * pos * in.boneWeights.y +
+                        bone2 * pos * in.boneWeights.z +
+                        bone3 * pos * in.boneWeights.w;
+    
+    float4 worldPos = uniforms.modelMatrix * skinnedPos;
+    return uniforms.lightViewProjectionMatrix * worldPos;
 }
 """

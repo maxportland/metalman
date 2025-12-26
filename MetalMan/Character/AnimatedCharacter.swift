@@ -1,0 +1,303 @@
+//
+//  AnimatedCharacter.swift
+//  MetalMan
+//
+//  Manages an animated skeletal character with state-based animation
+//
+
+import Metal
+import MetalKit
+import simd
+
+// MARK: - Character Animation State
+
+/// Represents the current animation state of a character
+enum CharacterAnimationState {
+    case idle
+    case walking
+    case running
+    case attacking
+    case jumping
+    case dying
+    case dead
+    
+    var animationName: String {
+        switch self {
+        case .idle: return "idle"
+        case .walking: return "walk"
+        case .running: return "run"
+        case .attacking: return "attack"
+        case .jumping: return "jump"
+        case .dying: return "die"
+        case .dead: return "dead"
+        }
+    }
+    
+    var isLooping: Bool {
+        switch self {
+        case .idle, .walking, .running: return true
+        case .attacking, .jumping, .dying, .dead: return false
+        }
+    }
+}
+
+// MARK: - Animated Character
+
+/// Represents an animated character that can be rendered and animated
+final class AnimatedCharacter {
+    
+    // MARK: - Properties
+    
+    /// The skeletal mesh containing geometry and bones
+    let mesh: SkeletalMesh
+    
+    /// Current animation state
+    private(set) var animationState: CharacterAnimationState = .idle
+    
+    /// Current animation time
+    private var animationTime: Float = 0
+    
+    /// Speed multiplier for animations
+    var animationSpeed: Float = 1.0
+    
+    /// Blend factor for transitioning between animations (0-1)
+    private var blendFactor: Float = 1.0
+    private var previousBoneTransforms: [simd_float4x4] = []
+    
+    /// Whether this character has a shield equipped
+    var hasShieldEquipped: Bool = false
+    
+    /// Device reference for creating buffers
+    private let device: MTLDevice
+    
+    /// Uniform buffer for rendering
+    let uniformBuffer: MTLBuffer
+    
+    /// The vertex descriptor for skinned vertices (packed layout - no SIMD padding)
+    static var vertexDescriptor: MTLVertexDescriptor {
+        let descriptor = MTLVertexDescriptor()
+        
+        // Position (float3) - 12 bytes
+        descriptor.attributes[0].format = .float3
+        descriptor.attributes[0].offset = 0
+        descriptor.attributes[0].bufferIndex = 0
+        
+        // Normal (float3) - 12 bytes
+        descriptor.attributes[1].format = .float3
+        descriptor.attributes[1].offset = 12
+        descriptor.attributes[1].bufferIndex = 0
+        
+        // TexCoord (float2) - 8 bytes
+        descriptor.attributes[2].format = .float2
+        descriptor.attributes[2].offset = 24
+        descriptor.attributes[2].bufferIndex = 0
+        
+        // Bone indices (uint4) - 16 bytes
+        descriptor.attributes[3].format = .uint4
+        descriptor.attributes[3].offset = 32
+        descriptor.attributes[3].bufferIndex = 0
+        
+        // Bone weights (float4) - 16 bytes
+        descriptor.attributes[4].format = .float4
+        descriptor.attributes[4].offset = 48
+        descriptor.attributes[4].bufferIndex = 0
+        
+        // Material index (uint) - 4 bytes
+        descriptor.attributes[5].format = .uint
+        descriptor.attributes[5].offset = 64
+        descriptor.attributes[5].bufferIndex = 0
+        
+        // Layout - total stride should be 72 bytes (including 4 bytes padding)
+        descriptor.layouts[0].stride = SkinnedVertex.stride
+        descriptor.layouts[0].stepRate = 1
+        descriptor.layouts[0].stepFunction = .perVertex
+        
+        return descriptor
+    }
+    
+    // MARK: - Initialization
+    
+    init(device: MTLDevice, mesh: SkeletalMesh) {
+        self.device = device
+        self.mesh = mesh
+        
+        // Create uniform buffer (same size as LitUniforms for compatibility)
+        self.uniformBuffer = device.makeBuffer(length: 512, options: .storageModeShared)!
+        
+        // Initialize bone transforms
+        self.previousBoneTransforms = Array(repeating: matrix_identity_float4x4, count: mesh.bones.count)
+    }
+    
+    // MARK: - Animation Control
+    
+    /// Change to a new animation state
+    func setAnimationState(_ newState: CharacterAnimationState, resetTime: Bool = true) {
+        if newState != animationState {
+            // Store previous transforms for blending
+            if let currentTransforms = getCurrentBoneTransforms() {
+                previousBoneTransforms = currentTransforms
+            }
+            blendFactor = 0  // Start blend
+            
+            animationState = newState
+            if resetTime {
+                animationTime = 0
+            }
+        }
+    }
+    
+    /// Update the animation based on elapsed time
+    func update(deltaTime: Float) {
+        animationTime += deltaTime * animationSpeed
+        
+        // Update blend factor
+        if blendFactor < 1.0 {
+            blendFactor = min(1.0, blendFactor + deltaTime * 5.0)  // Blend over ~0.2 seconds
+        }
+        
+        // Get current animation transforms
+        if let transforms = getCurrentBoneTransforms() {
+            // Blend with previous transforms if transitioning
+            let finalTransforms: [simd_float4x4]
+            if blendFactor < 1.0 && previousBoneTransforms.count == transforms.count {
+                finalTransforms = zip(previousBoneTransforms, transforms).map { prev, curr in
+                    lerpMatrix(prev, curr, t: blendFactor)
+                }
+            } else {
+                finalTransforms = transforms
+            }
+            
+            mesh.updateBoneMatrices(finalTransforms)
+        }
+    }
+    
+    /// Get the current bone transforms from the active animation
+    private func getCurrentBoneTransforms() -> [simd_float4x4]? {
+        let animName = animationState.animationName
+        let boneCount = mesh.bones.count
+        
+        if let animation = mesh.animations[animName] {
+            return animation.getBoneTransforms(at: animationTime, boneCount: boneCount)
+        }
+        
+        // Fallback to idle
+        if let idleAnim = mesh.animations["idle"] {
+            return idleAnim.getBoneTransforms(at: animationTime, boneCount: boneCount)
+        }
+        
+        return nil
+    }
+    
+    /// Check if the current animation has completed (for non-looping animations)
+    var isAnimationComplete: Bool {
+        guard !animationState.isLooping else { return false }
+        
+        let animName = animationState.animationName
+        if let animation = mesh.animations[animName] {
+            return animationTime >= animation.duration
+        }
+        return true
+    }
+    
+    // MARK: - Rendering
+    
+    /// Draw the animated character
+    func draw(encoder: MTLRenderCommandEncoder,
+              modelMatrix: simd_float4x4,
+              viewProjectionMatrix: simd_float4x4,
+              lightViewProjectionMatrix: simd_float4x4,
+              lightDirection: simd_float3,
+              cameraPosition: simd_float3,
+              ambientIntensity: Float,
+              diffuseIntensity: Float,
+              timeOfDay: Float,
+              pointLights: [PointLight]) {
+        
+        // Update uniforms (matches SkinnedUniforms structure in shader)
+        var uniforms = SkinnedUniforms()
+        uniforms.modelMatrix = modelMatrix
+        uniforms.viewProjectionMatrix = viewProjectionMatrix
+        uniforms.lightViewProjectionMatrix = lightViewProjectionMatrix
+        uniforms.lightDirection = lightDirection
+        uniforms.cameraPosition = cameraPosition
+        uniforms.ambientIntensity = ambientIntensity
+        uniforms.diffuseIntensity = diffuseIntensity
+        uniforms.timeOfDay = timeOfDay
+        
+        // Set point lights
+        uniforms.pointLightCount = Int32(min(8, pointLights.count))
+        for (i, light) in pointLights.prefix(8).enumerated() {
+            let lightData = simd_float4(light.position.x, light.position.y, light.position.z, light.intensity)
+            switch i {
+            case 0: uniforms.pointLight0 = lightData
+            case 1: uniforms.pointLight1 = lightData
+            case 2: uniforms.pointLight2 = lightData
+            case 3: uniforms.pointLight3 = lightData
+            case 4: uniforms.pointLight4 = lightData
+            case 5: uniforms.pointLight5 = lightData
+            case 6: uniforms.pointLight6 = lightData
+            case 7: uniforms.pointLight7 = lightData
+            default: break
+            }
+        }
+        
+        memcpy(uniformBuffer.contents(), &uniforms, MemoryLayout<SkinnedUniforms>.stride)
+        
+        // Set buffers
+        encoder.setVertexBuffer(mesh.vertexBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(uniformBuffer, offset: 0, index: 1)
+        encoder.setVertexBuffer(mesh.boneMatrixBuffer, offset: 0, index: 2)
+        
+        // Draw
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: mesh.vertexCount)
+    }
+}
+
+// MARK: - Skinned Uniforms
+
+/// Uniforms structure for skinned character rendering (matches shader)
+struct SkinnedUniforms {
+    var modelMatrix: simd_float4x4 = matrix_identity_float4x4
+    var viewProjectionMatrix: simd_float4x4 = matrix_identity_float4x4
+    var lightViewProjectionMatrix: simd_float4x4 = matrix_identity_float4x4
+    var lightDirection: simd_float3 = simd_float3(0, -1, 0)
+    var padding1: Float = 0
+    var cameraPosition: simd_float3 = .zero
+    var padding2: Float = 0
+    var ambientIntensity: Float = 0.3
+    var diffuseIntensity: Float = 0.7
+    var padding3: simd_float2 = .zero
+    
+    // Sky colors
+    var skyColorTop: simd_float3 = simd_float3(0.3, 0.5, 0.9)
+    var padding4: Float = 0
+    var skyColorHorizon: simd_float3 = simd_float3(0.7, 0.8, 0.95)
+    var padding5: Float = 0
+    var sunColor: simd_float3 = simd_float3(1, 1, 0.8)
+    var timeOfDay: Float = 12
+    
+    // Point lights
+    var pointLight0: simd_float4 = .zero
+    var pointLight1: simd_float4 = .zero
+    var pointLight2: simd_float4 = .zero
+    var pointLight3: simd_float4 = .zero
+    var pointLight4: simd_float4 = .zero
+    var pointLight5: simd_float4 = .zero
+    var pointLight6: simd_float4 = .zero
+    var pointLight7: simd_float4 = .zero
+    var pointLightCount: Int32 = 0
+    var padding6: simd_float3 = .zero
+}
+
+// MARK: - Helper
+
+/// Linear interpolation between two matrices
+private func lerpMatrix(_ a: simd_float4x4, _ b: simd_float4x4, t: Float) -> simd_float4x4 {
+    return simd_float4x4(
+        simd_mix(a.columns.0, b.columns.0, simd_float4(repeating: t)),
+        simd_mix(a.columns.1, b.columns.1, simd_float4(repeating: t)),
+        simd_mix(a.columns.2, b.columns.2, simd_float4(repeating: t)),
+        simd_mix(a.columns.3, b.columns.3, simd_float4(repeating: t))
+    )
+}
+

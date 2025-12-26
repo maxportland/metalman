@@ -9,21 +9,29 @@ import AppKit
 #endif
 
 struct MetalGameContainer: View {
+    let initialSaveData: SaveGameData?
+    let onReturnToMainMenu: () -> Void
+    
     @State private var hudViewModel = GameHUDViewModel()
+    
+    init(initialSaveData: SaveGameData? = nil, onReturnToMainMenu: @escaping () -> Void = {}) {
+        self.initialSaveData = initialSaveData
+        self.onReturnToMainMenu = onReturnToMainMenu
+    }
     
     var body: some View {
         ZStack {
-            #if canImport(UIKit)
-            MetalGameView(hudViewModel: hudViewModel)
-            #elseif canImport(AppKit)
-            MetalGameView(hudViewModel: hudViewModel)
-            #else
-            Text("Metal not supported on this platform")
-            #endif
+        #if canImport(UIKit)
+            MetalGameView(hudViewModel: hudViewModel, initialSaveData: initialSaveData, onReturnToMainMenu: onReturnToMainMenu)
+        #elseif canImport(AppKit)
+            MetalGameView(hudViewModel: hudViewModel, initialSaveData: initialSaveData, onReturnToMainMenu: onReturnToMainMenu)
+        #else
+        Text("Metal not supported on this platform")
+        #endif
             
             // HUD overlay
             GameHUD(viewModel: hudViewModel)
-                .allowsHitTesting(hudViewModel.isInventoryOpen || hudViewModel.isLootPanelOpen || hudViewModel.isPlayerDead || hudViewModel.isHelpMenuOpen || hudViewModel.isShopOpen || hudViewModel.isLevelUpMenuOpen)  // Allow hit testing for UI overlays
+                .allowsHitTesting(hudViewModel.isInventoryOpen || hudViewModel.isLootPanelOpen || hudViewModel.isPlayerDead || hudViewModel.isHelpMenuOpen || hudViewModel.isShopOpen || hudViewModel.isLevelUpMenuOpen || hudViewModel.isPauseMenuOpen)  // Allow hit testing for UI overlays
         }
     }
 }
