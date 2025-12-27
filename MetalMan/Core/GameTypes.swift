@@ -95,6 +95,12 @@ struct LitUniforms {
     var pointLight7: simd_float4 = .zero
     var pointLightCount: Int32 = 0
     var padding2: simd_float3 = .zero  // Alignment padding
+    
+    // Screen-space occlusion mask (for trees/occluders)
+    var playerScreenPos: simd_float2 = .zero    // Player's screen-space position (0-1, with (0,0) at top-left)
+    var viewportSize: simd_float2 = .zero       // Viewport size in pixels (width, height)
+    var occlusionRadius: Float = 0.0            // Radius of the circular mask in screen pixels
+    var occlusionSoftness: Float = 0.0          // Softness of the gradient edge (0-1, higher = softer)
 }
 
 // MARK: - Point Light

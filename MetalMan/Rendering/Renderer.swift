@@ -1656,6 +1656,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         // No point lights currently (lantern poles removed)
         litUniforms.pointLightCount = 0
         
+        // Compute player's screen-space position for occlusion mask
+        // Player position is at character position + a small height offset (roughly center of character)
+        let playerWorldPos = characterPosition + simd_float3(0, 1.2, 0)  // Approximate character center
+        let playerScreenPos = worldToScreenNormalized(playerWorldPos, viewProjection: vp)
+        
+        // Set occlusion mask parameters
+        litUniforms.playerScreenPos = playerScreenPos
+        litUniforms.viewportSize = simd_float2(Float(viewportSize.width), Float(viewportSize.height))
+        litUniforms.occlusionRadius = 600.0  // Radius in screen pixels (configurable)
+        litUniforms.occlusionSoftness = 1.0  // Softness of gradient edge (0-1, higher = softer)
+        
         memcpy(litUniformBuffer.contents(), &litUniforms, MemoryLayout<LitUniforms>.stride)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
         encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
@@ -2578,6 +2589,27 @@ final class Renderer: NSObject, MTKViewDelegate {
         let screenY = (1 - ndcY) * 0.5 * Float(viewHeight)  // Flip Y
         
         return CGPoint(x: CGFloat(screenX), y: CGFloat(screenY))
+    }
+    
+    /// Project world position to normalized screen-space coordinates (0-1 range, with (0,0) at top-left)
+    /// Returns (0.5, 0.5) if behind camera or invalid
+    private func worldToScreenNormalized(_ worldPos: simd_float3, viewProjection vp: simd_float4x4) -> simd_float2 {
+        let clipPos = vp * simd_float4(worldPos.x, worldPos.y, worldPos.z, 1.0)
+        
+        // Behind camera check - return center of screen if behind
+        if clipPos.w <= 0 {
+            return simd_float2(0.5, 0.5)
+        }
+        
+        // Normalized device coordinates (-1 to 1)
+        let ndcX = clipPos.x / clipPos.w
+        let ndcY = clipPos.y / clipPos.w
+        
+        // Convert to screen-space normalized coordinates (0-1, with 0,0 at top-left)
+        let screenX = (ndcX + 1.0) * 0.5
+        let screenY = (1.0 - ndcY) * 0.5  // Flip Y (NDC has Y up, screen has Y down)
+        
+        return simd_float2(screenX, screenY)
     }
     
     /// Update HUD with damage numbers from enemy manager

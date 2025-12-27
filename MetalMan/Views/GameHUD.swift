@@ -198,7 +198,6 @@ struct InventoryItemDisplay: Identifiable {
 struct GameHUD: View {
     @Bindable var viewModel: GameHUDViewModel
     @State private var isEquipSlotTargeted: [EquipmentSlot: Bool] = [:]
-    @State private var draggedInventoryIndex: Int? = nil  // Track which inventory slot is being dragged
     
     var body: some View {
         ZStack {
@@ -1796,23 +1795,50 @@ struct GameHUD: View {
     }
     
     private func equipmentSlotView(item: InventoryItemDisplay?, slotName: String, slot: EquipmentSlot) -> some View {
+        // Read state values here to ensure SwiftUI tracks dependencies
         let isTargeted = isEquipSlotTargeted[slot] ?? false
+        let dragIdx = viewModel.draggedInventoryIndex
+        let dragEquipSlot = viewModel.draggedEquipmentSlot
         
-        // Determine if the dragged item is compatible with this slot
+        // Check compatibility based on what's being dragged
         let isCompatible: Bool = {
-            guard let dragIndex = draggedInventoryIndex else { return true }
-            return viewModel.canEquipToSlot(fromInventoryIndex: dragIndex, toSlot: slot)
+            // If dragging from inventory, check if item fits this slot
+            if let idx = dragIdx {
+                return viewModel.canEquipToSlot(fromInventoryIndex: idx, toSlot: slot)
+            }
+            // If dragging from another equipment slot, only same slot type is compatible
+            if let fromSlot = dragEquipSlot {
+                return fromSlot == slot
+            }
+            // Nothing being dragged, default to compatible
+            return true
         }()
         
-        let highlightColor = isCompatible ? Color.green : Color.red
+        // Determine colors based on state
+        let backgroundColor: Color = {
+            if isTargeted {
+                return isCompatible ? Color.green.opacity(0.3) : Color.red.opacity(0.3)
+            }
+            return Color(white: 0.15)
+        }()
+        
+        let borderColor: Color = {
+            if isTargeted {
+                return isCompatible ? Color.green : Color.red
+            }
+            return item != nil ? Color.orange.opacity(0.8) : Color.gray.opacity(0.3)
+        }()
+        
+        let borderWidth: CGFloat = isTargeted ? 3 : 2
+        
         
         return ZStack {
-            // Slot background
+            // Slot background - color determined by targeting state
             RoundedRectangle(cornerRadius: 8)
-                .fill(isTargeted ? highlightColor.opacity(0.3) : Color(white: 0.15))
+                .fill(backgroundColor)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(isTargeted ? highlightColor : (item != nil ? Color.orange.opacity(0.8) : Color.gray.opacity(0.3)), lineWidth: isTargeted ? 3 : 2)
+                        .stroke(borderColor, lineWidth: borderWidth)
                 )
             
             if let item = item {
@@ -1849,22 +1875,23 @@ struct GameHUD: View {
                 if viewModel.canEquipToSlot(fromInventoryIndex: fromIndex, toSlot: slot) {
                     AudioManager.shared.playTick()
                     viewModel.equipItemToSlot(fromInventoryIndex: fromIndex, toSlot: slot)
-                    draggedInventoryIndex = nil
+                    viewModel.draggedInventoryIndex = nil
+                    viewModel.draggedEquipmentSlot = nil
                     return true
                 } else {
-                    draggedInventoryIndex = nil
+                    viewModel.draggedInventoryIndex = nil
+                    viewModel.draggedEquipmentSlot = nil
                     return false
                 }
             }
             
-            draggedInventoryIndex = nil
+            viewModel.draggedInventoryIndex = nil
+            viewModel.draggedEquipmentSlot = nil
             return false
         } isTargeted: { targeted in
             isEquipSlotTargeted[slot] = targeted
-            // Clear dragged index when drag ends (no longer targeting any slot)
-            if !targeted && isEquipSlotTargeted.values.allSatisfy({ !$0 }) {
-                draggedInventoryIndex = nil
-            }
+            // Don't clear draggedInventoryIndex here - it causes race conditions
+            // It will be cleared when the drop completes
         }
         .onTapGesture(count: 2) {
             AudioManager.shared.playTick()
@@ -1879,7 +1906,11 @@ struct GameHUD: View {
     private func draggableEquipmentSlot(item: InventoryItemDisplay?, slotName: String, slot: EquipmentSlot) -> some View {
         if let item = item {
             equipmentSlotView(item: item, slotName: slotName, slot: slot)
-                .draggable("equip:\(slot.rawValue)") {
+                .onDrag {
+                    // Track which equipment slot is being dragged
+                    viewModel.draggedEquipmentSlot = slot
+                    return NSItemProvider(object: "equip:\(slot.rawValue)" as NSString)
+                } preview: {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color(white: 0.2))
@@ -1946,7 +1977,7 @@ struct GameHUD: View {
         // Drag support - only items can be dragged (using onDrag for start/end tracking)
         .onDrag {
             // Track which slot is being dragged for compatibility highlighting
-            draggedInventoryIndex = slot.id
+            viewModel.draggedInventoryIndex = slot.id
             return NSItemProvider(object: "inv:\(slot.id)" as NSString)
         } preview: {
             // Drag preview
@@ -1963,7 +1994,8 @@ struct GameHUD: View {
         }
         // Drop support - can receive items from inventory or equipment
         .dropDestination(for: String.self) { items, _ in
-            draggedInventoryIndex = nil  // Clear drag tracking
+            viewModel.draggedInventoryIndex = nil  // Clear drag tracking
+            viewModel.draggedEquipmentSlot = nil
             guard let droppedString = items.first else { return false }
             
             // Handle drop from another inventory slot
@@ -2471,6 +2503,10 @@ final class GameHUDViewModel {
     // Inventory state
     var isInventoryOpen: Bool = false
     var inventorySlots: [InventorySlot] = (0..<20).map { InventorySlot(id: $0, item: nil) }
+    
+    // Drag and drop tracking
+    var draggedInventoryIndex: Int? = nil
+    var draggedEquipmentSlot: EquipmentSlot? = nil
     
     // Equipment slots display
     var equippedMainHand: InventoryItemDisplay? = nil

@@ -77,6 +77,12 @@ struct LitUniforms {
     float4 pointLight7;
     int pointLightCount;
     float3 padding2;          // Alignment padding
+    
+    // Screen-space occlusion mask (for trees/occluders)
+    float2 playerScreenPos;    // Player's screen-space position (0-1, with (0,0) at top-left)
+    float2 viewportSize;       // Viewport size in pixels (width, height)
+    float occlusionRadius;    // Radius of the circular mask in screen pixels
+    float occlusionSoftness;  // Softness of the gradient edge (0-1, higher = softer)
 };
 
 vertex LitVertexOut vertex_lit(TexturedVertexIn in [[stage_in]],
@@ -343,8 +349,49 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
     }
     
     float3 finalColor = texColor.rgb * lighting + texColor.rgb * pointLightContrib;
+    float finalAlpha = texColor.a;
     
-    return float4(finalColor, texColor.a);
+    // Screen-space circular occlusion mask for trees (materials 1 = trunk, 2 = foliage)
+    // This creates a soft circular gradient that fades out occluders near the player's screen position
+    bool isOccluder = (in.materialIndex == 1 || in.materialIndex == 2);
+    if (isOccluder && uniforms.occlusionRadius > 0.0) {
+        // Get current fragment's screen-space position
+        // in.position.xy is already in screen space (pixels), with (0,0) at top-left
+        float2 fragScreenPos = in.position.xy;
+        
+        // Calculate distance from player's screen position to current fragment (in pixels)
+        float2 playerScreenPosPixels = uniforms.playerScreenPos * uniforms.viewportSize;
+        float distToPlayer = length(fragScreenPos - playerScreenPosPixels);
+        
+        // Calculate mask alpha using smoothstep for soft circular gradient
+        // occlusionSoftness controls the gradient width (0 = hard edge, 1 = very soft)
+        float softEdgeWidth = uniforms.occlusionRadius * uniforms.occlusionSoftness;
+        float maskAlpha = smoothstep(uniforms.occlusionRadius, uniforms.occlusionRadius - softEdgeWidth, distToPlayer);
+        
+        // Apply mask to alpha (higher maskAlpha = more transparent)
+        finalAlpha *= (1.0 - maskAlpha);
+        
+        // Ordered dithering for alpha clipping (Bayer 4x4 matrix)
+        // This avoids depth-sorting artifacts by using alpha-to-coverage style dithering
+        int2 screenCoord = int2(fmod(fragScreenPos, 4.0));
+        // Bayer 4x4 matrix as 1D array (row-major order)
+        const float bayerMatrix[16] = {
+            0.0/16.0,  8.0/16.0,  2.0/16.0, 10.0/16.0,
+            12.0/16.0, 4.0/16.0, 14.0/16.0,  6.0/16.0,
+            3.0/16.0, 11.0/16.0,  1.0/16.0,  9.0/16.0,
+            15.0/16.0, 7.0/16.0, 13.0/16.0,  5.0/16.0
+        };
+        int bayerIndex = screenCoord.y * 4 + screenCoord.x;
+        float ditherThreshold = bayerMatrix[bayerIndex];
+        
+        // Alpha clip: if alpha is below dither threshold, discard the fragment
+        // This creates a dithered transparency effect
+        if (finalAlpha < ditherThreshold) {
+            discard_fragment();
+        }
+    }
+    
+    return float4(finalColor, finalAlpha);
 }
 
 // Shadow pass vertex shader
