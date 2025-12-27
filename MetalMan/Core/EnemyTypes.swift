@@ -109,6 +109,11 @@ final class Enemy: Identifiable {
     var walkPhase: Float = 0
     var hurtTimer: Float = 0
     
+    // Stun (hit reaction) - prevents attacking while animation plays
+    var stunTimer: Float = 0
+    var stunAnimationIndex: Int = 0  // 0 = reaction, 1 = taking-punch
+    var isStunned: Bool { stunTimer > 0 }
+    
     // Loot
     var isLooted: Bool = false
     var lootGold: Int = 0
@@ -196,7 +201,11 @@ final class Enemy: Identifiable {
             stateTimer = 0
             generateLoot()  // Generate loot on death
         } else {
-            // Brief hurt stagger
+            // Set stun state with random hit reaction animation
+            state = .hurt
+            stateTimer = 0
+            stunTimer = 1.2  // Duration of stun (animation length)
+            stunAnimationIndex = Int.random(in: 0...1)  // 0 = reaction, 1 = taking-punch
             hurtTimer = 0.2
         }
         
@@ -217,6 +226,11 @@ final class Enemy: Identifiable {
         // Update hurt timer
         if hurtTimer > 0 {
             hurtTimer -= dt
+        }
+        
+        // Update stun timer
+        if stunTimer > 0 {
+            stunTimer -= dt
         }
         
         // Update attack animation
@@ -249,8 +263,8 @@ final class Enemy: Identifiable {
             break
             
         case .hurt:
-            // Brief stagger, then resume
-            if stateTimer > 0.3 {
+            // Stay in hurt state until stun animation completes
+            if stunTimer <= 0 {
                 state = .chasing
                 stateTimer = 0
             }

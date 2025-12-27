@@ -265,6 +265,25 @@ struct GameHUD: View {
                 levelUpAnnouncementView
                     .transition(.scale.combined(with: .opacity))
             }
+            
+            // Edit mode panel (debug)
+            if viewModel.editModeSettings.isEnabled {
+                // Full-screen transparent overlay to capture mouse events
+                Color.clear
+                    .contentShape(Rectangle())
+                    .allowsHitTesting(false)
+                
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        EditModeView(settings: viewModel.editModeSettings)
+                            .padding()
+                            .contentShape(Rectangle())
+                    }
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
     }
     
@@ -2358,6 +2377,9 @@ final class GameHUDViewModel {
     
     // Level up menu state
     var isLevelUpMenuOpen: Bool = false
+    
+    // Edit mode settings (debug)
+    var editModeSettings: EditModeSettings = EditModeSettings()
     
     /// Returns true if the game should be paused (UI menus are open)
     var isGamePaused: Bool {

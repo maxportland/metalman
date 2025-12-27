@@ -7,13 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		693EC1532EFD2B9000667F7A /* cabin.usdc in Resources */ = {isa = PBXBuildFile; fileRef = 693EC1502EFD2B9000667F7A /* cabin.usdc */; };
 		693EC1972EFE171900667F7A /* Walking.glb in Resources */ = {isa = PBXBuildFile; fileRef = 693EC1962EFE171900667F7A /* Walking.glb */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		693EB5DD2EFB2F2B00667F7A /* MetalMan.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MetalMan.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		693EC1502EFD2B9000667F7A /* cabin.usdc */ = {isa = PBXFileReference; lastKnownFileType = file; name = cabin.usdc; path = usdc/cabin.usdc; sourceTree = "<group>"; };
 		693EC1962EFE171900667F7A /* Walking.glb */ = {isa = PBXFileReference; lastKnownFileType = file; path = Walking.glb; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -26,17 +24,6 @@
 		693EBC342EFCF91B00667F7A /* Icons */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Icons;
-			sourceTree = "<group>";
-		};
-		693EC1522EFD2B9000667F7A /* textures */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			name = textures;
-			path = usdc/textures;
-			sourceTree = "<group>";
-		};
-		693EC1582EFDA90700667F7A /* usdc */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = usdc;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -56,9 +43,6 @@
 			isa = PBXGroup;
 			children = (
 				693EC1962EFE171900667F7A /* Walking.glb */,
-				693EC1582EFDA90700667F7A /* usdc */,
-				693EC1502EFD2B9000667F7A /* cabin.usdc */,
-				693EC1522EFD2B9000667F7A /* textures */,
 				693EBC342EFCF91B00667F7A /* Icons */,
 				693EB5DF2EFB2F2B00667F7A /* MetalMan */,
 				693EB5DE2EFB2F2B00667F7A /* Products */,
@@ -91,8 +75,6 @@
 			fileSystemSynchronizedGroups = (
 				693EB5DF2EFB2F2B00667F7A /* MetalMan */,
 				693EBC342EFCF91B00667F7A /* Icons */,
-				693EC1522EFD2B9000667F7A /* textures */,
-				693EC1582EFDA90700667F7A /* usdc */,
 			);
 			name = MetalMan;
 			packageProductDependencies = (
@@ -141,7 +123,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				693EC1972EFE171900667F7A /* Walking.glb in Resources */,
-				693EC1532EFD2B9000667F7A /* cabin.usdc in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

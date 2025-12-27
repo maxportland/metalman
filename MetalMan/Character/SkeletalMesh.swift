@@ -337,6 +337,9 @@ final class SkeletalMeshLoader {
     private let device: MTLDevice
     private let textureLoader: MTKTextureLoader
     
+    /// Whether to flip UV V-coordinate during loading (set per-model)
+    private var shouldFlipUV: Bool = true
+    
     init(device: MTLDevice) {
         self.device = device
         self.textureLoader = MTKTextureLoader(device: device)
@@ -408,7 +411,12 @@ final class SkeletalMeshLoader {
     }
     
     /// Load a skeletal mesh from a USDZ file
-    func loadSkeletalMesh(from url: URL, materialIndex: UInt32) -> SkeletalMesh? {
+    /// - Parameters:
+    ///   - url: Path to the USDZ file
+    ///   - materialIndex: Material index for shader
+    ///   - flipUV: Whether to flip UV V-coordinate (default true for Mixamo models, false for some other exports)
+    func loadSkeletalMesh(from url: URL, materialIndex: UInt32, flipUV: Bool = true) -> SkeletalMesh? {
+        self.shouldFlipUV = flipUV
         print("[SkeletalLoader] Loading skeletal mesh from: \(url.lastPathComponent)")
         print("[SkeletalLoader] SkinnedVertex size: \(MemoryLayout<SkinnedVertex>.size), stride: \(MemoryLayout<SkinnedVertex>.stride), alignment: \(MemoryLayout<SkinnedVertex>.alignment)")
         
@@ -479,13 +487,15 @@ final class SkeletalMeshLoader {
             print("[SkeletalLoader] ✅ Mesh has valid joint weights for animation!")
         }
         
-        // Extract texture from materials
-        let texture = extractTextureFromMeshes(meshObjects)
+        // Extract texture from materials with detailed logging
+        print("[SkeletalLoader] ========== TEXTURE EXTRACTION ==========")
+        let texture = extractTextureFromMeshes(meshObjects, verbose: true)
         if texture != nil {
-            print("[SkeletalLoader] ✅ Extracted texture from USDZ materials")
+            print("[SkeletalLoader] ✅ Extracted texture: \(texture!.width)x\(texture!.height)")
         } else {
-            print("[SkeletalLoader] No texture found in materials")
+            print("[SkeletalLoader] ❌ No texture found in materials")
         }
+        print("[SkeletalLoader] ========================================")
         
         // Try loading animations using ModelIO deep inspection
         var animations: [String: AnimationClip] = [:]
@@ -578,7 +588,7 @@ final class SkeletalMeshLoader {
     }
     
     /// Extract texture from mesh materials
-    private func extractTextureFromMeshes(_ meshes: [MDLMesh]) -> MTLTexture? {
+    private func extractTextureFromMeshes(_ meshes: [MDLMesh], verbose: Bool = false) -> MTLTexture? {
         // List of material properties to check for textures
         let semanticsToCheck: [MDLMaterialSemantic] = [
             .baseColor,
@@ -597,29 +607,83 @@ final class SkeletalMeshLoader {
             .clearcoatGloss
         ]
         
+        // First pass: analyze all materials and textures
+        if verbose {
+            print("[SkeletalLoader] Analyzing \(meshes.count) meshes for textures...")
+            for (meshIdx, mesh) in meshes.enumerated() {
+                print("[SkeletalLoader] Mesh[\(meshIdx)]: \(mesh.name)")
+                guard let submeshes = mesh.submeshes as? [MDLSubmesh] else { 
+                    print("[SkeletalLoader]   No submeshes")
+                    continue 
+                }
+                
+                for (subIdx, submesh) in submeshes.enumerated() {
+                    print("[SkeletalLoader]   Submesh[\(subIdx)]: '\(submesh.name)'")
+                    guard let material = submesh.material else { 
+                        print("[SkeletalLoader]     No material")
+                        continue 
+                    }
+                    print("[SkeletalLoader]     Material: '\(material.name)' with \(material.count) properties")
+                    
+                    // List ALL properties
+                    for i in 0..<material.count {
+                        if let prop = material[i] {
+                            var typeStr = "unknown"
+                            switch prop.type {
+                            case .texture: typeStr = "TEXTURE"
+                            case .string: typeStr = "string(\(prop.stringValue ?? "nil"))"
+                            case .float: typeStr = "float(\(prop.floatValue))"
+                            case .float2: typeStr = "float2"
+                            case .float3: typeStr = "float3"
+                            case .float4: typeStr = "float4"
+                            case .matrix44: typeStr = "matrix4x4"
+                            case .color: typeStr = "color"
+                            case .URL: typeStr = "URL(\(prop.urlValue?.absoluteString ?? "nil"))"
+                            case .buffer: typeStr = "buffer"
+                            case .none: typeStr = "none"
+                            @unknown default: typeStr = "type(\(prop.type.rawValue))"
+                            }
+                            print("[SkeletalLoader]       [\(i)] '\(prop.name)': \(typeStr)")
+                            
+                            if prop.type == .texture,
+                               let textureValue = prop.textureSamplerValue,
+                               let mdlTexture = textureValue.texture {
+                                print("[SkeletalLoader]         -> MDLTexture: '\(mdlTexture.name)' \(Int(mdlTexture.dimensions.x))x\(Int(mdlTexture.dimensions.y)) channels=\(mdlTexture.channelCount)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Extract the first texture we find
         for mesh in meshes {
             guard let submeshes = mesh.submeshes as? [MDLSubmesh] else { continue }
             
             for submesh in submeshes {
                 guard let material = submesh.material else { continue }
                 
-                print("[SkeletalLoader] Checking material: \(material.name)")
+                if verbose {
+                    print("[SkeletalLoader] Trying to extract texture from material: \(material.name)")
+                }
                 
                 // Try each semantic that might have a texture
                 for semantic in semanticsToCheck {
                     if let property = material.property(with: semantic) {
-                        print("[SkeletalLoader]   Property \(semantic.rawValue): type=\(property.type.rawValue)")
-                        
                         if property.type == .texture,
                            let textureValue = property.textureSamplerValue,
                            let mdlTexture = textureValue.texture {
                             
-                            print("[SkeletalLoader] Found texture in \(semantic.rawValue)")
+                            if verbose {
+                                print("[SkeletalLoader] Found texture in semantic \(semantic.rawValue)")
+                            }
                             
                             // Try to load from the texture's URL/name
                             let textureName = mdlTexture.name
                             if !textureName.isEmpty {
-                                print("[SkeletalLoader] Texture name: \(textureName)")
+                                if verbose {
+                                    print("[SkeletalLoader] Texture name: '\(textureName)'")
+                                }
                                 
                                 // Try as URL
                                 if let url = URL(string: textureName), let tex = loadTextureFromURL(url) {
@@ -634,13 +698,20 @@ final class SkeletalMeshLoader {
                             
                             // Try to create texture from MDLTexture data
                             if let tex = createTextureFromMDLTexture(mdlTexture) {
+                                if verbose {
+                                    print("[SkeletalLoader] Created texture from MDLTexture data: \(tex.width)x\(tex.height)")
+                                }
                                 return tex
+                            } else if verbose {
+                                print("[SkeletalLoader] Failed to create texture from MDLTexture data")
                             }
                         }
                         
                         // Check for string paths
                         if property.type == .string, let path = property.stringValue, !path.isEmpty {
-                            print("[SkeletalLoader] Found texture path: \(path)")
+                            if verbose {
+                                print("[SkeletalLoader] Found texture path: \(path)")
+                            }
                             if let tex = loadTextureFromPath(path) {
                                 return tex
                             }
@@ -652,7 +723,9 @@ final class SkeletalMeshLoader {
                 for i in 0..<material.count {
                     if let prop = material[i] {
                         if prop.type == .texture {
-                            print("[SkeletalLoader] Found texture property by index: \(prop.name)")
+                            if verbose {
+                                print("[SkeletalLoader] Trying texture property by index: \(prop.name)")
+                            }
                             if let textureValue = prop.textureSamplerValue,
                                let mdlTexture = textureValue.texture,
                                let tex = createTextureFromMDLTexture(mdlTexture) {
@@ -1157,7 +1230,16 @@ final class SkeletalMeshLoader {
                     var texCoord = simd_float2(position.x * 0.01, position.y * 0.01)
                     if texCoordOffset >= 0 && texCoordOffset < stride - 4 {
                         let texPtr = basePtr.advanced(by: texCoordOffset).bindMemory(to: Float.self, capacity: 2)
-                        texCoord = simd_float2(texPtr[0], texPtr[1])
+                        let rawU = texPtr[0]
+                        let rawV = texPtr[1]
+                        // Optionally flip V coordinate based on model source
+                        // Mixamo/USD models typically need V flipped (OpenGL convention)
+                        // Some other exports already use Metal's convention
+                        if shouldFlipUV {
+                            texCoord = simd_float2(rawU, 1.0 - rawV)
+                        } else {
+                            texCoord = simd_float2(rawU, rawV)
+                        }
                     }
                     
                     // Read bone indices and weights
@@ -1217,13 +1299,25 @@ final class SkeletalMeshLoader {
             // Record submesh info for selective rendering
             let submeshVertexCount = vertices.count - submeshStartVertex
             if submeshVertexCount > 0 {
+                // Calculate UV bounds for this submesh
+                var uvMin = simd_float2(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+                var uvMax = simd_float2(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+                
+                for i in submeshStartVertex..<vertices.count {
+                    let uv = simd_float2(vertices[i].texCoord.0, vertices[i].texCoord.1)
+                    uvMin = simd_float2(min(uvMin.x, uv.x), min(uvMin.y, uv.y))
+                    uvMax = simd_float2(max(uvMax.x, uv.x), max(uvMax.y, uv.y))
+                }
+                
                 let info = SubmeshInfo(
                     name: submeshName,
                     vertexStart: submeshStartVertex,
                     vertexCount: submeshVertexCount
                 )
                 submeshInfos.append(info)
-                print("[SkeletalLoader] Submesh '\(submeshName)': \(submeshVertexCount) vertices (shield=\(info.isShield), weapon=\(info.isWeapon))")
+                print("[SkeletalLoader] Submesh '\(submeshName)': \(submeshVertexCount) vertices")
+                print("[SkeletalLoader]   UV bounds: (\(String(format: "%.3f", uvMin.x)), \(String(format: "%.3f", uvMin.y))) to (\(String(format: "%.3f", uvMax.x)), \(String(format: "%.3f", uvMax.y)))")
+                print("[SkeletalLoader]   Equipment: shield=\(info.isShield), weapon=\(info.isWeapon)")
             }
         }
     }

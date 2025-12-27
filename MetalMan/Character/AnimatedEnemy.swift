@@ -18,6 +18,8 @@ enum EnemyAnimationState {
     case running
     case attacking
     case hurt
+    case stunned       // Hit reaction animation 1 (reaction)
+    case stunned2      // Hit reaction animation 2 (taking-punch)
     case dying
     case dead
     case roaring      // Spotting player / aggro
@@ -29,7 +31,9 @@ enum EnemyAnimationState {
         case .walking: return "mutant-walking"
         case .running: return "mutant-run"
         case .attacking: return "mutant-punch"
-        case .hurt: return "mutant-idle"  // No hurt animation, use idle
+        case .hurt: return "reaction"
+        case .stunned: return "reaction"
+        case .stunned2: return "taking-punch"
         case .dying: return "mutant-dying"
         case .dead: return "mutant-dying"
         case .roaring: return "mutant-roaring"
@@ -43,7 +47,9 @@ enum EnemyAnimationState {
         case .walking: return ["mutant-run"]
         case .running: return ["mutant-walking"]
         case .attacking: return ["mutant-swiping", "mutant-jump-attack"]
-        case .hurt: return ["mutant-idle-2"]
+        case .hurt: return ["taking-punch", "mutant-idle"]
+        case .stunned: return ["taking-punch", "mutant-idle"]
+        case .stunned2: return ["reaction", "mutant-idle"]
         case .dying: return ["mutant-idle"]
         case .dead: return ["mutant-idle"]
         case .roaring: return ["mutant-flexing-muscles", "mutant-idle"]
@@ -54,7 +60,7 @@ enum EnemyAnimationState {
     var isLooping: Bool {
         switch self {
         case .idle, .walking, .running: return true
-        case .attacking, .hurt, .dying, .dead, .roaring: return false
+        case .attacking, .hurt, .stunned, .stunned2, .dying, .dead, .roaring: return false
         }
     }
 }
@@ -264,7 +270,10 @@ final class AnimatedEnemy {
               ambientIntensity: Float,
               diffuseIntensity: Float,
               timeOfDay: Float,
-              pointLights: [PointLight]) {
+              pointLights: [PointLight],
+              uvOffset: simd_float2 = .zero,
+              uvScale: Float = 1.0,
+              flipUVVertical: Bool = false) {
         
         // Update uniforms
         var uniforms = SkinnedUniforms()
@@ -276,6 +285,9 @@ final class AnimatedEnemy {
         uniforms.ambientIntensity = ambientIntensity
         uniforms.diffuseIntensity = diffuseIntensity
         uniforms.timeOfDay = timeOfDay
+        uniforms.uvOffset = uvOffset
+        uniforms.uvScale = uvScale
+        uniforms.flipUVVertical = flipUVVertical ? 1 : 0
         
         // Copy point lights (position in xyz, intensity in w)
         if pointLights.count > 0 {

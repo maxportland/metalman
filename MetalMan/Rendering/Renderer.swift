@@ -16,6 +16,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let shadowPipelineState: MTLRenderPipelineState
     private var skinnedPipelineState: MTLRenderPipelineState?  // For skeletal animation
     private var skinnedShadowPipelineState: MTLRenderPipelineState?  // Shadow pass for skeletal
+    private var instancedLitPipelineState: MTLRenderPipelineState?  // For instanced trees
+    private var instancedShadowPipelineState: MTLRenderPipelineState?  // Shadow pass for instanced
     private let depthStencilState: MTLDepthStencilState
     private let depthStencilStateNoWrite: MTLDepthStencilState
     private let depthStencilStateSkybox: MTLDepthStencilState
@@ -78,6 +80,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var npcMesh: NPCMesh!
     private var npcUniformBuffer: MTLBuffer!
     
+    // Skeletal NPC animation
+    private var npcSkeletalMesh: SkeletalMesh?
+    private var animatedNPCs: [UUID: AnimatedNPC] = [:]  // Map NPC ID to animated instance
+    private var npcModelScale: Float = 1.0
+    
     // MARK: - USD Models (Cabin)
     
     private var cabinTexture: MTLTexture!
@@ -105,7 +112,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     private var treeModels: [TreeModel] = []
     private var treeInstances: [TreeInstance] = []
-    private var treeUniformBuffer: MTLBuffer!
+    
+    // Per-model instance buffers for GPU instancing (model matrix arrays)
+    private var treeInstanceBuffers: [MTLBuffer] = []  // One buffer per tree model type
+    private var treeInstanceCounts: [Int] = []         // Number of instances per model
     
     // MARK: - Textures (Normal Maps)
     
@@ -259,8 +269,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     /// Ambient intensity based on time of day
     private var ambientIntensity: Float {
-        let baseAmbient: Float = 0.15
-        let dayAmbient: Float = 0.35
+        let baseAmbient: Float = 0.15   // Base ambient at night
+        let dayAmbient: Float = 0.35    // Peak ambient during day
         return baseAmbient + (dayAmbient - baseAmbient) * sunIntensity
     }
     
@@ -334,6 +344,60 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var projectionMatrix = matrix_identity_float4x4
     private var viewMatrix = matrix_identity_float4x4
     private var lightViewProjectionMatrix = matrix_identity_float4x4
+    
+    // MARK: - Frustum Culling
+    
+    /// Maximum draw distance for trees
+    private let treeDrawDistance: Float = 80.0
+    /// Maximum draw distance for enemies
+    private let enemyDrawDistance: Float = 60.0
+    /// Maximum draw distance for chests
+    private let chestDrawDistance: Float = 50.0
+    
+    /// Frustum planes (extracted from view-projection matrix each frame)
+    private var frustumPlanes: [simd_float4] = []
+    
+    /// Extract frustum planes from a view-projection matrix
+    private func extractFrustumPlanes(from matrix: simd_float4x4) -> [simd_float4] {
+        // Get rows of the transposed matrix (columns of original)
+        let row0 = simd_float4(matrix.columns.0.x, matrix.columns.1.x, matrix.columns.2.x, matrix.columns.3.x)
+        let row1 = simd_float4(matrix.columns.0.y, matrix.columns.1.y, matrix.columns.2.y, matrix.columns.3.y)
+        let row2 = simd_float4(matrix.columns.0.z, matrix.columns.1.z, matrix.columns.2.z, matrix.columns.3.z)
+        let row3 = simd_float4(matrix.columns.0.w, matrix.columns.1.w, matrix.columns.2.w, matrix.columns.3.w)
+        
+        // Extract 6 frustum planes: left, right, bottom, top, near, far
+        var planes: [simd_float4] = []
+        planes.append(row3 + row0)  // Left
+        planes.append(row3 - row0)  // Right
+        planes.append(row3 + row1)  // Bottom
+        planes.append(row3 - row1)  // Top
+        planes.append(row3 + row2)  // Near
+        planes.append(row3 - row2)  // Far
+        
+        // Normalize planes
+        return planes.map { plane in
+            let length = simd_length(simd_float3(plane.x, plane.y, plane.z))
+            return length > 0.001 ? plane / length : plane
+        }
+    }
+    
+    /// Check if a sphere is visible in the frustum (true = visible or partially visible)
+    private func isSphereInFrustum(center: simd_float3, radius: Float) -> Bool {
+        for plane in frustumPlanes {
+            let distance = plane.x * center.x + plane.y * center.y + plane.z * center.z + plane.w
+            if distance < -radius {
+                return false  // Sphere is completely outside this plane
+            }
+        }
+        return true  // Sphere is inside or intersecting all planes
+    }
+    
+    /// Quick distance-based culling check
+    private func isWithinDistance(position: simd_float3, maxDistance: Float) -> Bool {
+        let dx = position.x - cameraPosition.x
+        let dz = position.z - cameraPosition.z
+        return (dx * dx + dz * dz) <= (maxDistance * maxDistance)
+    }
     
     // MARK: - Geometry Buffers
     
@@ -465,6 +529,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.skinnedPipelineState = Renderer.createSkinnedPipeline(device: device, library: library, view: view)
         self.skinnedShadowPipelineState = Renderer.createSkinnedShadowPipeline(device: device, library: library)
         
+        // Create instanced pipelines for trees and batched objects
+        self.instancedLitPipelineState = Renderer.createInstancedLitPipeline(device: device, library: library, view: view)
+        self.instancedShadowPipelineState = Renderer.createInstancedShadowPipeline(device: device, library: library)
+        
         // Create enemy manager
         self.enemyManager = EnemyManager()
         
@@ -478,10 +546,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         characterUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
         skyboxUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
         cabinUniformBuffer = device.makeBuffer(length: MemoryLayout<LitUniforms>.stride, options: .storageModeShared)!
-        // Tree uniform buffer - large enough for 500 tree instances with proper alignment
-        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255  // 256-byte aligned
-        treeUniformBuffer = device.makeBuffer(length: uniformStride * 500, options: .storageModeShared)!
         // Enemy uniform buffer - large enough for 100 enemies with proper alignment
+        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255  // 256-byte aligned
         enemyUniformBuffer = device.makeBuffer(length: uniformStride * 100, options: .storageModeShared)!
         
         // NPC uniform buffer - for 10 NPCs
@@ -506,6 +572,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Load skeletal enemy model
         loadEnemyModel()
+        
+        // Load skeletal NPC model (vendor)
+        loadNPCModel()
         
         // Spawn enemies (higher chance near treasure chests)
         // Must be after super.init() to call instance method
@@ -597,6 +666,52 @@ final class Renderer: NSObject, MTKViewDelegate {
         desc.vertexDescriptor = Renderer.texturedVertexDescriptor()
         
         return try! device.makeRenderPipelineState(descriptor: desc)
+    }
+    
+    /// Create instanced lit pipeline for trees and other batched objects
+    private static func createInstancedLitPipeline(device: MTLDevice, library: MTLLibrary, view: MTKView) -> MTLRenderPipelineState? {
+        guard let vertexFunc = library.makeFunction(name: "vertex_lit_instanced"),
+              let fragmentFunc = library.makeFunction(name: "fragment_lit") else {
+            print("[Renderer] Could not find instanced vertex shader function")
+            return nil
+        }
+        
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vertexFunc
+        desc.fragmentFunction = fragmentFunc
+        desc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+        desc.depthAttachmentPixelFormat = .depth32Float
+        desc.vertexDescriptor = Renderer.texturedVertexDescriptor()
+        
+        do {
+            return try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            print("[Renderer] Failed to create instanced lit pipeline: \(error)")
+            return nil
+        }
+    }
+    
+    /// Create instanced shadow pipeline for trees
+    private static func createInstancedShadowPipeline(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
+        guard let vertexFunc = library.makeFunction(name: "vertex_shadow_instanced"),
+              let fragmentFunc = library.makeFunction(name: "fragment_shadow") else {
+            print("[Renderer] Could not find instanced shadow shader function")
+            return nil
+        }
+        
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vertexFunc
+        desc.fragmentFunction = fragmentFunc
+        desc.colorAttachments[0].pixelFormat = .invalid
+        desc.depthAttachmentPixelFormat = .depth32Float
+        desc.vertexDescriptor = Renderer.texturedVertexDescriptor()
+        
+        do {
+            return try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            print("[Renderer] Failed to create instanced shadow pipeline: \(error)")
+            return nil
+        }
     }
     
     /// Create pipeline for skeletal animation (skinned mesh)
@@ -1266,10 +1381,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         let vp = projectionMatrix * viewMatrix
         
+        // Extract frustum planes for culling
+        frustumPlanes = extractFrustumPlanes(from: vp)
+        
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
         
         // Update character animation
-        let hasSword = player.equipment.hasSwordEquipped
         let hasShield = player.equipment.hasShieldEquipped
         
         if let animChar = animatedCharacter {
@@ -1299,7 +1416,24 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         // Update NPCs
         npcManager.update(deltaTime: dt, playerPosition: characterPosition)
-        npcMesh.update(npcs: npcManager.npcs)
+        
+        // Update skeletal animation for NPCs
+        if npcSkeletalMesh != nil {
+            let isShopOpen = hudViewModel?.isShopOpen ?? false
+            let currentShopNPCID = hudViewModel?.currentShopNPC?.id
+            
+            for npc in npcManager.npcs {
+                if let animatedNPC = getAnimatedNPC(for: npc) {
+                    // Check if this specific NPC's shop is open
+                    let isThisNPCShopOpen = isShopOpen && currentShopNPCID == npc.id
+                    updateNPCAnimationState(animatedNPC: animatedNPC, npc: npc, isShopOpen: isThisNPCShopOpen)
+                    animatedNPC.update(deltaTime: dt)
+                }
+            }
+        } else {
+            // Fallback to procedural mesh if skeletal not loaded
+            npcMesh.update(npcs: npcManager.npcs)
+        }
         
         // Update damage numbers on HUD
         updateDamageNumbersDisplay()
@@ -1423,6 +1557,61 @@ final class Renderer: NSObject, MTKViewDelegate {
             encoder.setRenderPipelineState(shadowPipelineState)
         }
         
+        // NPC shadows
+        if let skeletalMesh = npcSkeletalMesh, let skinnedShadowPipeline = skinnedShadowPipelineState {
+            encoder.setRenderPipelineState(skinnedShadowPipeline)
+            
+            for npc in npcManager.npcs {
+                if let animatedNPC = animatedNPCs[npc.id] {
+                    // Add .pi rotation to flip model to face forward (model faces -Z by default)
+                    let worldMatrix = translation(npc.position.x, npc.position.y, npc.position.z) *
+                                     rotationY(npc.yaw + .pi) *
+                                     scaling(npcModelScale, npcModelScale, npcModelScale)
+                    
+                    var skinnedUniforms = SkinnedUniforms()
+                    skinnedUniforms.modelMatrix = worldMatrix
+                    skinnedUniforms.viewProjectionMatrix = vp
+                    skinnedUniforms.lightViewProjectionMatrix = lightViewProjectionMatrix
+                    skinnedUniforms.lightDirection = currentLightDir
+                    skinnedUniforms.cameraPosition = cameraPosition
+                    skinnedUniforms.ambientIntensity = ambientIntensity
+                    skinnedUniforms.diffuseIntensity = diffuseIntensity
+                    skinnedUniforms.timeOfDay = timeOfDay
+                    
+                    memcpy(animatedNPC.uniformBuffer.contents(), &skinnedUniforms, MemoryLayout<SkinnedUniforms>.stride)
+                    
+                    encoder.setVertexBuffer(skeletalMesh.vertexBuffer, offset: 0, index: 0)
+                    encoder.setVertexBuffer(animatedNPC.uniformBuffer, offset: 0, index: 1)
+                    encoder.setVertexBuffer(animatedNPC.boneMatrixBuffer, offset: 0, index: 2)
+                    
+                    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: skeletalMesh.vertexCount)
+                }
+            }
+            
+            encoder.setRenderPipelineState(shadowPipelineState)
+        }
+        
+        // Tree shadows using GPU instancing
+        if let instancedShadowPipeline = instancedShadowPipelineState, !treeInstanceBuffers.isEmpty {
+            encoder.setRenderPipelineState(instancedShadowPipeline)
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            
+            for (modelIndex, model) in treeModels.enumerated() {
+                guard modelIndex < treeInstanceBuffers.count else { continue }
+                let instanceCount = treeInstanceCounts[modelIndex]
+                guard instanceCount > 0 else { continue }
+                
+                encoder.setVertexBuffer(model.vertexBuffer, offset: 0, index: 0)
+                encoder.setVertexBuffer(treeInstanceBuffers[modelIndex], offset: 0, index: 2)
+                encoder.drawPrimitives(type: .triangle,
+                                       vertexStart: 0,
+                                       vertexCount: model.vertexCount,
+                                       instanceCount: instanceCount)
+            }
+            
+            encoder.setRenderPipelineState(shadowPipelineState)
+        }
+        
         encoder.endEncoding()
     }
     
@@ -1503,6 +1692,15 @@ final class Renderer: NSObject, MTKViewDelegate {
                 encoder.setFragmentTexture(meshTexture, index: 6)
             }
             
+            // Get UV settings from edit mode (if enabled)
+            let editSettings = hudViewModel?.editModeSettings
+            let playerUVOffset = simd_float2(
+                editSettings?.playerUVOffsetX ?? 0,
+                editSettings?.playerUVOffsetY ?? 0
+            )
+            let playerUVScale = editSettings?.playerUVScale ?? 1.0
+            let flipUV = editSettings?.flipUVVertical ?? false
+            
             // Draw the animated character with equipment visibility based on player state
             animChar.draw(
                 encoder: encoder,
@@ -1516,7 +1714,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                 timeOfDay: timeOfDay,
                 pointLights: [],  // No point lights currently
                 showShield: player.equipment.hasShieldEquipped,
-                showWeapon: player.equipment.hasSwordEquipped
+                showWeapon: player.equipment.hasSwordEquipped,
+                uvOffset: playerUVOffset,
+                uvScale: playerUVScale,
+                flipUVVertical: flipUV
             )
             
             // Restore lit pipeline and uniform buffer
@@ -1602,7 +1803,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Draw all enemies
     private func drawEnemies(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
         // Draw each enemy with its own model matrix
-        let enemies = enemyManager.enemies.filter { $0.isAlive || $0.stateTimer < 60.0 }
+        // Apply distance culling for performance
+        let enemies = enemyManager.enemies.filter { enemy in
+            (enemy.isAlive || enemy.stateTimer < 60.0) && 
+            isWithinDistance(position: enemy.position, maxDistance: enemyDrawDistance)
+        }
         guard !enemies.isEmpty else { return }
         
         // Use skeletal animation if available
@@ -1642,6 +1847,14 @@ final class Renderer: NSObject, MTKViewDelegate {
                                      rotationY(enemy.yaw) *
                                      enemyModelMatrix
                     
+                    // Get UV settings from edit mode (if enabled)
+                    let enemyUVOffset = simd_float2(
+                        hudViewModel?.editModeSettings.enemyUVOffsetX ?? 0,
+                        hudViewModel?.editModeSettings.enemyUVOffsetY ?? 0
+                    )
+                    let enemyUVScale = hudViewModel?.editModeSettings.enemyUVScale ?? 1.0
+                    let flipUV = hudViewModel?.editModeSettings.flipUVVertical ?? false
+                    
                     // Draw the animated enemy
                     animatedEnemy.draw(
                         encoder: encoder,
@@ -1653,7 +1866,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                         ambientIntensity: litUniforms.ambientIntensity,
                         diffuseIntensity: litUniforms.diffuseIntensity,
                         timeOfDay: litUniforms.timeOfDay,
-                        pointLights: pointLights
+                        pointLights: pointLights,
+                        uvOffset: enemyUVOffset,
+                        uvScale: enemyUVScale,
+                        flipUVVertical: flipUV
                     )
                 }
             }
@@ -1669,50 +1885,101 @@ final class Renderer: NSObject, MTKViewDelegate {
     
     /// Draw all NPCs (vendors)
     private func drawNPCs(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
-        guard npcMesh.vertexCount > 0 else { return }
-        
         let npcs = npcManager.npcs
         guard !npcs.isEmpty else { return }
         
-        encoder.setVertexBuffer(npcMesh.vertexBuffer, offset: 0, index: 0)
-        
-        // 256-byte aligned stride for uniform buffer offsets
-        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
-        
-        // First pass: write all NPC uniforms to buffer
-        let bufferBase = npcUniformBuffer.contents()
-        for (index, npc) in npcs.enumerated() {
-            guard index < 10 else { break }  // Max 10 NPCs
+        // Use skeletal animation if available
+        if let skeletalMesh = npcSkeletalMesh, let skinnedPipeline = skinnedPipelineState {
+            // Switch to skinned pipeline for skeletal NPCs
+            encoder.setRenderPipelineState(skinnedPipeline)
             
-            let npcModelMatrix = translation(npc.position.x, npc.position.y, npc.position.z) * rotationY(npc.yaw)
+            // Bind the embedded texture from USDZ if available (replaces procedural vendorTexture)
+            if let texture = skeletalMesh.texture {
+                encoder.setFragmentTexture(texture, index: 18)  // Vendor texture slot (materialIndex 13)
+            }
             
-            var npcUniforms = litUniforms
-            npcUniforms.modelMatrix = npcModelMatrix
+            for npc in npcs {
+                guard let animatedNPC = getAnimatedNPC(for: npc) else { continue }
+                
+                // Build model matrix: position, rotation, scale
+                // Add .pi rotation to flip model to face forward (model faces -Z by default)
+                let npcModelMatrix = translation(npc.position.x, npc.position.y, npc.position.z) *
+                                     rotationY(npc.yaw + .pi) *
+                                     scaling(npcModelScale, npcModelScale, npcModelScale)
+                
+                // Get UV settings from edit mode (if enabled)
+                let vendorUVOffset = simd_float2(
+                    hudViewModel?.editModeSettings.vendorUVOffsetX ?? 0,
+                    hudViewModel?.editModeSettings.vendorUVOffsetY ?? 0
+                )
+                let vendorUVScale = hudViewModel?.editModeSettings.vendorUVScale ?? 1.0
+                let flipUV = hudViewModel?.editModeSettings.flipUVVertical ?? false
+                
+                animatedNPC.draw(
+                    encoder: encoder,
+                    modelMatrix: npcModelMatrix,
+                    viewProjectionMatrix: litUniforms.viewProjectionMatrix,
+                    lightViewProjectionMatrix: litUniforms.lightViewProjectionMatrix,
+                    lightDirection: litUniforms.lightDirection,
+                    cameraPosition: litUniforms.cameraPosition,
+                    ambientIntensity: litUniforms.ambientIntensity,
+                    diffuseIntensity: litUniforms.diffuseIntensity,
+                    timeOfDay: litUniforms.timeOfDay,
+                    pointLights: [],
+                    uvOffset: vendorUVOffset,
+                    uvScale: vendorUVScale,
+                    flipUVVertical: flipUV
+                )
+            }
             
-            // Write to this NPC's slot in the buffer
-            let offset = index * uniformStride
-            let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
-            ptr.pointee = npcUniforms
+            // Restore regular pipeline
+            encoder.setRenderPipelineState(litPipelineState)
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+        } else {
+            // Fallback to procedural mesh
+            guard npcMesh.vertexCount > 0 else { return }
+            
+            encoder.setVertexBuffer(npcMesh.vertexBuffer, offset: 0, index: 0)
+            
+            // 256-byte aligned stride for uniform buffer offsets
+            let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
+            
+            // First pass: write all NPC uniforms to buffer
+            let bufferBase = npcUniformBuffer.contents()
+            for (index, npc) in npcs.enumerated() {
+                guard index < 10 else { break }  // Max 10 NPCs
+                
+                let npcModelMatrix = translation(npc.position.x, npc.position.y, npc.position.z) * rotationY(npc.yaw)
+                
+                var npcUniforms = litUniforms
+                npcUniforms.modelMatrix = npcModelMatrix
+                
+                // Write to this NPC's slot in the buffer
+                let offset = index * uniformStride
+                let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
+                ptr.pointee = npcUniforms
+            }
+            
+            // Second pass: draw each NPC using its uniform offset
+            for (index, _) in npcs.enumerated() {
+                guard index < npcMesh.npcVertexRanges.count else { break }
+                guard index < 10 else { break }
+                
+                let range = npcMesh.npcVertexRanges[index]
+                guard range.count > 0 else { continue }
+                
+                let offset = index * uniformStride
+                encoder.setVertexBuffer(npcUniformBuffer, offset: offset, index: 1)
+                encoder.setFragmentBuffer(npcUniformBuffer, offset: offset, index: 1)
+                
+                encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
+            }
+            
+            // Restore landscape uniform buffer
+            encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+            encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
         }
-        
-        // Second pass: draw each NPC using its uniform offset
-        for (index, _) in npcs.enumerated() {
-            guard index < npcMesh.npcVertexRanges.count else { break }
-            guard index < 10 else { break }
-            
-            let range = npcMesh.npcVertexRanges[index]
-            guard range.count > 0 else { continue }
-            
-            let offset = index * uniformStride
-            encoder.setVertexBuffer(npcUniformBuffer, offset: offset, index: 1)
-            encoder.setFragmentBuffer(npcUniformBuffer, offset: offset, index: 1)
-            
-            encoder.drawPrimitives(type: .triangle, vertexStart: range.start, vertexCount: range.count)
-        }
-        
-        // Restore landscape uniform buffer
-        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
-        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
     }
     
     // MARK: - Character & Camera Updates
@@ -2207,7 +2474,36 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     
     private func updateCamera(deltaTime dt: Float) {
-        // Camera stays directly behind the character (over-the-shoulder)
+        // Get edit mode settings for camera overrides
+        let editSettings = hudViewModel?.editModeSettings
+        let isEditMode = editSettings?.isEnabled ?? false
+        
+        // In edit mode, use orbit camera around player
+        if isEditMode {
+            let orbitAngle = editSettings?.cameraOrbitAngle ?? 0.0
+            let zoom = editSettings?.cameraZoom ?? 1.0
+            let pitch = editSettings?.cameraPitch ?? 0.0
+            
+            // Calculate orbit position around character
+            let orbitDistance = cameraDistance * zoom
+            let orbitHeight = cameraHeight + pitch * 6.0  // Pitch affects height
+            
+            // Orbit around character (independent of character yaw)
+            let cameraDirX = sin(orbitAngle)
+            let cameraDirZ = cos(orbitAngle)
+            
+            let targetCameraPos = simd_float3(
+                characterPosition.x + cameraDirX * orbitDistance,
+                characterPosition.y + orbitHeight,
+                characterPosition.z + cameraDirZ * orbitDistance
+            )
+            
+            // Instant camera positioning in edit mode for responsive control
+            cameraPosition = cameraPosition + (targetCameraPos - cameraPosition) * min(1.0, 20.0 * dt)
+            return
+        }
+        
+        // Normal gameplay camera (over-the-shoulder)
         // Character forward direction: (sin(yaw), 0, -cos(yaw))
         // Camera should be behind, so we negate the forward direction
         
@@ -2295,97 +2591,40 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var playerModelMatrix: simd_float4x4 = matrix_identity_float4x4
     private var playerModelTexture: MTLTexture?
     
-    /// Load the player model from FBX (with skeleton and animations)
+    /// Load the player model from USDZ (with skeleton and animations)
     private func loadPlayerModel() {
-        let loader = USDModelLoader(device: device)
+        // Try to find player model in various formats/locations
+        let searchPaths: [(name: String, ext: String, subdir: String?)] = [
+            ("Walking", "usdz", nil),
+            ("Walking", "usdz", "Animations"),
+            ("Walking", "glb", nil),
+            ("Walking", "glb", "Animations"),
+            ("Walking", "fbx", nil),
+            ("Walking", "fbx", "Animations"),
+            ("player-model", "usdz", nil),
+            ("player-model", "usdz", "usdc")
+        ]
         
-        // Try to find Walking.fbx (base character with walk animation)
         var playerURL: URL?
-        
-        // Try 1: USDZ format (exported from Blender or Reality Converter)
-        if let url = Bundle.main.url(forResource: "Walking", withExtension: "usdz") {
-            playerURL = url
-            print("[Player] Found Walking.usdz directly in bundle")
-        }
-        // Try 2: USDZ in Animations subdirectory
-        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "usdz", subdirectory: "Animations") {
-            playerURL = url
-            print("[Player] Found Walking.usdz in Animations subdirectory")
-        }
-        // Try 3: GLB format
-        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "glb") {
-            playerURL = url
-            print("[Player] Found Walking.glb directly in bundle")
-        }
-        // Try 4: GLB in Animations subdirectory
-        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "glb", subdirectory: "Animations") {
-            playerURL = url
-            print("[Player] Found Walking.glb in Animations subdirectory")
-        }
-        // Try 5: FBX format
-        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "fbx") {
-            playerURL = url
-            print("[Player] Found Walking.fbx directly in bundle")
-        }
-        // Try 4: FBX in Animations subdirectory
-        else if let url = Bundle.main.url(forResource: "Walking", withExtension: "fbx", subdirectory: "Animations") {
-            playerURL = url
-            print("[Player] Found Walking.fbx in Animations subdirectory")
-        }
-        // Try 6: Fallback to USDZ
-        else if let url = Bundle.main.url(forResource: "player-model", withExtension: "usdz") {
-            playerURL = url
-            print("[Player] Falling back to player-model.usdz")
-        }
-        else if let url = Bundle.main.url(forResource: "player-model", withExtension: "usdz", subdirectory: "usdc") {
-            playerURL = url
-            print("[Player] Falling back to player-model.usdz in usdc subdirectory")
-        }
-        else {
-            print("[Player] Could not find player model files in bundle")
-            // Search for any FBX or USDZ files
-            if let resourcePath = Bundle.main.resourcePath {
-                let fileManager = FileManager.default
-                if let enumerator = fileManager.enumerator(atPath: resourcePath) {
-                    while let file = enumerator.nextObject() as? String {
-                        if file.contains(".fbx") || file.contains(".usdz") {
-                            print("[Player]   Found: \(file)")
-                        }
-                    }
-                }
+        for path in searchPaths {
+            if let url = Bundle.main.url(forResource: path.name, withExtension: path.ext, subdirectory: path.subdir) {
+                playerURL = url
+                break
             }
-            return
         }
         
         guard let finalURL = playerURL else { return }
         
-        // Print the asset hierarchy for debugging
-        loader.printAssetHierarchy(from: finalURL)
-        
-        // Try to load as skeletal mesh first
         let skeletalLoader = SkeletalMeshLoader(device: device)
         
-        // First, try loading from the new Paladin animations
-        var baseAnimationURL: URL? = nil
+        // Try to find idle animation as base mesh
+        let baseAnimationURL = Bundle.main.url(forResource: "sword-and-shield-idle", withExtension: "usdz") ??
+                               Bundle.main.url(forResource: "sword-and-shield-idle", withExtension: "usdz", subdirectory: "Animations")
         
-        // Try to find the idle animation as the base (it has the full mesh + skeleton)
-        if let url = Bundle.main.url(forResource: "sword-and-shield-idle", withExtension: "usdz") {
-            baseAnimationURL = url
-            print("[Player] Found sword-and-shield-idle.usdz as base")
-        } else if let url = Bundle.main.url(forResource: "sword-and-shield-idle", withExtension: "usdz", subdirectory: "Animations") {
-            baseAnimationURL = url
-            print("[Player] Found sword-and-shield-idle.usdz in Animations subdirectory")
-        }
-        
-        // Use the new base animation URL if found, otherwise fall back to original
         let meshURL = baseAnimationURL ?? finalURL
         
         if let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: meshURL, materialIndex: MaterialIndex.character.rawValue) {
-            print("[Player] Successfully loaded skeletal mesh!")
-            
-            // Load additional animations from the Animations folder
             loadAdditionalAnimations(into: skeletalMesh, loader: skeletalLoader)
-            
             animatedCharacter = AnimatedCharacter(device: device, mesh: skeletalMesh)
             
             // Calculate model transform based on bounds
@@ -2393,18 +2632,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             let modelSize = bounds.max - bounds.min
             let modelCenter = (bounds.max + bounds.min) / 2
             
-            print("[Player] Model bounds: min=\(bounds.min), max=\(bounds.max)")
-            print("[Player] Model size: \(modelSize)")
-            
-            // Detect coordinate system for Mixamo models:
-            // - Y-up: min.y is near zero (feet on ground), max.y is positive (head)
-            // - Z-up: min.z is near zero, max.z is positive
-            // Don't use size comparison as characters with arms/weapons can be wider than tall
+            // Detect coordinate system
             let isYUp = abs(bounds.min.y) < abs(bounds.max.y) * 0.1 && bounds.max.y > bounds.max.z
             let isZUp = abs(bounds.min.z) < abs(bounds.max.z) * 0.1 && bounds.max.z > bounds.max.y
             
             if isYUp || (!isZUp && modelSize.y > 50) {
-                // Y-up model (typical for Mixamo exports)
                 let modelHeight = modelSize.y
                 let targetHeight: Float = 2.0
                 let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
@@ -2414,10 +2646,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                                    rotationY(.pi) *
                                    scaling(scale, scale, scale) *
                                    translation(-modelCenter.x, 0, -modelCenter.z)
-                
-                print("[Player] Y-up skeletal model. Height: \(modelHeight), Scale: \(scale)")
             } else if isZUp {
-                // Z-up model
                 let modelHeight = modelSize.z
                 let targetHeight: Float = 2.0
                 let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
@@ -2428,10 +2657,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                                    rotationX(.pi / 2) *
                                    scaling(scale, scale, scale) *
                                    translation(-modelCenter.x, -modelCenter.y, 0)
-                
-                print("[Player] Z-up skeletal model. Height: \(modelHeight), Scale: \(scale)")
             } else {
-                // Fallback: assume Y-up for humanoid models
                 let modelHeight = modelSize.y
                 let targetHeight: Float = 2.0
                 let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
@@ -2441,85 +2667,52 @@ final class Renderer: NSObject, MTKViewDelegate {
                                    rotationY(.pi) *
                                    scaling(scale, scale, scale) *
                                    translation(-modelCenter.x, 0, -modelCenter.z)
-                
-                print("[Player] Unknown orientation, assuming Y-up. Height: \(modelHeight), Scale: \(scale)")
             }
             
             playerModelTexture = characterTexture
-            
-            print("[Player] ✅ Skeletal animation enabled with \(skeletalMesh.bones.count) bones!")
-            print("[Player] ✅ Loaded \(skeletalMesh.animations.count) animations")
+            print("[Init] Loaded player with \(skeletalMesh.bones.count) bones, \(skeletalMesh.animations.count) animations")
             return
         }
         
-        // Fallback: Load as static mesh
-        print("[Player] Falling back to static mesh loading...")
-        if let model = loader.loadModel(from: finalURL, materialIndex: MaterialIndex.character.rawValue) {
-            playerModelVertexBuffer = model.vertexBuffer
-            playerModelVertexCount = model.vertexCount
-            
-            // Calculate scale and orientation fix
-            let bounds = model.boundingBox
-            let modelSize = bounds.max - bounds.min
-            let modelCenter = (bounds.max + bounds.min) / 2
-            
-            print("[Player] Model bounds: min=\(bounds.min), max=\(bounds.max)")
-            print("[Player] Model size: \(modelSize)")
-            print("[Player] Vertex count: \(model.vertexCount)")
-            
-            // Check which axis is tallest to determine up-axis
-            let isYUp = modelSize.y > modelSize.z && modelSize.y > modelSize.x
-            let isZUp = modelSize.z > modelSize.y && modelSize.z > modelSize.x
-            
-            let modelHeight: Float
-            let scaledMinHeight: Float
-            
-            if isYUp {
-                // Model uses Y-up (like Blender export)
-                modelHeight = modelSize.y
-                let targetHeight: Float = 2.0
-                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
-                scaledMinHeight = bounds.min.y * scale
-                
-                // Y-up: no rotation needed, just scale and position
-                playerModelMatrix = translation(0, -scaledMinHeight, 0) *  // Lift so feet are at ground
-                                   rotationY(.pi) *                        // Face forward
-                                   scaling(scale, scale, scale) *
-                                   translation(-modelCenter.x, 0, -modelCenter.z)  // Center horizontally
-                
-                print("[Player] Y-up model. Scale: \(scale), modelHeight: \(modelHeight)")
-            } else if isZUp {
-                // Model uses Z-up (like some other software)
-                modelHeight = modelSize.z
-                let targetHeight: Float = 2.0
-                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
-                scaledMinHeight = bounds.min.z * scale
-                
-                // Z-up: rotate 90 degrees around X
-                playerModelMatrix = translation(0, -scaledMinHeight, 0) *
-                                   rotationY(.pi) *
-                                   rotationX(.pi / 2) *
-                                   scaling(scale, scale, scale) *
-                                   translation(-modelCenter.x, -modelCenter.y, 0)
-                
-                print("[Player] Z-up model. Scale: \(scale), modelHeight: \(modelHeight)")
-            } else {
-                // Fallback
-                modelHeight = max(modelSize.x, max(modelSize.y, modelSize.z))
-                let targetHeight: Float = 2.0
-                let scale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
-                
-                playerModelMatrix = scaling(scale, scale, scale)
-                print("[Player] Unknown orientation. Scale: \(scale)")
-            }
-            
-            // Use the existing character texture for now
-            playerModelTexture = characterTexture
-            
-            print("[Player] ✅ Player model loaded with \(playerModelVertexCount) vertices")
+        // Fallback: Load as static mesh (skeletal loading failed)
+        let loader = USDModelLoader(device: device)
+        guard let model = loader.loadModel(from: finalURL, materialIndex: MaterialIndex.character.rawValue) else { return }
+        
+        playerModelVertexBuffer = model.vertexBuffer
+        playerModelVertexCount = model.vertexCount
+        
+        let bounds = model.boundingBox
+        let modelSize = bounds.max - bounds.min
+        let modelCenter = (bounds.max + bounds.min) / 2
+        
+        let isYUp = modelSize.y > modelSize.z && modelSize.y > modelSize.x
+        let isZUp = modelSize.z > modelSize.y && modelSize.z > modelSize.x
+        
+        if isYUp {
+            let modelHeight = modelSize.y
+            let scale = modelHeight > 0.001 ? 2.0 / modelHeight : 1.0
+            let scaledMinHeight = bounds.min.y * scale
+            playerModelMatrix = translation(0, -scaledMinHeight, 0) *
+                               rotationY(.pi) *
+                               scaling(scale, scale, scale) *
+                               translation(-modelCenter.x, 0, -modelCenter.z)
+        } else if isZUp {
+            let modelHeight = modelSize.z
+            let scale = modelHeight > 0.001 ? 2.0 / modelHeight : 1.0
+            let scaledMinHeight = bounds.min.z * scale
+            playerModelMatrix = translation(0, -scaledMinHeight, 0) *
+                               rotationY(.pi) *
+                               rotationX(.pi / 2) *
+                               scaling(scale, scale, scale) *
+                               translation(-modelCenter.x, -modelCenter.y, 0)
         } else {
-            print("[Player] ⚠️ Failed to load player model")
+            let modelHeight = max(modelSize.x, max(modelSize.y, modelSize.z))
+            let scale = modelHeight > 0.001 ? 2.0 / modelHeight : 1.0
+            playerModelMatrix = scaling(scale, scale, scale)
         }
+        
+        playerModelTexture = characterTexture
+        print("[Init] Loaded static player mesh with \(playerModelVertexCount) vertices")
     }
     
     /// Load additional animations from USDZ files in the bundle
@@ -2629,8 +2822,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         
-        print("[Player] Loaded \(loadedCount) additional animations")
-        print("[Player] Available animations: \(mesh.animations.keys.sorted().joined(separator: ", "))")
+        // Animation loading complete (loadedCount animations)
     }
     
     // MARK: - Enemy Skeletal Animation Loading
@@ -2639,91 +2831,44 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func loadEnemyModel() {
         let skeletalLoader = SkeletalMeshLoader(device: device)
         
-        // Try to find the idle animation as the base (it has the full mesh + skeleton)
-        var baseAnimationURL: URL? = nil
+        // Find mutant-idle as base enemy model
+        let meshURL = Bundle.main.url(forResource: "mutant-idle", withExtension: "usdz") ??
+                      Bundle.main.url(forResource: "mutant-idle", withExtension: "usdz", subdirectory: "Animations")
         
-        // Try to find mutant-idle as the base enemy model
-        if let url = Bundle.main.url(forResource: "mutant-idle", withExtension: "usdz") {
-            baseAnimationURL = url
-            print("[Enemy] Found mutant-idle.usdz as base")
-        } else if let url = Bundle.main.url(forResource: "mutant-idle", withExtension: "usdz", subdirectory: "Animations") {
-            baseAnimationURL = url
-            print("[Enemy] Found mutant-idle.usdz in Animations subdirectory")
-        }
-        
-        guard let meshURL = baseAnimationURL else {
-            print("[Enemy] Could not find mutant-idle.usdz")
-            // List available enemy animation files
-            if let resourcePath = Bundle.main.resourcePath {
-                let fileManager = FileManager.default
-                if let enumerator = fileManager.enumerator(atPath: resourcePath) {
-                    print("[Enemy] Searching bundle for mutant files...")
-                    while let file = enumerator.nextObject() as? String {
-                        if file.lowercased().contains("mutant") {
-                            print("[Enemy]   Found: \(file)")
-                        }
-                    }
-                }
-            }
+        guard let url = meshURL,
+              let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: url, materialIndex: MaterialIndex.enemy.rawValue) else {
             return
         }
         
-        if let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: meshURL, materialIndex: MaterialIndex.enemy.rawValue) {
-            print("[Enemy] Successfully loaded skeletal mesh!")
-            
-            // Load additional enemy animations
-            loadEnemyAnimations(into: skeletalMesh, loader: skeletalLoader)
-            
-            // Store the mesh
-            enemySkeletalMesh = skeletalMesh
-            
-            // Calculate model transform based on bounds
-            let bounds = skeletalMesh.boundingBox
-            let modelSize = bounds.max - bounds.min
-            let modelCenter = (bounds.max + bounds.min) / 2
-            
-            print("[Enemy] Model bounds: min=\(bounds.min), max=\(bounds.max)")
-            print("[Enemy] Model size: \(modelSize)")
-            
-            // Detect coordinate system (same as player)
-            let isYUp = abs(bounds.min.y) < abs(bounds.max.y) * 0.1 && bounds.max.y > bounds.max.z
-            
-            let modelHeight: Float
-            let targetHeight: Float = 2.2  // Enemies slightly taller than player
-            
-            if isYUp {
-                modelHeight = modelSize.y
-            } else {
-                modelHeight = modelSize.z
-            }
-            
-            enemyModelScale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
-            let scaledMinHeight = (isYUp ? bounds.min.y : bounds.min.z) * enemyModelScale
-            
-            if isYUp {
-                enemyModelMatrix = translation(0, -scaledMinHeight, 0) *
-                                   rotationY(.pi) *
-                                   scaling(enemyModelScale, enemyModelScale, enemyModelScale) *
-                                   translation(-modelCenter.x, 0, -modelCenter.z)
-            } else {
-                enemyModelMatrix = translation(0, -scaledMinHeight, 0) *
-                                   rotationY(.pi) *
-                                   rotationX(.pi / 2) *
-                                   scaling(enemyModelScale, enemyModelScale, enemyModelScale) *
-                                   translation(-modelCenter.x, -modelCenter.y, 0)
-            }
-            
-            print("[Enemy] ✅ Skeletal animation enabled with \(skeletalMesh.bones.count) bones!")
-            print("[Enemy] ✅ Loaded \(skeletalMesh.animations.count) animations")
-            print("[Enemy] Model scale: \(enemyModelScale)")
-            if skeletalMesh.texture != nil {
-                print("[Enemy] ✅ Texture loaded from USDZ")
-            } else {
-                print("[Enemy] ⚠️ No texture in USDZ, will use fallback texture")
-            }
+        loadEnemyAnimations(into: skeletalMesh, loader: skeletalLoader)
+        enemySkeletalMesh = skeletalMesh
+        
+        // Calculate model transform based on bounds
+        let bounds = skeletalMesh.boundingBox
+        let modelSize = bounds.max - bounds.min
+        let modelCenter = (bounds.max + bounds.min) / 2
+        
+        let isYUp = abs(bounds.min.y) < abs(bounds.max.y) * 0.1 && bounds.max.y > bounds.max.z
+        let modelHeight: Float = isYUp ? modelSize.y : modelSize.z
+        let targetHeight: Float = 2.2
+        
+        enemyModelScale = modelHeight > 0.001 ? targetHeight / modelHeight : 1.0
+        let scaledMinHeight = (isYUp ? bounds.min.y : bounds.min.z) * enemyModelScale
+        
+        if isYUp {
+            enemyModelMatrix = translation(0, -scaledMinHeight, 0) *
+                               rotationY(.pi) *
+                               scaling(enemyModelScale, enemyModelScale, enemyModelScale) *
+                               translation(-modelCenter.x, 0, -modelCenter.z)
         } else {
-            print("[Enemy] Failed to load skeletal mesh, using procedural enemies")
+            enemyModelMatrix = translation(0, -scaledMinHeight, 0) *
+                               rotationY(.pi) *
+                               rotationX(.pi / 2) *
+                               scaling(enemyModelScale, enemyModelScale, enemyModelScale) *
+                               translation(-modelCenter.x, -modelCenter.y, 0)
         }
+        
+        print("[Init] Loaded enemy with \(skeletalMesh.bones.count) bones, \(skeletalMesh.animations.count) animations")
     }
     
     /// Load additional enemy animations from USDZ files
@@ -2743,6 +2888,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             ("mutant-punch", "mutant-punch"),
             ("mutant-swiping", "mutant-swiping"),
             ("mutant-jump-attack", "mutant-jump-attack"),
+            
+            // Hit reaction / stun animations (randomly chosen when enemy takes damage)
+            ("reaction", "reaction"),
+            ("taking-punch", "taking-punch"),
             
             // Roar/aggro animations
             ("mutant-roaring", "mutant-roaring"),
@@ -2770,14 +2919,18 @@ final class Renderer: NSObject, MTKViewDelegate {
                 continue
             }
             
-            // Try to find the file in bundle
+            // Try to find the file in bundle (multiple locations)
             var url: URL? = nil
             
             // Try directly in bundle
             if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz") {
                 url = bundleURL
             }
-            // Try in Animations subdirectory
+            // Try in EnemyAnimations subdirectory
+            else if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz", subdirectory: "EnemyAnimations") {
+                url = bundleURL
+            }
+            // Try in Animations subdirectory (fallback)
             else if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz", subdirectory: "Animations") {
                 url = bundleURL
             }
@@ -2789,8 +2942,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         
-        print("[Enemy] Loaded \(loadedCount) additional animations")
-        print("[Enemy] Available animations: \(mesh.animations.keys.sorted().joined(separator: ", "))")
+        // Animation loading complete (loadedCount animations)
     }
     
     /// Create or get an AnimatedEnemy instance for a given enemy
@@ -2820,7 +2972,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         case .attacking:
             newState = .attacking
         case .hurt:
-            newState = .hurt
+            // Use the randomly selected stun animation
+            newState = enemy.stunAnimationIndex == 0 ? .stunned : .stunned2
         case .dead:
             if animatedEnemy.animationState == .dying && animatedEnemy.isAnimationComplete {
                 newState = .dead
@@ -2846,86 +2999,135 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
     
-    private func loadCabinModel() {
-        let loader = USDModelLoader(device: device)
+    // MARK: - NPC Skeletal Animation Loading
+    
+    /// Load the NPC (vendor) skeletal model
+    private func loadNPCModel() {
+        let skeletalLoader = SkeletalMeshLoader(device: device)
         
-        // Try to load the medieval wooden house model - check multiple possible locations
-        var cabinURL: URL?
+        // Find vendor-happy-idle as base NPC model
+        let meshURL = Bundle.main.url(forResource: "vendor-happy-idle", withExtension: "usdz") ??
+                      Bundle.main.url(forResource: "vendor-happy-idle", withExtension: "usdz", subdirectory: "NPCAnimations")
         
-        // Try 1: Direct in bundle (if added as group, files are flattened)
-        if let url = Bundle.main.url(forResource: "medieval_woodenhouse", withExtension: "usdc") {
-            cabinURL = url
-            print("[Cabin] Found medieval_woodenhouse.usdc directly in bundle: \(url.path)")
-        }
-        // Try 2: In usdc subdirectory (folder reference)
-        else if let url = Bundle.main.url(forResource: "medieval_woodenhouse", withExtension: "usdc", subdirectory: "usdc") {
-            cabinURL = url
-            print("[Cabin] Found medieval_woodenhouse.usdc in usdc subdirectory: \(url.path)")
-        }
-        // Try 3: List what's actually in the bundle for debugging
-        else {
-            print("[Cabin] Could not find medieval_woodenhouse.usdc - searching bundle...")
-            if let resourcePath = Bundle.main.resourcePath {
-                let fileManager = FileManager.default
-                if let enumerator = fileManager.enumerator(atPath: resourcePath) {
-                    while let file = enumerator.nextObject() as? String {
-                        if file.contains("medieval") || file.contains("woodenhouse") || file.contains("usdc") {
-                            print("[Cabin]   Found: \(file)")
-                        }
-                    }
-                }
-            }
-            print("[Cabin] medieval_woodenhouse.usdc not found in bundle")
+        guard let url = meshURL,
+              let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: url, materialIndex: MaterialIndex.vendor.rawValue) else {
+            print("[NPCs] Failed to load vendor skeletal mesh")
             return
         }
         
-        guard let finalURL = cabinURL else { return }
+        loadNPCAnimations(into: skeletalMesh, loader: skeletalLoader)
+        npcSkeletalMesh = skeletalMesh
         
-        if let model = loader.loadModel(from: finalURL, materialIndex: MaterialIndex.cabin.rawValue) {
-            cabinVertexBuffer = model.vertexBuffer
-            cabinVertexCount = model.vertexCount
+        // Calculate model scale based on bounds (vendor should be ~1.8m tall)
+        let bounds = skeletalMesh.boundingBox
+        let modelHeight = bounds.max.y - bounds.min.y
+        let targetHeight: Float = 1.8
+        npcModelScale = modelHeight > 0 ? targetHeight / modelHeight : 1.0
+        
+        print("[NPCs] Loaded vendor with \(skeletalMesh.bones.count) bones, \(skeletalMesh.animations.count) animations")
+    }
+    
+    /// Load additional NPC animations from USDZ files
+    private func loadNPCAnimations(into mesh: SkeletalMesh, loader: SkeletalMeshLoader) {
+        // List of NPC animation files
+        let animationFiles: [(name: String, filename: String)] = [
+            ("vendor-happy-idle", "vendor-happy-idle"),
+            ("vendor-waving", "vendor-waving"),
+            ("vendor-e-action", "vendor-e-action"),
+        ]
+        
+        var loadedCount = 0
+        for (name, filename) in animationFiles {
+            // Skip if already loaded (base animation is included in mesh)
+            if mesh.animations[name] != nil { continue }
             
-            // Position the cabin in the world
-            // Scale and position based on bounds
-            let bounds = model.boundingBox
-            let modelSize = bounds.max - bounds.min
-            let modelCenter = (bounds.max + bounds.min) / 2
+            // Try different paths
+            var url: URL? = nil
             
-            print("[Cabin] Model bounds: min=\(bounds.min), max=\(bounds.max)")
-            print("[Cabin] Model size: \(modelSize), center: \(modelCenter)")
-            print("[Cabin] Vertex count: \(model.vertexCount)")
+            if let bundleURL = Bundle.main.url(forResource: filename, withExtension: "usdz") {
+                url = bundleURL
+            } else if let npcURL = Bundle.main.url(forResource: filename, withExtension: "usdz", subdirectory: "NPCAnimations") {
+                url = npcURL
+            }
             
-            // Scale to reasonable size (about 15 units tall - 3x larger)
-            // USD models can be in various units (cm, m, etc.) so we normalize
-            let maxDimension = max(modelSize.x, max(modelSize.y, modelSize.z))
-            let targetSize: Float = 15.0
-            let scale = maxDimension > 0.001 ? targetSize / maxDimension : 1.0
-            
-            // Position near player spawn
-            let terrainY = Terrain.heightAt(x: 8, z: 10)
-            
-            // After rotation, the model's Z extent becomes Y (height)
-            // We need to lift the model so its bottom sits on the ground
-            let scaledHeight = modelSize.z * scale  // Z becomes height after X rotation
-            let liftOffset = scaledHeight / 2  // Lift by half the height to put bottom at ground
-            
-            let cabinPosition = simd_float3(8, terrainY + liftOffset, 10)
-            
-            // Create model matrix: translate to position, rotate to fix orientation (Z-up to Y-up),
-            // scale, and center the model horizontally
-            cabinModelMatrix = translation(cabinPosition.x, cabinPosition.y, cabinPosition.z) *
-                               rotationX(.pi / 2) *  // Convert Z-up to Y-up (positive rotation)
-                               scaling(scale, scale, scale) *
-                               translation(-modelCenter.x, -modelCenter.y, -modelCenter.z)
-            
-            print("[Cabin] Loaded cabin model at position \(cabinPosition) with scale \(scale)")
-        } else {
-            print("[Cabin] Failed to load cabin model - file may not be in bundle")
+            if let animURL = url {
+                if loader.loadAnimationIntoMesh(from: animURL, name: name, mesh: mesh) {
+                    loadedCount += 1
+                }
+            }
         }
         
-        // Note: The EXR texture "color_0C0C0C" is just a solid dark color placeholder
-        // We use the generated fallback texture which has wood grain detail instead
-        print("[Cabin] Using generated wood texture for cabin")
+        print("[NPCs] Loaded \(loadedCount) additional animations")
+    }
+    
+    /// Create or get an AnimatedNPC instance for a given NPC
+    private func getAnimatedNPC(for npc: NPC) -> AnimatedNPC? {
+        if let existing = animatedNPCs[npc.id] {
+            return existing
+        }
+        
+        guard let mesh = npcSkeletalMesh else { return nil }
+        
+        let animatedNPC = AnimatedNPC(device: device, mesh: mesh)
+        animatedNPCs[npc.id] = animatedNPC
+        return animatedNPC
+    }
+    
+    /// Update animation state for an NPC based on its behavior state
+    private func updateNPCAnimationState(animatedNPC: AnimatedNPC, npc: NPC, isShopOpen: Bool) {
+        let newState: NPCAnimationState
+        
+        if isShopOpen {
+            // Player is interacting with this NPC (shop is open)
+            newState = .interacting
+        } else if npc.isWaving {
+            // NPC is waving at approaching player
+            newState = .waving
+        } else {
+            // Default idle
+            newState = .idle
+        }
+        
+        animatedNPC.setAnimationState(newState)
+    }
+    
+    private func loadCabinModel() {
+        let loader = USDModelLoader(device: device)
+        
+        // Find cabin model
+        let cabinURL = Bundle.main.url(forResource: "medieval_woodenhouse", withExtension: "usdc") ??
+                       Bundle.main.url(forResource: "medieval_woodenhouse", withExtension: "usdc", subdirectory: "usdc")
+        
+        guard let url = cabinURL,
+              let model = loader.loadModel(from: url, materialIndex: MaterialIndex.cabin.rawValue) else {
+            return
+        }
+        
+        cabinVertexBuffer = model.vertexBuffer
+        cabinVertexCount = model.vertexCount
+        
+        let bounds = model.boundingBox
+        let modelSize = bounds.max - bounds.min
+        let modelCenter = (bounds.max + bounds.min) / 2
+        
+        // Scale to reasonable size (about 15 units tall)
+        let maxDimension = max(modelSize.x, max(modelSize.y, modelSize.z))
+        let targetSize: Float = 15.0
+        let scale = maxDimension > 0.001 ? targetSize / maxDimension : 1.0
+        
+        // Position near player spawn
+        let terrainY = Terrain.heightAt(x: 8, z: 10)
+        let scaledHeight = modelSize.z * scale
+        let liftOffset = scaledHeight / 2
+        let cabinPosition = simd_float3(8, terrainY + liftOffset, 10)
+        
+        // Create model matrix: translate, rotate Z-up to Y-up, scale, center
+        cabinModelMatrix = translation(cabinPosition.x, cabinPosition.y, cabinPosition.z) *
+                           rotationX(.pi / 2) *
+                           scaling(scale, scale, scale) *
+                           translation(-modelCenter.x, -modelCenter.y, -modelCenter.z)
+        
+        print("[Init] Loaded cabin model")
     }
     
     /// Draw the cabin model
@@ -2953,58 +3155,26 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: - Treasure Chest Model
     
     private func loadChestModel() {
-        print("[Chest] ========== LOADING CHEST MODEL ==========")
-        
         let loader = USDModelLoader(device: device)
         
-        // Find the treasure chest model
-        var chestURL: URL?
+        // Find chest model in bundle or LandscapeModels subdirectory
+        let url = Bundle.main.url(forResource: "treasure_chest", withExtension: "usdz") ??
+                  Bundle.main.url(forResource: "treasure_chest", withExtension: "usdz", subdirectory: "LandscapeModels")
         
-        // Try direct bundle location
-        if let url = Bundle.main.url(forResource: "treasure_chest", withExtension: "usdz") {
-            chestURL = url
-            print("[Chest] Found treasure_chest.usdz directly in bundle")
-        }
-        // Try LandscapeModels subdirectory
-        else if let url = Bundle.main.url(forResource: "treasure_chest", withExtension: "usdz", subdirectory: "LandscapeModels") {
-            chestURL = url
-            print("[Chest] Found treasure_chest.usdz in LandscapeModels")
-        }
-        else {
-            print("[Chest] ❌ Could not find treasure_chest.usdz")
-            return
-        }
-        
-        guard let url = chestURL else { return }
-        
-        // Print asset hierarchy for debugging
-        loader.printAssetHierarchy(from: url)
+        guard let chestURL = url else { return }
         
         // Load with lid submeshes separated
-        // The lid consists of submeshes named "topdetail_low" and "topwood_low"
         if let model = loader.loadChestModel(
-            from: url,
+            from: chestURL,
             materialIndex: MaterialIndex.treasureChest.rawValue,
-            lidSubmeshNames: ["topdetail", "topwood"]  // Partial match will work
+            lidSubmeshNames: ["topdetail", "topwood"]
         ) {
             chestModel = model
-            
-            // Calculate scale to make chest about 0.8 units wide
             let bounds = model.boundingBox
-            let modelSize = bounds.max - bounds.min
-            let maxDim = max(modelSize.x, max(modelSize.y, modelSize.z))
+            let maxDim = max(bounds.max.x - bounds.min.x, max(bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z))
             chestModelScale = maxDim > 0.001 ? 0.8 / maxDim : 1.0
-            
-            print("[Chest] ✅ Loaded chest model")
-            print("[Chest]   Base vertices: \(model.baseVertexCount)")
-            print("[Chest]   Lid vertices: \(model.lidVertexCount)")
-            print("[Chest]   Model scale: \(chestModelScale)")
-            print("[Chest]   Hinge offset: \(model.hingeOffset)")
-        } else {
-            print("[Chest] ❌ Failed to load chest model")
+            print("[Init] Loaded chest model")
         }
-        
-        print("[Chest] ==========================================")
     }
     
     /// Draw all treasure chests with animated lids
@@ -3021,6 +3191,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         for chest in interactables where chest.type == .treasureChest {
             guard uniformIndex < 40 else { break }  // Max 20 chests (40 draw calls)
+            
+            // Distance culling for performance
+            guard isWithinDistance(position: chest.position, maxDistance: chestDrawDistance) else { continue }
             
             let terrainY = Terrain.heightAt(x: chest.position.x, z: chest.position.z)
             
@@ -3097,120 +3270,38 @@ final class Renderer: NSObject, MTKViewDelegate {
     // MARK: - Tree Models
     
     private func loadTreeModels() {
-        print("[Trees] ========== STARTING TREE MODEL LOADING ==========")
-        
         let loader = USDModelLoader(device: device)
-        
-        // Load all tree models (tree1.usdc through tree8.usdc)
         let treeNames = ["tree1", "tree2", "tree3", "tree4", "tree5", "tree6", "tree7", "tree8"]
         
-        print("[Trees] Looking for \(treeNames.count) tree models: \(treeNames)")
-        print("[Trees] Bundle path: \(Bundle.main.bundlePath)")
-        
-        // List all usdc files in bundle for debugging
-        if let resourcePath = Bundle.main.resourcePath {
-            let fm = FileManager.default
-            do {
-                let allFiles = try fm.contentsOfDirectory(atPath: resourcePath)
-                let usdcFiles = allFiles.filter { $0.hasSuffix(".usdc") }
-                print("[Trees] Found \(usdcFiles.count) .usdc files in bundle root: \(usdcFiles)")
-                
-                // Check for LandscapeModels subdirectory
-                let landscapeModelsPath = resourcePath + "/LandscapeModels"
-                if fm.fileExists(atPath: landscapeModelsPath) {
-                    let landscapeFiles = try fm.contentsOfDirectory(atPath: landscapeModelsPath)
-                    print("[Trees] Found \(landscapeFiles.count) files in LandscapeModels/: \(landscapeFiles)")
-                } else {
-                    print("[Trees] LandscapeModels/ subdirectory does not exist in bundle")
-                }
-            } catch {
-                print("[Trees] Error listing bundle contents: \(error)")
-            }
-        }
-        
         for name in treeNames {
-            print("[Trees] --- Attempting to load: \(name).usdc ---")
+            // Try bundle root first, then LandscapeModels subdirectory
+            let url = Bundle.main.url(forResource: name, withExtension: "usdc") ??
+                      Bundle.main.url(forResource: name, withExtension: "usdc", subdirectory: "LandscapeModels")
             
-            // Try multiple locations
-            var treeURL: URL?
-            
-            // Try 1: Direct in bundle root
-            if let url = Bundle.main.url(forResource: name, withExtension: "usdc") {
-                treeURL = url
-                print("[Trees]   Found in bundle root: \(url.path)")
-            } else {
-                print("[Trees]   Not found in bundle root")
-            }
-            
-            // Try 2: In LandscapeModels subdirectory
-            if treeURL == nil {
-                if let url = Bundle.main.url(forResource: name, withExtension: "usdc", subdirectory: "LandscapeModels") {
-                    treeURL = url
-                    print("[Trees]   Found in LandscapeModels/: \(url.path)")
-                } else {
-                    print("[Trees]   Not found in LandscapeModels/")
-                }
-            }
-            
-            guard let url = treeURL else {
-                print("[Trees]   ❌ FAILED: Could not find \(name).usdc in any location")
+            guard let treeURL = url,
+                  FileManager.default.fileExists(atPath: treeURL.path),
+                  let model = loader.loadModel(from: treeURL, materialIndex: MaterialIndex.foliage.rawValue) else {
                 continue
             }
             
-            // Verify file exists
-            if FileManager.default.fileExists(atPath: url.path) {
-                print("[Trees]   ✅ File exists at path: \(url.path)")
-            } else {
-                print("[Trees]   ❌ File does NOT exist at path: \(url.path)")
-                continue
-            }
-            
-            // Try to load the model
-            print("[Trees]   Calling USDModelLoader.loadModel()...")
-            if let model = loader.loadModel(from: url, materialIndex: MaterialIndex.foliage.rawValue) {
-                let bounds = model.boundingBox
-                let size = bounds.max - bounds.min
-                // Calculate actual model height (Z is up in these models based on bounds)
-                let modelHeight = max(size.x, max(size.y, size.z))  // Use largest dimension as height
-                treeModels.append(TreeModel(
-                    vertexBuffer: model.vertexBuffer,
-                    vertexCount: model.vertexCount,
-                    boundingBox: model.boundingBox,
-                    height: modelHeight
-                ))
-                print("[Trees]   ✅ SUCCESS: Loaded \(name).usdc")
-                print("[Trees]      Vertex count: \(model.vertexCount)")
-                print("[Trees]      Bounding box: min=\(bounds.min), max=\(bounds.max)")
-                print("[Trees]      Model size: \(size)")
-                print("[Trees]      Model height for scaling: \(modelHeight)")
-            } else {
-                print("[Trees]   ❌ FAILED: USDModelLoader returned nil for \(name).usdc")
-            }
+            let size = model.boundingBox.max - model.boundingBox.min
+            let modelHeight = max(size.x, max(size.y, size.z))
+            treeModels.append(TreeModel(
+                vertexBuffer: model.vertexBuffer,
+                vertexCount: model.vertexCount,
+                boundingBox: model.boundingBox,
+                height: modelHeight
+            ))
         }
         
-        print("[Trees] --- Loading complete ---")
-        print("[Trees] Successfully loaded \(treeModels.count) / \(treeNames.count) tree models")
+        guard !treeModels.isEmpty else { return }
         
-        guard !treeModels.isEmpty else {
-            print("[Trees] ❌ No tree models loaded - trees will not be displayed")
-            print("[Trees] ==========================================")
-            return
-        }
-        
-        // Generate tree instances
-        print("[Trees] Generating tree instances...")
         generateTreeInstances()
-        
-        print("[Trees] ✅ Tree model system ready")
-        print("[Trees] Total instances: \(treeInstances.count)")
-        print("[Trees] ==========================================")
+        print("[Init] Loaded \(treeModels.count) tree models, \(treeInstances.count) instances")
     }
     
     private func generateTreeInstances() {
-        print("[Trees] generateTreeInstances() starting...")
-        print("[Trees] Number of loaded tree models: \(treeModels.count)")
-        
-        // Use seeded random placement for consistent tree positions
+        // Seeded random for consistent placement
         func seededRandom(_ seed: Int) -> Float {
             var s = UInt64(seed &* 1103515245 &+ 12345)
             s = (s &* 1103515245 &+ 12345)
@@ -3218,135 +3309,53 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         
         var seed = 1
-        var skippedCenter = 0
-        var skippedPath = 0
-        var skippedOccupied = 0
-        var skippedRandom = 0
-        var placed = 0
         
         for gridX in stride(from: -90, through: 90, by: 10) {
             for gridZ in stride(from: -90, through: 90, by: 10) {
-                // Skip area near center (where player spawns, cabin, etc.)
-                if abs(gridX) < 12 && abs(gridZ) < 12 { seed += 6; skippedCenter += 1; continue }
+                // Skip center area
+                if abs(gridX) < 12 && abs(gridZ) < 12 { seed += 6; continue }
                 
                 let offsetX = (seededRandom(seed) - 0.5) * 8
                 let offsetZ = (seededRandom(seed + 1) - 0.5) * 8
                 let x = Float(gridX) + offsetX
                 let z = Float(gridZ) + offsetZ
                 
-                // Skip if on a path
-                if GeometryGenerator.isOnPath(x: x, z: z) { seed += 6; skippedPath += 1; continue }
+                // Skip paths
+                if GeometryGenerator.isOnPath(x: x, z: z) { seed += 6; continue }
                 
                 let height = 4.0 + seededRandom(seed + 2) * 4.0
                 let radius = 1.2 + seededRandom(seed + 3) * 1.5
-                
-                // Calculate occupied radius
                 let occupiedRadius = radius * 0.3 + 1.0
                 
-                // Check if position is clear
-                if !GeometryGenerator.isPositionClear(x: x, z: z, radius: occupiedRadius) {
-                    seed += 6
-                    skippedOccupied += 1
-                    continue
-                }
+                // Skip occupied positions
+                if !GeometryGenerator.isPositionClear(x: x, z: z, radius: occupiedRadius) { seed += 6; continue }
                 
-                // 75% chance to place a tree
-                if seededRandom(seed + 4) < 0.75 {
+                // 50% chance to place
+                if seededRandom(seed + 4) < 0.50 {
                     let terrainY = Terrain.heightAt(x: x, z: z)
-                    
-                    // Select tree model randomly
                     let modelIndex = Int(seededRandom(seed + 5) * Float(treeModels.count)) % treeModels.count
-                    
-                    // Random rotation (0 to 2*PI)
                     let rotation = seededRandom(seed + 6) * .pi * 2
+                    let scale = height / treeModels[modelIndex].height
                     
-                    // Scale based on desired height and actual model height
-                    // The tree models are very large (1000+ units), so we scale down significantly
-                    let modelHeight = treeModels[modelIndex].height
-                    let scale = height / modelHeight
-                    
-                    // Note: Colliders and camera blockers are already added by the procedural
-                    // tree generation (same positions) - we just replace the visual meshes
                     treeInstances.append(TreeInstance(
                         modelIndex: modelIndex,
                         position: simd_float3(x, terrainY, z),
                         rotation: rotation,
                         scale: scale
                     ))
-                    placed += 1
-                } else {
-                    skippedRandom += 1
                 }
-                seed += 6  // Increment seed for next tree position
+                seed += 6
             }
         }
         
-        print("[Trees] Instance generation complete:")
-        print("[Trees]   Placed: \(placed)")
-        print("[Trees]   Skipped (center): \(skippedCenter)")
-        print("[Trees]   Skipped (path): \(skippedPath)")
-        print("[Trees]   Skipped (occupied): \(skippedOccupied)")
-        print("[Trees]   Skipped (random 25%): \(skippedRandom)")
-        print("[Trees]   Total instances: \(treeInstances.count)")
-        
-        // Log distribution of tree models used
-        var modelCounts: [Int: Int] = [:]
-        for instance in treeInstances {
-            modelCounts[instance.modelIndex, default: 0] += 1
-        }
-        print("[Trees]   Model distribution: \(modelCounts)")
-        
-        // Log first few instances for debugging
-        if !treeInstances.isEmpty {
-            print("[Trees]   First 5 instances (with model heights):")
-            for i in 0..<min(5, treeInstances.count) {
-                let inst = treeInstances[i]
-                let modelHeight = treeModels[inst.modelIndex].height
-                print("[Trees]     [\(i)] model=\(inst.modelIndex), modelHeight=\(modelHeight), scale=\(inst.scale), worldHeight=\(modelHeight * inst.scale)")
-            }
-        }
+        buildTreeInstanceBuffers()
     }
     
-    /// Draw all tree instances
-    private var treeDrawLogCount = 0
-    private func drawTrees(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
-        // Log only once at startup
-        if treeDrawLogCount == 0 {
-            print("[Trees] drawTrees() called for first time")
-            print("[Trees]   treeInstances.count: \(treeInstances.count)")
-            print("[Trees]   treeModels.count: \(treeModels.count)")
-            
-            // Log first tree positioning details
-            if !treeInstances.isEmpty && !treeModels.isEmpty {
-                let firstInstance = treeInstances[0]
-                let firstModel = treeModels[firstInstance.modelIndex]
-                let bounds = firstModel.boundingBox
-                let modelCenter = (bounds.max + bounds.min) / 2
-                let modelZExtent = bounds.max.z - bounds.min.z
-                let scaledLift = (modelZExtent / 2) * firstInstance.scale
-                print("[Trees]   First tree positioning:")
-                print("[Trees]     Model bounds: min=\(bounds.min), max=\(bounds.max)")
-                print("[Trees]     Model center: \(modelCenter)")
-                print("[Trees]     Model Z extent: \(modelZExtent)")
-                print("[Trees]     Instance scale: \(firstInstance.scale)")
-                print("[Trees]     Scaled lift: \(scaledLift)")
-                print("[Trees]     Position before lift: \(firstInstance.position)")
-                print("[Trees]     Position after lift: (\(firstInstance.position.x), \(firstInstance.position.y + scaledLift), \(firstInstance.position.z))")
-            }
-        }
+    /// Build per-model instance buffers for GPU instancing
+    private func buildTreeInstanceBuffers() {
+        guard !treeModels.isEmpty else { return }
         
-        guard !treeInstances.isEmpty else {
-            if treeDrawLogCount == 0 {
-                print("[Trees]   ❌ Early return: no tree instances")
-            }
-            treeDrawLogCount += 1
-            return
-        }
-        
-        let uniformStride = (MemoryLayout<LitUniforms>.stride + 255) & ~255
-        let bufferBase = treeUniformBuffer.contents()
-        
-        // Group instances by model for efficient rendering
+        // Group instances by model
         var instancesByModel: [[TreeInstance]] = Array(repeating: [], count: treeModels.count)
         for instance in treeInstances {
             if instance.modelIndex < treeModels.count {
@@ -3354,61 +3363,70 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         
-        var instanceIndex = 0
-        var totalDrawCalls = 0
-        var totalVertices = 0
+        treeInstanceBuffers = []
+        treeInstanceCounts = []
         
         for (modelIndex, instances) in instancesByModel.enumerated() {
-            guard !instances.isEmpty else { continue }
-            
             let model = treeModels[modelIndex]
-            encoder.setVertexBuffer(model.vertexBuffer, offset: 0, index: 0)
-            
-            // Calculate model center and base offset for proper positioning
             let bounds = model.boundingBox
             let modelCenter = (bounds.max + bounds.min) / 2
-            // After Z-up to Y-up rotation, the model's Z extent becomes Y (height)
-            // We need to lift by half the Z extent so the bottom sits on ground
             let modelZExtent = bounds.max.z - bounds.min.z
             
-            // Write uniforms for all instances of this model
+            var matrices: [simd_float4x4] = []
             for instance in instances {
-                guard instanceIndex < 500 else { break }
-                
-                // Calculate lift offset after scaling - lift so tree bottom is at terrain height
                 let scaledLift = (modelZExtent / 2) * instance.scale
-                
-                // Tree models are Z-up, so rotate +90 degrees around X to convert to Y-up
-                // First center the model, then scale, then rotate, then position with lift
                 let modelMatrix = translation(instance.position.x, instance.position.y + scaledLift, instance.position.z) *
                                   rotationY(instance.rotation) *
                                   rotationX(.pi / 2) *
                                   scaling(instance.scale, instance.scale, instance.scale) *
                                   translation(-modelCenter.x, -modelCenter.y, -modelCenter.z)
-                
-                var treeUniforms = litUniforms
-                treeUniforms.modelMatrix = modelMatrix
-                
-                let offset = instanceIndex * uniformStride
-                let ptr = bufferBase.advanced(by: offset).bindMemory(to: LitUniforms.self, capacity: 1)
-                ptr.pointee = treeUniforms
-                
-                encoder.setVertexBuffer(treeUniformBuffer, offset: offset, index: 1)
-                encoder.setFragmentBuffer(treeUniformBuffer, offset: offset, index: 1)
-                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: model.vertexCount)
-                
-                instanceIndex += 1
-                totalDrawCalls += 1
-                totalVertices += model.vertexCount
+                matrices.append(modelMatrix)
+            }
+            
+            if matrices.isEmpty {
+                treeInstanceBuffers.append(device.makeBuffer(length: 64, options: .storageModeShared)!)
+                treeInstanceCounts.append(0)
+            } else {
+                let buffer = device.makeBuffer(bytes: matrices,
+                                               length: MemoryLayout<simd_float4x4>.stride * matrices.count,
+                                               options: .storageModeShared)!
+                treeInstanceBuffers.append(buffer)
+                treeInstanceCounts.append(matrices.count)
             }
         }
+    }
+    
+    /// Draw all tree instances using GPU instancing
+    private func drawTrees(encoder: MTLRenderCommandEncoder, litUniforms: LitUniforms) {
+        guard !treeInstances.isEmpty,
+              let instancedPipeline = instancedLitPipelineState,
+              !treeInstanceBuffers.isEmpty else { return }
         
-        if treeDrawLogCount == 0 {
-            print("[Trees]   ✅ Drawing complete: \(totalDrawCalls) draw calls, \(totalVertices) total vertices")
+        // Switch to instanced pipeline
+        encoder.setRenderPipelineState(instancedPipeline)
+        
+        // Set shared uniforms
+        var uniforms = litUniforms
+        memcpy(litUniformBuffer.contents(), &uniforms, MemoryLayout<LitUniforms>.stride)
+        encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
+        
+        // Draw each tree model with all its instances in ONE draw call
+        for (modelIndex, model) in treeModels.enumerated() {
+            guard modelIndex < treeInstanceBuffers.count else { continue }
+            let instanceCount = treeInstanceCounts[modelIndex]
+            guard instanceCount > 0 else { continue }
+            
+            encoder.setVertexBuffer(model.vertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBuffer(treeInstanceBuffers[modelIndex], offset: 0, index: 2)
+            encoder.drawPrimitives(type: .triangle,
+                                   vertexStart: 0,
+                                   vertexCount: model.vertexCount,
+                                   instanceCount: instanceCount)
         }
-        treeDrawLogCount += 1
         
-        // Restore landscape uniform buffer
+        // Restore regular lit pipeline
+        encoder.setRenderPipelineState(litPipelineState)
         encoder.setVertexBuffer(litUniformBuffer, offset: 0, index: 1)
         encoder.setFragmentBuffer(litUniformBuffer, offset: 0, index: 1)
     }

@@ -27,8 +27,16 @@ from pathlib import Path
 # CONFIGURATION - Modify these paths as needed
 # ============================================================================
 
-# Directory containing the animation FBX files and character mesh
-SOURCE_DIR = "/Users/maxdavis/Projects/MetalMan/animation_source/Creature Pack"
+# Base directory for animation source files
+BASE_DIR = "/Users/maxdavis/Projects/MetalMan/animation_source"
+
+# Directory containing the character mesh and most animations
+SOURCE_DIR = f"{BASE_DIR}/Creature Pack"
+
+# Additional directories to scan for animation files
+ADDITIONAL_DIRS = [
+    BASE_DIR,  # Root animation_source folder (for Reaction.fbx, Taking Punch.fbx, etc.)
+]
 
 # Output directory for USDZ files (separate from player animations)
 OUTPUT_DIR = "/Users/maxdavis/Projects/MetalMan/MetalMan/EnemyAnimations"
@@ -222,7 +230,7 @@ def export_usdz(output_path):
         )
 
 
-def process_animation(anim_file, character_file, output_dir, strip_root=True):
+def process_animation(anim_file, character_file, output_dir, strip_root=True, skip_existing=True):
     """
     Process a single animation file:
     1. Clear scene
@@ -230,10 +238,17 @@ def process_animation(anim_file, character_file, output_dir, strip_root=True):
     3. Import animation (to get the action)
     4. Apply animation to character armature
     5. Export as USDZ
+    
+    Returns: True if exported, False if failed, None if skipped
     """
     anim_name = os.path.basename(anim_file)
     clean_name = clean_filename(anim_name)
     output_path = os.path.join(output_dir, f"{clean_name}.usdz")
+    
+    # Skip if output already exists
+    if skip_existing and os.path.exists(output_path):
+        print(f"  SKIPPED: {clean_name}.usdz already exists")
+        return None
     
     print(f"\n{'='*60}")
     print(f"Processing: {anim_name}")
@@ -366,11 +381,20 @@ def main():
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # Find all animation FBX files (excluding the character mesh)
+    # Find all animation FBX files from main source dir
     animation_files = []
     for filename in os.listdir(SOURCE_DIR):
         if filename.endswith('.fbx') and filename != CHARACTER_MESH_FILE:
             animation_files.append(os.path.join(SOURCE_DIR, filename))
+    
+    # Also scan additional directories for animation files
+    for additional_dir in ADDITIONAL_DIRS:
+        if os.path.exists(additional_dir):
+            for filename in os.listdir(additional_dir):
+                if filename.endswith('.fbx') and filename != CHARACTER_MESH_FILE:
+                    filepath = os.path.join(additional_dir, filename)
+                    if filepath not in animation_files:
+                        animation_files.append(filepath)
     
     animation_files.sort()
     
@@ -380,12 +404,16 @@ def main():
     print(f"Strip root motion: {STRIP_ROOT_MOTION}")
     
     success_count = 0
+    skip_count = 0
     fail_count = 0
     
     for anim_file in animation_files:
         try:
-            if process_animation(anim_file, character_path, OUTPUT_DIR, STRIP_ROOT_MOTION):
+            result = process_animation(anim_file, character_path, OUTPUT_DIR, STRIP_ROOT_MOTION)
+            if result is True:
                 success_count += 1
+            elif result is None:
+                skip_count += 1
             else:
                 fail_count += 1
         except Exception as e:
@@ -396,6 +424,7 @@ def main():
     print("EXPORT COMPLETE")
     print("="*60)
     print(f"Successful exports: {success_count}")
+    print(f"Skipped (already exist): {skip_count}")
     print(f"Failed exports: {fail_count}")
     print(f"Output directory: {OUTPUT_DIR}")
     

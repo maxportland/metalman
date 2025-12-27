@@ -141,8 +141,11 @@ final class AnimatedCharacter {
         self.device = device
         self.mesh = mesh
         
-        // Create uniform buffer (same size as LitUniforms for compatibility)
-        self.uniformBuffer = device.makeBuffer(length: 512, options: .storageModeShared)!
+        // Create uniform buffer
+        self.uniformBuffer = device.makeBuffer(
+            length: MemoryLayout<SkinnedUniforms>.stride,
+            options: .storageModeShared
+        )!
         
         // Initialize bone transforms
         self.previousBoneTransforms = Array(repeating: matrix_identity_float4x4, count: mesh.bones.count)
@@ -240,7 +243,10 @@ final class AnimatedCharacter {
               timeOfDay: Float,
               pointLights: [PointLight],
               showShield: Bool = true,
-              showWeapon: Bool = true) {
+              showWeapon: Bool = true,
+              uvOffset: simd_float2 = .zero,
+              uvScale: Float = 1.0,
+              flipUVVertical: Bool = false) {
         
         // Update uniforms (matches SkinnedUniforms structure in shader)
         var uniforms = SkinnedUniforms()
@@ -250,6 +256,9 @@ final class AnimatedCharacter {
         uniforms.lightDirection = lightDirection
         uniforms.cameraPosition = cameraPosition
         uniforms.ambientIntensity = ambientIntensity
+        uniforms.uvOffset = uvOffset
+        uniforms.uvScale = uvScale
+        uniforms.flipUVVertical = flipUVVertical ? 1 : 0
         uniforms.diffuseIntensity = diffuseIntensity
         uniforms.timeOfDay = timeOfDay
         
@@ -319,6 +328,11 @@ struct SkinnedUniforms {
     var pointLight7: simd_float4 = .zero
     var pointLightCount: Int32 = 0
     var padding6: simd_float3 = .zero
+    
+    // UV adjustments (edit mode)
+    var uvOffset: simd_float2 = .zero
+    var uvScale: Float = 1.0
+    var flipUVVertical: Int32 = 0  // Bool as int for Metal
 }
 
 // MARK: - Helper

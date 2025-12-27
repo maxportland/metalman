@@ -161,10 +161,7 @@ final class USDModelLoader {
         // Load the USD asset
         let asset = MDLAsset(url: url, vertexDescriptor: mdlDescriptor, bufferAllocator: allocator)
         
-        guard asset.count > 0 else {
-            print("[USDLoader] No objects in asset")
-            return nil
-        }
+        guard asset.count > 0 else { return nil }
         
         // Collect all vertices from all meshes
         var allVertices: [TexturedVertex] = []
@@ -177,21 +174,14 @@ final class USDModelLoader {
             processObject(object, materialIndex: materialIndex, vertices: &allVertices, minBound: &minBound, maxBound: &maxBound)
         }
         
-        guard !allVertices.isEmpty else {
-            print("[USDLoader] No vertices extracted from model")
-            return nil
-        }
+        guard !allVertices.isEmpty else { return nil }
         
         // Create vertex buffer
         guard let vertexBuffer = device.makeBuffer(bytes: allVertices, 
                                                     length: MemoryLayout<TexturedVertex>.stride * allVertices.count,
                                                     options: .storageModeShared) else {
-            print("[USDLoader] Failed to create vertex buffer")
             return nil
         }
-        
-        print("[USDLoader] Loaded model with \(allVertices.count) vertices")
-        print("[USDLoader] Bounds: min=\(minBound), max=\(maxBound)")
         
         return LoadedModel(
             vertexBuffer: vertexBuffer,
@@ -268,31 +258,16 @@ final class USDModelLoader {
             let materialName = submesh.material?.name.lowercased() ?? ""
             let combinedName = submeshName + " " + materialName
             
-            // Log submesh info for debugging (first few only)
-            if vertices.count < 1000 {
-                print("[USDLoader] Submesh: '\(submesh.name)' material: '\(submesh.material?.name ?? "none")'")
-            }
-            
-            // Check for bark/trunk keywords
+            // Detect material type from submesh/material names
             if combinedName.contains("bark") || combinedName.contains("trunk") || 
                combinedName.contains("stem") || combinedName.contains("branch") ||
                combinedName.contains("wood") {
                 effectiveMaterialIndex = 1  // treeTrunk material index
-                if vertices.count < 1000 {
-                    print("[USDLoader]   -> Detected as TRUNK (material index 1)")
-                }
-            }
-            // Check for leaves/foliage keywords
-            else if combinedName.contains("leaf") || combinedName.contains("leaves") || 
-                    combinedName.contains("foliage") || combinedName.contains("frond") ||
-                    combinedName.contains("needle") || combinedName.contains("flower") ||
-                    combinedName.contains("fruit") {
+            } else if combinedName.contains("leaf") || combinedName.contains("leaves") || 
+                      combinedName.contains("foliage") || combinedName.contains("frond") ||
+                      combinedName.contains("needle") || combinedName.contains("flower") ||
+                      combinedName.contains("fruit") {
                 effectiveMaterialIndex = 2  // foliage material index
-                if vertices.count < 1000 {
-                    print("[USDLoader]   -> Detected as FOLIAGE (material index 2)")
-                }
-            } else if vertices.count < 1000 {
-                print("[USDLoader]   -> Using default material index \(materialIndex)")
             }
             
             // Process triangles
@@ -446,8 +421,6 @@ final class USDModelLoader {
         // Convert lid names to lowercase set for comparison
         let lidNamesLower = Set(lidSubmeshNames.map { $0.lowercased() })
         
-        print("[USDLoader] Chest: Loading with lid submesh names: \(lidSubmeshNames)")
-        
         // Iterate through all objects in the asset
         for i in 0..<asset.count {
             let object = asset.object(at: i)
@@ -464,16 +437,12 @@ final class USDModelLoader {
             )
         }
         
-        guard !baseVertices.isEmpty else {
-            print("[USDLoader] Chest: No base vertices extracted")
-            return nil
-        }
+        guard !baseVertices.isEmpty else { return nil }
         
         // Create base vertex buffer
         guard let baseBuffer = device.makeBuffer(bytes: baseVertices,
                                                   length: MemoryLayout<TexturedVertex>.stride * baseVertices.count,
                                                   options: .storageModeShared) else {
-            print("[USDLoader] Chest: Failed to create base vertex buffer")
             return nil
         }
         
@@ -483,14 +452,12 @@ final class USDModelLoader {
             guard let buffer = device.makeBuffer(bytes: lidVertices,
                                                   length: MemoryLayout<TexturedVertex>.stride * lidVertices.count,
                                                   options: .storageModeShared) else {
-                print("[USDLoader] Chest: Failed to create lid vertex buffer")
                 return nil
             }
             lidBuffer = buffer
         } else {
             // Create empty buffer if no lid
             lidBuffer = device.makeBuffer(length: 16, options: .storageModeShared)!
-            print("[USDLoader] Chest: Warning - no lid vertices found")
         }
         
         // Calculate hinge position - back center of the lid at its lowest point
@@ -508,11 +475,6 @@ final class USDModelLoader {
         } else {
             hingeOffset = simd_float3(0, 0, 0)
         }
-        
-        print("[USDLoader] Chest: Loaded with \(baseVertices.count) base vertices, \(lidVertices.count) lid vertices")
-        print("[USDLoader] Chest: Overall bounds: min=\(minBound), max=\(maxBound)")
-        print("[USDLoader] Chest: Lid bounds: min=\(lidMinBound), max=\(lidMaxBound)")
-        print("[USDLoader] Chest: Hinge offset: \(hingeOffset)")
         
         return LoadedChestModel(
             baseVertexBuffer: baseBuffer,
@@ -633,8 +595,6 @@ final class USDModelLoader {
         for submesh in submeshes {
             let submeshNameLower = submesh.name.lowercased()
             let isLid = lidSubmeshNames.contains { submeshNameLower.contains($0) }
-            
-            print("[USDLoader] Chest submesh: '\(submesh.name)' -> \(isLid ? "LID" : "BASE")")
             
             let indexBuffer = submesh.indexBuffer
             let indexData = indexBuffer.map()

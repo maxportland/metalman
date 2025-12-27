@@ -143,9 +143,9 @@ class GeometryGenerator {
     static func makeGroundMesh(device: MTLDevice) -> (MTLBuffer, Int) {
         var vertices: [TexturedVertex] = []
         let size: Float = 100
-        let resolution: Int = 100  // Grid subdivisions
+        let resolution: Int = 50  // Grid subdivisions (reduced from 100 for performance)
         let cellSize = size * 2 / Float(resolution)
-        let texScale: Float = 0.5  // Texture repeat per cell
+        let texScale: Float = 1.0  // Texture repeat per cell (adjusted for lower resolution)
         
         for gz in 0..<resolution {
             for gx in 0..<resolution {
@@ -688,7 +688,7 @@ class GeometryGenerator {
     /// Add a single root segment (tapered cylinder between two points)
     private static func addRootSegment(from start: simd_float3, to end: simd_float3, radius1: Float, radius2: Float, material: UInt32, vertices: inout [TexturedVertex]) {
         let dir = simd_normalize(end - start)
-        let length = simd_length(end - start)
+        _ = simd_length(end - start)  // Length calculated for potential future use
         
         // Find perpendicular vectors
         var up = simd_float3(0, 1, 0)
@@ -1441,7 +1441,7 @@ class GeometryGenerator {
         let railHeight: Float = 1.0
         let railRadius: Float = 0.08
         for side in [-1.0, 1.0] as [Float] {
-            let offset = perpendicular * (hw - 0.1) * side
+            _ = perpendicular * (hw - 0.1) * side  // Offset calculated for potential rail positioning
             addCylinder(at: corners[side > 0 ? 0 : 1] + simd_float3(0, 0, 0), radius: railRadius, height: railHeight, segments: 4, material: MaterialIndex.pole.rawValue, vertices: &vertices)
             addCylinder(at: corners[side > 0 ? 3 : 2] + simd_float3(0, 0, 0), radius: railRadius, height: railHeight, segments: 4, material: MaterialIndex.pole.rawValue, vertices: &vertices)
         }

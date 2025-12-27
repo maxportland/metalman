@@ -346,6 +346,7 @@ struct MetalGameView: NSViewRepresentable {
         private var escapeKeyWasPressed = false
         private var levelUpKeyWasPressed = false
         private var enterKeyWasPressed = false
+        private var editModeKeyWasPressed = false
         
         private func updateMovementFromKeys() {
             var x: Float = 0
@@ -435,6 +436,15 @@ struct MetalGameView: NSViewRepresentable {
             
             // Quick save with F5 key (keyCode 96)
             renderer.savePressed = pressedKeys.contains(96)
+            
+            // Toggle edit mode with F12 key (keyCode 111)
+            let editModeKeyPressed = pressedKeys.contains(111)
+            if editModeKeyPressed && !editModeKeyWasPressed {
+                Task { @MainActor in
+                    hudViewModel?.editModeSettings.toggle()
+                }
+            }
+            editModeKeyWasPressed = editModeKeyPressed
             
             // For tank controls, do NOT normalize - rotation (x) and movement (y) are independent
             movementVector = SIMD2<Float>(x, y)

@@ -31,7 +31,7 @@ struct MetalGameContainer: View {
             
             // HUD overlay
             GameHUD(viewModel: hudViewModel)
-                .allowsHitTesting(hudViewModel.isInventoryOpen || hudViewModel.isLootPanelOpen || hudViewModel.isPlayerDead || hudViewModel.isHelpMenuOpen || hudViewModel.isShopOpen || hudViewModel.isLevelUpMenuOpen || hudViewModel.isPauseMenuOpen)  // Allow hit testing for UI overlays
+                .allowsHitTesting(hudViewModel.isInventoryOpen || hudViewModel.isLootPanelOpen || hudViewModel.isPlayerDead || hudViewModel.isHelpMenuOpen || hudViewModel.isShopOpen || hudViewModel.isLevelUpMenuOpen || hudViewModel.isPauseMenuOpen || hudViewModel.editModeSettings.isEnabled)  // Allow hit testing for UI overlays
         }
     }
 }

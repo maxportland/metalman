@@ -2,9 +2,16 @@
 
 This folder contains Blender Python scripts for asset preparation.
 
+**Note:** Blender is not in the system PATH. Use the absolute path to run scripts:
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender --background --python <script.py>
+```
+
+---
+
 ## export_animations_to_usdz.py
 
-Batch exports character animations to USDZ format for use in the game.
+Batch exports player character animations to USDZ format.
 
 ### What it does:
 1. Takes a character mesh FBX and multiple animation FBX files
@@ -14,28 +21,57 @@ Batch exports character animations to USDZ format for use in the game.
 
 ### Filename Cleaning:
 - `sword and shield attack (2).fbx` → `sword-and-shield-attack-2.usdz`
-- Removes special characters
-- Replaces spaces with dashes
-- Converts to lowercase
+- Removes special characters, replaces spaces with dashes, converts to lowercase
 
 ### Usage:
-1. Open Blender 3.6 or later
-2. Go to the **Scripting** workspace
-3. Click **Open** and select `export_animations_to_usdz.py`
-4. Modify the configuration section at the top if needed:
-   ```python
-   SOURCE_DIR = "/path/to/animation/files"
-   OUTPUT_DIR = "/path/to/output"
-   CHARACTER_MESH_FILE = "YourCharacter.fbx"
-   STRIP_ROOT_MOTION = True
-   ```
-5. Click **Run Script** (or press Alt+P)
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender --background --python export_animations_to_usdz.py
+```
 
-### Output:
-USDZ files will be created in the OUTPUT_DIR, ready to add to the Xcode project.
+---
 
-### Notes:
-- Requires Blender 3.6+ for USDZ export support
-- The script strips horizontal root motion by default (keeps vertical bobbing)
-- Each animation FBX should contain the armature with animation keyframes
+## export_enemy_animations.py
+
+Batch exports enemy (Mutant/Castle Guard) animations to USDZ format.
+
+### What it does:
+1. Uses `castle_guard_01.fbx` as the base mesh
+2. Combines it with each animation FBX from the Creature Pack folder
+3. Also scans `animation_source/` root for additional animations (e.g., Reaction.fbx, Taking Punch.fbx)
+4. Strips root motion and exports to `MetalMan/EnemyAnimations/`
+
+### Usage:
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender --background --python export_enemy_animations.py
+```
+
+---
+
+## export_vendor_animations.py
+
+Exports NPC vendor model and animations to USDZ format.
+
+### What it does:
+1. Processes each FBX file in `animation_source/npc_vendor_model_animation/`
+2. Each FBX contains the vendor model with its animation
+3. Exports each as a separate USDZ to `MetalMan/NPCAnimations/`
+
+### Source Files:
+- `vendor_e_action.fbx` → `vendor-e-action.usdz`
+- `vendor_happy_idle.fbx` → `vendor-happy-idle.usdz`
+- `vendor_waving.fbx` → `vendor-waving.usdz`
+
+### Usage:
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender --background --python export_vendor_animations.py
+```
+
+---
+
+## Common Notes
+
+- Requires **Blender 3.6+** for USDZ export support
+- Scripts skip files that already exist in the output directory
+- Output directories are created automatically
+- Add exported USDZ files to the Xcode project after running
 

@@ -30,3 +30,6 @@ Package.resolved
 *.swp
 *~
 
+# Source animation files (FBX source files, not needed in repo)
+animation_source/
+

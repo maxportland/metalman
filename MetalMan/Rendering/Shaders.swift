@@ -93,6 +93,25 @@ vertex LitVertexOut vertex_lit(TexturedVertexIn in [[stage_in]],
     return out;
 }
 
+// Instanced vertex shader for trees and other repeated objects
+// Uses per-instance model matrices from buffer(2)
+vertex LitVertexOut vertex_lit_instanced(TexturedVertexIn in [[stage_in]],
+                                         constant LitUniforms &uniforms [[buffer(1)]],
+                                         constant float4x4 *instanceMatrices [[buffer(2)]],
+                                         uint instanceId [[instance_id]]) {
+    LitVertexOut out;
+    float4x4 modelMatrix = instanceMatrices[instanceId];
+    float4 worldPos = modelMatrix * float4(in.position, 1.0);
+    out.worldPosition = worldPos.xyz;
+    out.position = uniforms.viewProjectionMatrix * worldPos;
+    out.normal = normalize((modelMatrix * float4(in.normal, 0.0)).xyz);
+    out.tangent = normalize((modelMatrix * float4(in.tangent, 0.0)).xyz);
+    out.texCoord = in.texCoord;
+    out.lightSpacePosition = uniforms.lightViewProjectionMatrix * worldPos;
+    out.materialIndex = in.materialIndex;
+    return out;
+}
+
 float calculateShadow(float4 lightSpacePos, depth2d<float> shadowMap, sampler shadowSampler) {
     float3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
@@ -270,6 +289,21 @@ fragment float4 fragment_lit(LitVertexOut in [[stage_in]],
     // Base lighting from sun/moon
     float lighting = uniforms.ambientIntensity + uniforms.diffuseIntensity * NdotL * shadow;
     
+    // Character-specific lighting boost (material 5 = player, 12 = enemy, 13 = vendor)
+    bool isCharacter = (in.materialIndex == 5 || in.materialIndex == 12 || in.materialIndex == 13);
+    if (isCharacter) {
+        // Boost ambient for characters to make them more visible
+        float characterAmbientBoost = 0.50;
+        lighting += characterAmbientBoost;
+        
+        // Add rim lighting (Fresnel effect) for character pop
+        float3 viewDir = normalize(uniforms.cameraPosition - in.worldPosition);
+        float fresnel = 1.0 - max(dot(normal, viewDir), 0.0);
+        fresnel = pow(fresnel, 3.0);  // Sharpen the rim
+        float rimIntensity = 0.45;
+        lighting += fresnel * rimIntensity;
+    }
+    
     // Point lights contribution (lanterns)
     float3 pointLightContrib = float3(0.0);
     float3 worldPos = in.worldPosition;
@@ -320,6 +354,16 @@ vertex float4 vertex_shadow(TexturedVertexIn in [[stage_in]],
     return uniforms.lightViewProjectionMatrix * worldPos;
 }
 
+// Instanced shadow pass vertex shader for trees
+vertex float4 vertex_shadow_instanced(TexturedVertexIn in [[stage_in]],
+                                      constant LitUniforms &uniforms [[buffer(1)]],
+                                      constant float4x4 *instanceMatrices [[buffer(2)]],
+                                      uint instanceId [[instance_id]]) {
+    float4x4 modelMatrix = instanceMatrices[instanceId];
+    float4 worldPos = modelMatrix * float4(in.position, 1.0);
+    return uniforms.lightViewProjectionMatrix * worldPos;
+}
+
 fragment void fragment_shadow() {
     // Depth-only pass, no color output
 }
@@ -347,13 +391,18 @@ struct SkinnedUniforms {
     float4x4 viewProjectionMatrix;
     float4x4 lightViewProjectionMatrix;
     float3 lightDirection;
+    float padding1;
     float3 cameraPosition;
+    float padding2;
     float ambientIntensity;
     float diffuseIntensity;
+    float2 padding3;
     
     // Sky colors (for consistency with LitUniforms)
     float3 skyColorTop;
+    float padding4;
     float3 skyColorHorizon;
+    float padding5;
     float3 sunColor;
     float timeOfDay;
     
@@ -367,7 +416,12 @@ struct SkinnedUniforms {
     float4 pointLight6;
     float4 pointLight7;
     int pointLightCount;
-    float3 padding2;
+    float3 padding6;
+    
+    // UV adjustments (edit mode)
+    float2 uvOffset;
+    float uvScale;
+    int flipUVVertical;  // 0 = normal, 1 = flip V coordinate
 };
 
 // Skinned vertex shader - applies bone transforms to vertices
@@ -402,7 +456,18 @@ vertex LitVertexOut vertex_skinned(SkinnedVertexIn in [[stage_in]],
     out.position = uniforms.viewProjectionMatrix * worldPos;
     out.normal = normalize((uniforms.modelMatrix * float4(skinnedNorm, 0.0)).xyz);
     out.tangent = float3(1, 0, 0); // Generate tangent from normal
-    out.texCoord = in.texCoord;
+    
+    // Apply UV adjustments from edit mode
+    float2 baseTexCoord = in.texCoord;
+    
+    // Optionally flip V coordinate (common fix for format differences)
+    if (uniforms.flipUVVertical != 0) {
+        baseTexCoord.y = 1.0 - baseTexCoord.y;
+    }
+    
+    float2 adjustedTexCoord = baseTexCoord * uniforms.uvScale + uniforms.uvOffset;
+    out.texCoord = adjustedTexCoord;
+    
     out.lightSpacePosition = uniforms.lightViewProjectionMatrix * worldPos;
     out.materialIndex = in.materialIndex;
     
