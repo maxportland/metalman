@@ -1,6 +1,14 @@
 import SwiftUI
 import CoreText
 
+// Disable verbose logging
+private let fontDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if fontDebugLogging {
+        print(message())
+    }
+}
+
 /// Font Awesome icon helper for SwiftUI
 /// 
 /// Usage:
@@ -37,8 +45,8 @@ class FontAwesomeLoader {
             }
         }
         
-        print("[FontAwesome] ❌ Could not find Font Awesome font file in bundle")
-        print("[FontAwesome] Searched for: \(fontFileNames)")
+        debugLog("[FontAwesome] ❌ Could not find Font Awesome font file in bundle")
+        debugLog("[FontAwesome] Searched for: \(fontFileNames)")
         
         // List what's actually in the bundle for debugging
         if let resourcePath = Bundle.main.resourcePath {
@@ -47,12 +55,12 @@ class FontAwesomeLoader {
                 let files = try fileManager.contentsOfDirectory(atPath: resourcePath)
                 let fontFiles = files.filter { $0.hasSuffix(".otf") || $0.hasSuffix(".ttf") }
                 if fontFiles.isEmpty {
-                    print("[FontAwesome] No .otf or .ttf files found in bundle")
+                    debugLog("[FontAwesome] No .otf or .ttf files found in bundle")
                 } else {
-                    print("[FontAwesome] Font files in bundle: \(fontFiles)")
+                    debugLog("[FontAwesome] Font files in bundle: \(fontFiles)")
                 }
             } catch {
-                print("[FontAwesome] Could not list bundle contents: \(error)")
+                debugLog("[FontAwesome] Could not list bundle contents: \(error)")
             }
         }
     }
@@ -62,7 +70,7 @@ class FontAwesomeLoader {
             return false
         }
         
-        print("[FontAwesome] Found font file: \(fontURL.lastPathComponent)")
+        debugLog("[FontAwesome] Found font file: \(fontURL.lastPathComponent)")
         
         var error: Unmanaged<CFError>?
         let success = CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, &error)
@@ -73,9 +81,9 @@ class FontAwesomeLoader {
                let cgFont = CGFont(fontDataProvider),
                let postScriptName = cgFont.postScriptName as String? {
                 loadedFontName = postScriptName
-                print("[FontAwesome] ✅ Registered font with PostScript name: \(postScriptName)")
+                debugLog("[FontAwesome] ✅ Registered font with PostScript name: \(postScriptName)")
             } else {
-                print("[FontAwesome] ✅ Registered font (could not determine PostScript name)")
+                debugLog("[FontAwesome] ✅ Registered font (could not determine PostScript name)")
             }
             return true
         } else {
@@ -83,17 +91,17 @@ class FontAwesomeLoader {
                 let errorDesc = CFErrorCopyDescription(cfError) as String
                 // Error code 105 means font is already registered
                 if CFErrorGetCode(cfError) == 105 {
-                    print("[FontAwesome] Font already registered")
+                    debugLog("[FontAwesome] Font already registered")
                     // Try to get the PostScript name anyway
                     if let fontDataProvider = CGDataProvider(url: fontURL as CFURL),
                        let cgFont = CGFont(fontDataProvider),
                        let postScriptName = cgFont.postScriptName as String? {
                         loadedFontName = postScriptName
-                        print("[FontAwesome] ✅ Using already registered font: \(postScriptName)")
+                        debugLog("[FontAwesome] ✅ Using already registered font: \(postScriptName)")
                     }
                     return true
                 }
-                print("[FontAwesome] ❌ Failed to register font: \(errorDesc)")
+                debugLog("[FontAwesome] ❌ Failed to register font: \(errorDesc)")
             }
             return false
         }
@@ -217,13 +225,13 @@ struct FontAwesomeChecker {
     }
     
     static func printAvailableFonts() {
-        print("[FontAwesome] Loading Font Awesome from bundle...")
+        debugLog("[FontAwesome] Loading Font Awesome from bundle...")
         
         // Trigger the font loading
         if let fontName = FontAwesomeLoader.shared.fontName {
-            print("[FontAwesome] ✅ Ready to use: \(fontName)")
+            debugLog("[FontAwesome] ✅ Ready to use: \(fontName)")
         } else {
-            print("[FontAwesome] ❌ Font Awesome not available, will use SF Symbols fallback")
+            debugLog("[FontAwesome] ❌ Font Awesome not available, will use SF Symbols fallback")
         }
     }
 }

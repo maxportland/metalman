@@ -12,6 +12,14 @@ import Metal
 import MetalKit
 import simd
 
+// Disable verbose logging
+private let realityKitDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if realityKitDebugLogging {
+        print(message())
+    }
+}
+
 /// Represents extracted animation data from RealityKit
 struct ExtractedAnimation {
     let name: String
@@ -34,18 +42,18 @@ class RealityKitAnimationLoader {
     /// - Parameter url: URL to the USDZ file
     /// - Returns: Array of extracted animations, or empty array if extraction fails
     static func loadAnimations(from url: URL) async -> [ExtractedAnimation] {
-        print("[RealityKit] Loading animations from: \(url.lastPathComponent)")
+        debugLog("[RealityKit] Loading animations from: \(url.lastPathComponent)")
         
         do {
             // Load the entity from USDZ using async initializer
             let entity = try await Entity(contentsOf: url)
             
-            print("[RealityKit] Entity loaded successfully")
+            debugLog("[RealityKit] Entity loaded successfully")
             printEntityHierarchy(entity, indent: "  ")
             
             // Find available animations
             let availableAnimations = entity.availableAnimations
-            print("[RealityKit] Available animations: \(availableAnimations.count)")
+            debugLog("[RealityKit] Available animations: \(availableAnimations.count)")
             
             // Find skeletal info
             var jointNames: [String] = []
@@ -55,7 +63,7 @@ class RealityKitAnimationLoader {
             findSkeletalData(in: entity, jointNames: &jointNames, bindPose: &bindPoseTransforms)
             
             if jointNames.isEmpty {
-                print("[RealityKit] No skeletal data found, trying to extract from animation")
+                debugLog("[RealityKit] No skeletal data found, trying to extract from animation")
             }
             
             var extractedAnimations: [ExtractedAnimation] = []
@@ -63,15 +71,15 @@ class RealityKitAnimationLoader {
             for animResource in availableAnimations {
                 if let extracted = extractAnimation(from: animResource, entity: entity, jointNames: jointNames) {
                     extractedAnimations.append(extracted)
-                    print("[RealityKit] ✅ Extracted animation: \(extracted.name)")
-                    print("[RealityKit]    Duration: \(extracted.duration)s, Keyframes: \(extracted.keyframes.count)")
-                    print("[RealityKit]    Joints: \(extracted.jointNames.count)")
+                    debugLog("[RealityKit] ✅ Extracted animation: \(extracted.name)")
+                    debugLog("[RealityKit]    Duration: \(extracted.duration)s, Keyframes: \(extracted.keyframes.count)")
+                    debugLog("[RealityKit]    Joints: \(extracted.jointNames.count)")
                 }
             }
             
             // If no animations found in availableAnimations, try to find AnimationComponent
             if extractedAnimations.isEmpty {
-                print("[RealityKit] No availableAnimations, searching for animation data in hierarchy...")
+                debugLog("[RealityKit] No availableAnimations, searching for animation data in hierarchy...")
                 if let extracted = extractAnimationFromHierarchy(entity: entity, jointNames: jointNames) {
                     extractedAnimations.append(extracted)
                 }
@@ -80,7 +88,7 @@ class RealityKitAnimationLoader {
             return extractedAnimations
             
         } catch {
-            print("[RealityKit] Failed to load entity: \(error)")
+            debugLog("[RealityKit] Failed to load entity: \(error)")
             return []
         }
     }
@@ -88,7 +96,7 @@ class RealityKitAnimationLoader {
     /// Print entity hierarchy for debugging
     private static func printEntityHierarchy(_ entity: Entity, indent: String) {
         let components = entity.components.map { type(of: $0).self }
-        print("[RealityKit] \(indent)\(entity.name): \(components)")
+        debugLog("[RealityKit] \(indent)\(entity.name): \(components)")
         
         for child in entity.children {
             printEntityHierarchy(child, indent: indent + "  ")
@@ -99,11 +107,11 @@ class RealityKitAnimationLoader {
     private static func findSkeletalData(in entity: Entity, jointNames: inout [String], bindPose: inout [simd_float4x4]) {
         // Check for ModelComponent (contains mesh and potentially skeletal info)
         if let modelComponent = entity.components[ModelComponent.self] {
-            print("[RealityKit] Found ModelComponent in '\(entity.name)'")
+            debugLog("[RealityKit] Found ModelComponent in '\(entity.name)'")
             
             // Try to get mesh resource details
             let mesh = modelComponent.mesh
-            print("[RealityKit]   Mesh bounds: \(mesh.bounds)")
+            debugLog("[RealityKit]   Mesh bounds: \(mesh.bounds)")
         }
         
         // Recursively search children
@@ -126,7 +134,7 @@ class RealityKitAnimationLoader {
     private static func extractAnimation(from animResource: AnimationResource, entity: Entity, jointNames: [String]) -> ExtractedAnimation? {
         // Get animation definition info
         let definition = animResource.definition
-        print("[RealityKit] Animation definition: \(type(of: definition))")
+        debugLog("[RealityKit] Animation definition: \(type(of: definition))")
         
         // Get duration from the animation
         // AnimationResource doesn't directly expose duration, so we sample it
@@ -178,7 +186,7 @@ class RealityKitAnimationLoader {
         let relevantKeyframes = keyframes.filter { $0.time <= duration + 0.1 }
         
         if relevantKeyframes.isEmpty || detectedJoints.isEmpty {
-            print("[RealityKit] Could not extract meaningful animation data")
+            debugLog("[RealityKit] Could not extract meaningful animation data")
             return nil
         }
         
@@ -242,7 +250,7 @@ class RealityKitAnimationLoader {
     
     /// Extract animation data from entity hierarchy (fallback)
     private static func extractAnimationFromHierarchy(entity: Entity, jointNames: [String]) -> ExtractedAnimation? {
-        print("[RealityKit] Attempting to extract animation from hierarchy transforms")
+        debugLog("[RealityKit] Attempting to extract animation from hierarchy transforms")
         
         var detectedJoints = jointNames
         if detectedJoints.isEmpty {
@@ -250,11 +258,11 @@ class RealityKitAnimationLoader {
         }
         
         if detectedJoints.isEmpty {
-            print("[RealityKit] No joints found in hierarchy")
+            debugLog("[RealityKit] No joints found in hierarchy")
             return nil
         }
         
-        print("[RealityKit] Found \(detectedJoints.count) joints")
+        debugLog("[RealityKit] Found \(detectedJoints.count) joints")
         
         // Get current transforms as a single keyframe (bind pose)
         var transforms: [simd_float4x4] = []
@@ -285,7 +293,7 @@ class ModelIOAnimationExtractor {
     
     /// Extract animation by deeply inspecting MDLAsset
     static func extractFromMDLAsset(_ asset: MDLAsset, device: MTLDevice) -> [ExtractedAnimation] {
-        print("[ModelIO-Deep] Inspecting asset for animation data...")
+        debugLog("[ModelIO-Deep] Inspecting asset for animation data...")
         
         var animations: [ExtractedAnimation] = []
         
@@ -294,10 +302,10 @@ class ModelIOAnimationExtractor {
         let endTime = asset.endTime
         let duration = endTime - startTime
         
-        print("[ModelIO-Deep] Asset time range: \(startTime) to \(endTime) (duration: \(duration)s)")
+        debugLog("[ModelIO-Deep] Asset time range: \(startTime) to \(endTime) (duration: \(duration)s)")
         
         if duration <= 0 {
-            print("[ModelIO-Deep] No time-based animation found")
+            debugLog("[ModelIO-Deep] No time-based animation found")
             return animations
         }
         
@@ -311,7 +319,7 @@ class ModelIOAnimationExtractor {
         }
         
         guard let foundSkeleton = skeleton else {
-            print("[ModelIO-Deep] No skeleton found")
+            debugLog("[ModelIO-Deep] No skeleton found")
             return animations
         }
         
@@ -322,7 +330,7 @@ class ModelIOAnimationExtractor {
             return components.last ?? path
         }
         
-        print("[ModelIO-Deep] Found skeleton with \(jointNames.count) joints")
+        debugLog("[ModelIO-Deep] Found skeleton with \(jointNames.count) joints")
         
         // Look for MDLPackedJointAnimation in the asset
         var packedAnimation: MDLPackedJointAnimation?
@@ -332,7 +340,7 @@ class ModelIOAnimationExtractor {
         }
         
         if let animation = packedAnimation {
-            print("[ModelIO-Deep] Found MDLPackedJointAnimation!")
+            debugLog("[ModelIO-Deep] Found MDLPackedJointAnimation!")
             if let extracted = extractFromPackedAnimation(animation, jointNames: jointNames, duration: duration) {
                 animations.append(extracted)
                 return animations
@@ -347,19 +355,19 @@ class ModelIOAnimationExtractor {
         }
         
         if let mesh = animationBindMesh {
-            print("[ModelIO-Deep] Found mesh with animation bind: \(mesh.name)")
+            debugLog("[ModelIO-Deep] Found mesh with animation bind: \(mesh.name)")
             
             // Get the animation bind component by iterating through components
             for component in mesh.components {
                 if let animBind = component as? MDLAnimationBindComponent {
-                    print("[ModelIO-Deep] Animation bind component found")
-                    print("[ModelIO-Deep]   Skeleton: \(animBind.skeleton?.name ?? "nil")")
-                    print("[ModelIO-Deep]   Joint animation: \(animBind.jointAnimation != nil ? "YES" : "NO")")
-                    print("[ModelIO-Deep]   Joint paths: \(animBind.jointPaths?.count ?? 0)")
+                    debugLog("[ModelIO-Deep] Animation bind component found")
+                    debugLog("[ModelIO-Deep]   Skeleton: \(animBind.skeleton?.name ?? "nil")")
+                    debugLog("[ModelIO-Deep]   Joint animation: \(animBind.jointAnimation != nil ? "YES" : "NO")")
+                    debugLog("[ModelIO-Deep]   Joint paths: \(animBind.jointPaths?.count ?? 0)")
                     
                     // Try to get animation from jointAnimation
                     if let jointAnim = animBind.jointAnimation as? MDLPackedJointAnimation {
-                        print("[ModelIO-Deep] Found packed joint animation in bind component!")
+                        debugLog("[ModelIO-Deep] Found packed joint animation in bind component!")
                         if let extracted = extractFromPackedAnimation(jointAnim, jointNames: jointNames, duration: duration) {
                             animations.append(extracted)
                             return animations
@@ -371,7 +379,7 @@ class ModelIOAnimationExtractor {
         }
         
         // Fallback: Sample skeleton transforms at different times
-        print("[ModelIO-Deep] Trying to sample skeleton transforms over time...")
+        debugLog("[ModelIO-Deep] Trying to sample skeleton transforms over time...")
         
         let sampleRate = 30.0
         let numSamples = Int(duration * sampleRate)
@@ -418,7 +426,7 @@ class ModelIOAnimationExtractor {
         }
         
         if hasVariation {
-            print("[ModelIO-Deep] ✅ Found animated transforms with \(keyframes.count) samples")
+            debugLog("[ModelIO-Deep] ✅ Found animated transforms with \(keyframes.count) samples")
             animations.append(ExtractedAnimation(
                 name: "sampled",
                 duration: Float(duration),
@@ -426,8 +434,8 @@ class ModelIOAnimationExtractor {
                 keyframes: keyframes
             ))
         } else {
-            print("[ModelIO-Deep] ⚠️ No variation in transforms - animation data not accessible via ModelIO")
-            print("[ModelIO-Deep] The animation may be stored in a format ModelIO can't sample")
+            debugLog("[ModelIO-Deep] ⚠️ No variation in transforms - animation data not accessible via ModelIO")
+            debugLog("[ModelIO-Deep] The animation may be stored in a format ModelIO can't sample")
         }
         
         return animations
@@ -491,16 +499,16 @@ class ModelIOAnimationExtractor {
         
         // Debug: Print unique identifier for this animation object
         let animPtr = Unmanaged.passUnretained(animation).toOpaque()
-        print("[ModelIO-Deep] Packed animation object: \(animPtr)")
-        print("[ModelIO-Deep] Packed animation has \(animJointCount) joints")
-        print("[ModelIO-Deep] Animation joint paths (first 10):")
+        debugLog("[ModelIO-Deep] Packed animation object: \(animPtr)")
+        debugLog("[ModelIO-Deep] Packed animation has \(animJointCount) joints")
+        debugLog("[ModelIO-Deep] Animation joint paths (first 10):")
         for (i, path) in animJointPaths.prefix(10).enumerated() {
-            print("[ModelIO-Deep]   [\(i)] \(path)")
+            debugLog("[ModelIO-Deep]   [\(i)] \(path)")
         }
         
-        print("[ModelIO-Deep] Skeleton joint names (first 10):")
+        debugLog("[ModelIO-Deep] Skeleton joint names (first 10):")
         for (i, name) in jointNames.prefix(10).enumerated() {
-            print("[ModelIO-Deep]   [\(i)] \(name)")
+            debugLog("[ModelIO-Deep]   [\(i)] \(name)")
         }
         
         // Create mapping from animation joint index to skeleton bone index
@@ -527,14 +535,14 @@ class ModelIOAnimationExtractor {
             }
         }
         
-        print("[ModelIO-Deep] Mapped \(animToSkeletonMap.count) of \(animJointCount) animation joints to skeleton")
+        debugLog("[ModelIO-Deep] Mapped \(animToSkeletonMap.count) of \(animJointCount) animation joints to skeleton")
         
         // Sample at 30fps for the full animation duration
         let sampleRate: Float = 30.0
         let totalFrames = Int(Float(duration) * sampleRate)
         let animDuration = Float(duration)
         
-        print("[ModelIO-Deep] Extracting animation: \(totalFrames) frames, duration: \(animDuration)s")
+        debugLog("[ModelIO-Deep] Extracting animation: \(totalFrames) frames, duration: \(animDuration)s")
         
         var keyframes: [ExtractedKeyframe] = []
         
@@ -543,17 +551,17 @@ class ModelIOAnimationExtractor {
         let firstTimeRotations = animation.rotations.floatQuaternionArray(atTime: 0)
         let firstTimeScales = animation.scales.float3Array(atTime: 0)
         
-        print("[ModelIO-Deep] First frame sample (t=0):")
-        print("[ModelIO-Deep]   Translations count: \(firstTimeTranslations.count)")
-        print("[ModelIO-Deep]   Rotations count: \(firstTimeRotations.count)")
-        print("[ModelIO-Deep]   Scales count: \(firstTimeScales.count)")
+        debugLog("[ModelIO-Deep] First frame sample (t=0):")
+        debugLog("[ModelIO-Deep]   Translations count: \(firstTimeTranslations.count)")
+        debugLog("[ModelIO-Deep]   Rotations count: \(firstTimeRotations.count)")
+        debugLog("[ModelIO-Deep]   Scales count: \(firstTimeScales.count)")
         
         if !firstTimeTranslations.isEmpty {
-            print("[ModelIO-Deep]   Joint 0 trans: \(firstTimeTranslations[0])")
+            debugLog("[ModelIO-Deep]   Joint 0 trans: \(firstTimeTranslations[0])")
         }
         if !firstTimeRotations.isEmpty {
             let q = firstTimeRotations[0]
-            print("[ModelIO-Deep]   Joint 0 rot: (x:\(q.imag.x), y:\(q.imag.y), z:\(q.imag.z), w:\(q.real))")
+            debugLog("[ModelIO-Deep]   Joint 0 rot: (x:\(q.imag.x), y:\(q.imag.y), z:\(q.imag.z), w:\(q.real))")
         }
         
         // Sample mid-animation to verify data changes over time
@@ -561,18 +569,18 @@ class ModelIOAnimationExtractor {
         let midTranslations = animation.translations.float3Array(atTime: midTime)
         let midRotations = animation.rotations.floatQuaternionArray(atTime: midTime)
         
-        print("[ModelIO-Deep] Mid frame sample (t=\(midTime)):")
+        debugLog("[ModelIO-Deep] Mid frame sample (t=\(midTime)):")
         if !midTranslations.isEmpty {
-            print("[ModelIO-Deep]   Joint 0 trans: \(midTranslations[0])")
+            debugLog("[ModelIO-Deep]   Joint 0 trans: \(midTranslations[0])")
             // Check if first and mid frames differ
             if !firstTimeTranslations.isEmpty {
                 let diff = simd_distance(firstTimeTranslations[0], midTranslations[0])
-                print("[ModelIO-Deep]   Trans difference from frame 0: \(diff)")
+                debugLog("[ModelIO-Deep]   Trans difference from frame 0: \(diff)")
             }
         }
         if !midRotations.isEmpty {
             let q = midRotations[0]
-            print("[ModelIO-Deep]   Joint 0 rot: (x:\(q.imag.x), y:\(q.imag.y), z:\(q.imag.z), w:\(q.real))")
+            debugLog("[ModelIO-Deep]   Joint 0 rot: (x:\(q.imag.x), y:\(q.imag.y), z:\(q.imag.z), w:\(q.real))")
         }
         
         // Find the root bone (Hips) index for stripping root motion
@@ -590,8 +598,8 @@ class ModelIOAnimationExtractor {
                 let firstTranslations = animation.translations.float3Array(atTime: 0)
                 if animIdx < firstTranslations.count {
                     rootBoneFirstTranslation = firstTranslations[animIdx]
-                    print("[ModelIO-Deep] Root bone (Hips) found at animation index \(animIdx)")
-                    print("[ModelIO-Deep] Root bone first frame translation: \(rootBoneFirstTranslation!)")
+                    debugLog("[ModelIO-Deep] Root bone (Hips) found at animation index \(animIdx)")
+                    debugLog("[ModelIO-Deep] Root bone first frame translation: \(rootBoneFirstTranslation!)")
                 }
                 break
             }
@@ -658,7 +666,7 @@ class ModelIOAnimationExtractor {
             return nil
         }
         
-        print("[ModelIO-Deep] ✅ Extracted \(keyframes.count) keyframes from packed animation")
+        debugLog("[ModelIO-Deep] ✅ Extracted \(keyframes.count) keyframes from packed animation")
         return ExtractedAnimation(
             name: "animation",
             duration: animDuration,

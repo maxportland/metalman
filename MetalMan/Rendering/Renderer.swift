@@ -141,6 +141,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var attackPhase: Float = 0        // 0 to 1, progress through swing
     private var attackCooldown: Float = 0     // Time until next attack allowed
     private let baseAttackDuration: Float = 0.4   // How long the swing takes (base)
+    
+    // Sword collision tracking
+    private var previousSwordTip: simd_float3? = nil   // Last frame's sword tip position
+    private var enemiesHitThisSwing: Set<UUID> = []    // Enemies already hit during this attack
+    private var pendingHits: [(enemy: Enemy, isCritical: Bool)] = []  // Hits waiting for peak of swing
+    private var hasPlayedHitSound: Bool = false  // Track if we played sound at swing peak
     private let baseAttackCooldownTime: Float = 0.3  // Time between attacks (base)
     private var attackWasPressed: Bool = false
     private var currentSwingType: SwingType = .mittelhaw
@@ -672,7 +678,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static func createInstancedLitPipeline(device: MTLDevice, library: MTLLibrary, view: MTKView) -> MTLRenderPipelineState? {
         guard let vertexFunc = library.makeFunction(name: "vertex_lit_instanced"),
               let fragmentFunc = library.makeFunction(name: "fragment_lit") else {
-            print("[Renderer] Could not find instanced vertex shader function")
             return nil
         }
         
@@ -686,7 +691,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         do {
             return try device.makeRenderPipelineState(descriptor: desc)
         } catch {
-            print("[Renderer] Failed to create instanced lit pipeline: \(error)")
             return nil
         }
     }
@@ -695,7 +699,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static func createInstancedShadowPipeline(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
         guard let vertexFunc = library.makeFunction(name: "vertex_shadow_instanced"),
               let fragmentFunc = library.makeFunction(name: "fragment_shadow") else {
-            print("[Renderer] Could not find instanced shadow shader function")
             return nil
         }
         
@@ -709,7 +712,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         do {
             return try device.makeRenderPipelineState(descriptor: desc)
         } catch {
-            print("[Renderer] Failed to create instanced shadow pipeline: \(error)")
             return nil
         }
     }
@@ -718,7 +720,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static func createSkinnedPipeline(device: MTLDevice, library: MTLLibrary, view: MTKView) -> MTLRenderPipelineState? {
         guard let vertexFunc = library.makeFunction(name: "vertex_skinned"),
               let fragmentFunc = library.makeFunction(name: "fragment_lit") else {
-            print("[Renderer] Could not find skinned vertex shader function")
             return nil
         }
         
@@ -732,7 +733,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         do {
             return try device.makeRenderPipelineState(descriptor: desc)
         } catch {
-            print("[Renderer] Failed to create skinned pipeline: \(error)")
             return nil
         }
     }
@@ -741,7 +741,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static func createSkinnedShadowPipeline(device: MTLDevice, library: MTLLibrary) -> MTLRenderPipelineState? {
         guard let vertexFunc = library.makeFunction(name: "vertex_skinned_shadow"),
               let fragmentFunc = library.makeFunction(name: "fragment_shadow") else {
-            print("[Renderer] Could not find skinned shadow shader function")
             return nil
         }
         
@@ -755,7 +754,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         do {
             return try device.makeRenderPipelineState(descriptor: desc)
         } catch {
-            print("[Renderer] Failed to create skinned shadow pipeline: \(error)")
             return nil
         }
     }
@@ -1012,7 +1010,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             enemyManager.spawnEnemy(type: .bandit, at: simd_float3(x, y, z), playerLevel: 1)
         }
         
-        print("[Enemies] Spawned \(enemyManager.count) bandits")
         targetEnemyCount = enemyManager.count  // Set target to initial spawn count
     }
     
@@ -1027,8 +1024,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         let yaw = atan2(-vendorX, -vendorZ)
         
         npcManager.spawnNPC(type: .vendor, name: "Traveling Merchant", at: simd_float3(vendorX, vendorY, vendorZ), yaw: yaw)
-        
-        print("[NPCs] Spawned \(npcManager.count) NPCs")
     }
     
     /// Try to respawn enemies if below target count
@@ -1098,7 +1093,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             Task { @MainActor in
                 hudViewModel?.openShop(for: npc)
             }
-            print("[NPC] Opened shop for \(npc.name)")
         }
     }
     
@@ -1148,7 +1142,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Load the most recent saved game
     func loadGame() {
         guard let saveData = SaveGameManager.shared.loadGame() else {
-            print("[SaveGame] No save data found")
             return
         }
         loadGame(from: saveData)
@@ -1203,7 +1196,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             hudViewModel?.updateEquipmentDisplay()
         }
         
-        print("[SaveGame] Game loaded - Position: \(characterPosition), HP: \(player.vitals.currentHP)")
     }
     
     /// Restart the game with a fresh character
@@ -1254,7 +1246,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             hudViewModel?.bind(to: player)
         }
         
-        print("[Game] Game restarted")
     }
     
     /// Open a chest and give loot to player
@@ -1293,16 +1284,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Give gold to player
         if goldTaken > 0 {
             player.inventory.addGold(goldTaken)
-            print("[Chest] Took \(goldTaken) gold")
         }
         
         // Give items to player
         for item in itemsTaken {
-            if player.inventory.addItem(item) {
-                print("[Chest] Took \(item.name)")
-            } else {
-                print("[Chest] Inventory full! Couldn't take \(item.name)")
-            }
+            _ = player.inventory.addItem(item)
         }
         
         // Update HUD
@@ -2243,18 +2229,38 @@ final class Renderer: NSObject, MTKViewDelegate {
                 attackComplete = attackPhase >= 1.0
             }
             
-            // Perform hit check partway through attack (at impact point ~40%)
-            if !hasPerformedHitCheck && attackPhase >= 0.4 {
-                performAttackHitCheck()
-                hasPerformedHitCheck = true
+            // Perform continuous sword collision detection during the swing phase (20%-80%)
+            if attackPhase >= 0.2 && attackPhase <= 0.8 {
+                performSwordCollisionCheck()
+            }
+            
+            // At frame 20 of the attack animation, play hit sound and process all pending hits
+            // This is when the sword is at maximum extension
+            if let animChar = animatedCharacter {
+                if animChar.hasReachedFrame(20) && !hasPlayedHitSound {
+                    processPendingHits()
+                }
+            } else {
+                // Fallback for non-skeletal animation: use 45% attack phase
+                if attackPhase >= 0.45 && !hasPlayedHitSound {
+                    processPendingHits()
+                }
             }
             
             if attackComplete {
-                // Attack finished
+                // Attack finished - process any remaining pending hits
+                if !pendingHits.isEmpty {
+                    processPendingHits()
+                }
+                
                 isAttacking = false
                 attackPhase = 0
                 attackCooldown = effectiveAttackCooldown
                 hasPerformedHitCheck = false
+                hasPlayedHitSound = false
+                previousSwordTip = nil
+                enemiesHitThisSwing.removeAll()
+                pendingHits.removeAll()
             }
         }
     }
@@ -2263,6 +2269,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         isAttacking = true
         attackPhase = 0
         
+        // Reset sword collision tracking
+        previousSwordTip = nil
+        enemiesHitThisSwing.removeAll()
+        pendingHits.removeAll()
+        hasPlayedHitSound = false
+        
         // Play sword swing sound
         AudioManager.shared.playSwordSwing()
         
@@ -2270,60 +2282,217 @@ final class Renderer: NSObject, MTKViewDelegate {
         let swingTypes = SwingType.allCases
         currentSwingType = swingTypes[Int.random(in: 0..<swingTypes.count)]
         
-        print("[Combat] \(currentSwingType.name)!")
+        // Debug: Show attack info
+        let aliveEnemies = enemyManager.enemies.filter { $0.isAlive }
+        print("[Combat] \(currentSwingType.name)! (Player at (\(String(format: "%.1f", characterPosition.x)), \(String(format: "%.1f", characterPosition.y)), \(String(format: "%.1f", characterPosition.z))), \(aliveEnemies.count) alive enemies)")
     }
     
-    private func performAttackHitCheck() {
-        // Calculate attack hitbox position (in front of character)
-        let attackRange: Float = 2.0
+    // Debug throttle for sword collision logging
+    private static var lastSwordDebugTime: CFAbsoluteTime = 0
+    
+    /// Perform sword-to-enemy mesh collision detection using the sword's actual world position
+    private func performSwordCollisionCheck() {
+        guard let animChar = animatedCharacter else { 
+            print("[Combat] No animated character found for collision check")
+            return 
+        }
         
-        // Get enemies in range
-        let enemiesInRange = enemyManager.enemiesInRange(of: characterPosition, range: attackRange)
+        // Calculate the full player model matrix (world position + model transform)
+        let charModelMatrix = translation(characterPosition.x, characterPosition.y, characterPosition.z) *
+                              rotationY(characterYaw)
+        let fullModelMatrix = charModelMatrix * playerModelMatrix
         
-        // Check each enemy in range for hit (must be in front arc)
-        for enemy in enemiesInRange {
-            let toEnemy = simd_float2(enemy.position.x, enemy.position.z) - simd_float2(characterPosition.x, characterPosition.z)
-            let dirToEnemy = simd_normalize(toEnemy)
+        // Get current sword tip position
+        guard let swordTip = animChar.getSwordTipWorldPosition(playerModelMatrix: fullModelMatrix) else {
+            // Fallback: Use position in front of character if no sword bone found
+            let fallbackTip = characterPosition + simd_float3(
+                sin(characterYaw) * 1.5,
+                1.2,  // Chest height
+                -cos(characterYaw) * 1.5
+            )
             
-            // Character forward direction
-            let charForward = simd_float2(sin(characterYaw), -cos(characterYaw))
+            // Throttled debug logging (once per second max)
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - Self.lastSwordDebugTime > 1.0 {
+                Self.lastSwordDebugTime = now
+                print("[Combat] Using fallback sword position (no bone found). Tip: \(fallbackTip)")
+            }
             
-            // Dot product gives us angle - within 90 degree frontal arc
-            let dot = simd_dot(charForward, dirToEnemy)
-            if dot > 0.3 {  // Roughly 70 degree arc
-                // Hit! Play metal hit sound
-                AudioManager.shared.playMetalHit()
+            performFallbackHitCheck(swordTip: fallbackTip)
+            return
+        }
+        
+        // Get sword base (hand) position for swept capsule
+        let swordBase = animChar.getSwordBaseWorldPosition(playerModelMatrix: fullModelMatrix) ?? characterPosition
+        
+        // Enemy collision radius (approximate body radius) - generous for satisfying combat
+        let enemyCollisionRadius: Float = 1.2
+        
+        // Sword collision radius (reach of the blade plus swing arc margin)
+        let swordRadius: Float = 0.6
+        
+        // Combined collision radius (1.8 total - should reliably hit enemies within melee range)
+        let collisionRadius = enemyCollisionRadius + swordRadius
+        
+        // Throttled debug logging for sword position and enemy distances
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - Self.lastSwordDebugTime > 0.5 {
+            Self.lastSwordDebugTime = now
+            let aliveEnemies = enemyManager.enemies.filter { $0.isAlive }
+            print("[Combat] Sword check - Tip: (\(String(format: "%.1f", swordTip.x)), \(String(format: "%.1f", swordTip.y)), \(String(format: "%.1f", swordTip.z))), Player: (\(String(format: "%.1f", characterPosition.x)), \(String(format: "%.1f", characterPosition.y)), \(String(format: "%.1f", characterPosition.z))), Alive enemies: \(aliveEnemies.count)")
+            for enemy in aliveEnemies.prefix(3) {
+                let enemyCenter = enemy.position + simd_float3(0, 0.9, 0)
+                let dist = simd_distance(swordTip, enemyCenter)
+                print("[Combat]   -> \(enemy.type.rawValue) at (\(String(format: "%.1f", enemy.position.x)), \(String(format: "%.1f", enemy.position.y)), \(String(format: "%.1f", enemy.position.z))) dist: \(String(format: "%.2f", dist)) (need < \(collisionRadius))")
+            }
+        }
+        
+        // Check collision with each alive enemy not yet hit this swing
+        for enemy in enemyManager.enemies where enemy.isAlive && !enemiesHitThisSwing.contains(enemy.id) {
+            // Enemy center position (at chest height)
+            let enemyCenter = enemy.position + simd_float3(0, 0.9, 0)
+            
+            // Check if sword capsule intersects with enemy sphere
+            var hitDetected = false
+            
+            // Method 1: Check if sword tip is within collision distance of enemy center
+            let distToTip = simd_distance(swordTip, enemyCenter)
+            if distToTip < collisionRadius {
+                hitDetected = true
+            }
+            
+            // Method 2: Check if sword line segment intersects with enemy sphere
+            if !hitDetected {
+                let closestPointDist = distanceFromPointToLineSegment(
+                    point: enemyCenter,
+                    lineStart: swordBase,
+                    lineEnd: swordTip
+                )
+                if closestPointDist < collisionRadius {
+                    hitDetected = true
+                }
+            }
+            
+            // Method 3: Check if sword swept from previous position to current position intersects enemy
+            if !hitDetected, let prevTip = previousSwordTip {
+                let closestDist = distanceFromPointToLineSegment(
+                    point: enemyCenter,
+                    lineStart: prevTip,
+                    lineEnd: swordTip
+                )
+                if closestDist < collisionRadius {
+                    hitDetected = true
+                }
+            }
+            
+            if hitDetected {
+                // Mark this enemy as hit during this swing (prevent multiple hits)
+                enemiesHitThisSwing.insert(enemy.id)
                 
-                // Calculate damage
-                let baseDamage = player.effectiveDamage
+                // Calculate if critical hit
                 let isCritical = Float.random(in: 0...1) < 0.15  // 15% crit chance
-                let damage = isCritical ? baseDamage * 2 : baseDamage
                 
-                let actualDamage = enemy.takeDamage(damage)
+                // Queue the hit for processing at swing peak
+                pendingHits.append((enemy: enemy, isCritical: isCritical))
+            }
+        }
+        
+        // Store current sword tip for next frame's swept collision
+        previousSwordTip = swordTip
+    }
+    
+    /// Process all pending hits at the peak of the swing - plays sound once and deals all damage
+    private func processPendingHits() {
+        guard !pendingHits.isEmpty else { return }
+        
+        // Play metal hit sound ONCE for all hits at peak of swing
+        AudioManager.shared.playMetalHit()
+        hasPlayedHitSound = true
+        
+        // Process each pending hit
+        for (enemy, isCritical) in pendingHits {
+            guard enemy.isAlive else { continue }
+            
+            // Calculate damage
+            let baseDamage = player.effectiveDamage
+            let damage = isCritical ? baseDamage * 2 : baseDamage
+            
+            let actualDamage = enemy.takeDamage(damage)
+            
+            // Show damage number
+            enemyManager.addDamageNumber(actualDamage, at: enemy.position, isCritical: isCritical)
+            
+            print("[Combat] SWORD HIT! \(enemy.type.rawValue) for \(actualDamage) damage\(isCritical ? " (CRITICAL!)" : "")")
+            
+            // Check if enemy died
+            if !enemy.isAlive {
+                // Play death sound
+                AudioManager.shared.playDie()
                 
-                // Show damage number
-                enemyManager.addDamageNumber(actualDamage, at: enemy.position, isCritical: isCritical)
+                // Give XP and gold (scaled by enemy level)
+                player.gainXP(enemy.xpReward)
+                let goldDrop = Int.random(in: enemy.goldDropRange)
+                player.inventory.addGold(goldDrop)
+                print("[Combat] \(enemy.displayName) defeated! +\(enemy.xpReward) XP, +\(goldDrop) gold")
                 
-                print("[Combat] Hit \(enemy.type.rawValue) for \(actualDamage) damage\(isCritical ? " (CRITICAL!)" : "")")
-                
-                // Check if enemy died
-                if !enemy.isAlive {
-                    // Play death sound
-                    AudioManager.shared.playDie()
-                    
-                    // Give XP and gold (scaled by enemy level)
-                    player.gainXP(enemy.xpReward)
-                    let goldDrop = Int.random(in: enemy.goldDropRange)
-                    player.inventory.addGold(goldDrop)
-                    print("[Combat] \(enemy.displayName) defeated! +\(enemy.xpReward) XP, +\(goldDrop) gold")
-                    
-                    // Update HUD
-                    Task { @MainActor in
-                        hudViewModel?.update()
-                    }
+                // Update HUD
+                Task { @MainActor in
+                    hudViewModel?.update()
                 }
             }
         }
+        
+        // Clear pending hits
+        pendingHits.removeAll()
+    }
+    
+    /// Calculate the shortest distance from a point to a line segment
+    private func distanceFromPointToLineSegment(point: simd_float3, lineStart: simd_float3, lineEnd: simd_float3) -> Float {
+        let line = lineEnd - lineStart
+        let lineLengthSq = simd_dot(line, line)
+        
+        if lineLengthSq < 0.0001 {
+            // Line segment is effectively a point
+            return simd_distance(point, lineStart)
+        }
+        
+        // Project point onto line, clamped to segment
+        let t = max(0, min(1, simd_dot(point - lineStart, line) / lineLengthSq))
+        let closestPoint = lineStart + t * line
+        
+        return simd_distance(point, closestPoint)
+    }
+    
+    /// Fallback hit check using proximity when sword bone detection fails
+    private func performFallbackHitCheck(swordTip: simd_float3) {
+        // Large collision radius for fallback - very generous for reliability
+        let collisionRadius: Float = 2.0
+        
+        let aliveEnemies = enemyManager.enemies.filter { $0.isAlive && !enemiesHitThisSwing.contains($0.id) }
+        
+        for enemy in aliveEnemies {
+            let enemyCenter = enemy.position + simd_float3(0, 0.9, 0)
+            let distance = simd_distance(swordTip, enemyCenter)
+            
+            // Check facing direction (must be roughly facing enemy)
+            let toEnemy = simd_normalize(simd_float2(enemy.position.x, enemy.position.z) - 
+                                          simd_float2(characterPosition.x, characterPosition.z))
+            let charForward = simd_float2(sin(characterYaw), -cos(characterYaw))
+            let dot = simd_dot(charForward, toEnemy)
+            
+            if distance < collisionRadius && dot > 0.2 {
+                // Within range AND facing enemy - queue the hit
+                enemiesHitThisSwing.insert(enemy.id)
+                
+                // Calculate if critical hit
+                let isCritical = Float.random(in: 0...1) < 0.15
+                
+                // Queue the hit for processing at swing peak
+                pendingHits.append((enemy: enemy, isCritical: isCritical))
+            }
+        }
+        
+        previousSwordTip = swordTip
     }
     
     /// Update all enemies (AI, movement, attacks)
@@ -2670,7 +2839,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             
             playerModelTexture = characterTexture
-            print("[Init] Loaded player with \(skeletalMesh.bones.count) bones, \(skeletalMesh.animations.count) animations")
             return
         }
         
@@ -2712,7 +2880,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         
         playerModelTexture = characterTexture
-        print("[Init] Loaded static player mesh with \(playerModelVertexCount) vertices")
     }
     
     /// Load additional animations from USDZ files in the bundle
@@ -2868,7 +3035,6 @@ final class Renderer: NSObject, MTKViewDelegate {
                                translation(-modelCenter.x, -modelCenter.y, 0)
         }
         
-        print("[Init] Loaded enemy with \(skeletalMesh.bones.count) bones, \(skeletalMesh.animations.count) animations")
     }
     
     /// Load additional enemy animations from USDZ files
@@ -3011,7 +3177,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         
         guard let url = meshURL,
               let skeletalMesh = skeletalLoader.loadSkeletalMesh(from: url, materialIndex: MaterialIndex.vendor.rawValue) else {
-            print("[NPCs] Failed to load vendor skeletal mesh")
             return
         }
         
@@ -3023,8 +3188,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         let modelHeight = bounds.max.y - bounds.min.y
         let targetHeight: Float = 1.8
         npcModelScale = modelHeight > 0 ? targetHeight / modelHeight : 1.0
-        
-        print("[NPCs] Loaded vendor with \(skeletalMesh.bones.count) bones, \(skeletalMesh.animations.count) animations")
     }
     
     /// Load additional NPC animations from USDZ files
@@ -3057,7 +3220,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
         }
         
-        print("[NPCs] Loaded \(loadedCount) additional animations")
     }
     
     /// Create or get an AnimatedNPC instance for a given NPC
@@ -3127,7 +3289,6 @@ final class Renderer: NSObject, MTKViewDelegate {
                            scaling(scale, scale, scale) *
                            translation(-modelCenter.x, -modelCenter.y, -modelCenter.z)
         
-        print("[Init] Loaded cabin model")
     }
     
     /// Draw the cabin model
@@ -3173,7 +3334,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             let bounds = model.boundingBox
             let maxDim = max(bounds.max.x - bounds.min.x, max(bounds.max.y - bounds.min.y, bounds.max.z - bounds.min.z))
             chestModelScale = maxDim > 0.001 ? 0.8 / maxDim : 1.0
-            print("[Init] Loaded chest model")
         }
     }
     
@@ -3297,7 +3457,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard !treeModels.isEmpty else { return }
         
         generateTreeInstances()
-        print("[Init] Loaded \(treeModels.count) tree models, \(treeInstances.count) instances")
     }
     
     private func generateTreeInstances() {

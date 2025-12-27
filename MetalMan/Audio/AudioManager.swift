@@ -1,5 +1,13 @@
 import AVFoundation
 
+// Disable verbose logging for audio
+private let audioDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if audioDebugLogging {
+        print(message())
+    }
+}
+
 /// Manages audio playback for the game
 final class AudioManager {
     static let shared = AudioManager()
@@ -44,7 +52,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "footsteps", withExtension: "wav") {
             setupFootstepsPlayer(with: url)
         } else {
-            print("[Audio] Could not find footsteps.wav in bundle")
+            debugLog("[Audio] Could not find footsteps.wav in bundle")
         }
     }
     
@@ -54,9 +62,9 @@ final class AudioManager {
             footstepsPlayer?.numberOfLoops = -1  // Loop indefinitely
             footstepsPlayer?.volume = 0.4  // Not too loud
             footstepsPlayer?.prepareToPlay()
-            print("[Audio] Footsteps audio loaded successfully")
+            debugLog("[Audio] Footsteps audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load footsteps audio: \(error)")
+            debugLog("[Audio] Failed to load footsteps audio: \(error)")
         }
     }
     
@@ -66,7 +74,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "sword-swing", withExtension: "wav") {
             setupSwordSwingPlayer(with: url)
         } else {
-            print("[Audio] Could not find sword-swing.wav in bundle")
+            debugLog("[Audio] Could not find sword-swing.wav in bundle")
         }
     }
     
@@ -76,9 +84,9 @@ final class AudioManager {
             swordSwingPlayer?.numberOfLoops = 0  // Play once
             swordSwingPlayer?.volume = 0.6
             swordSwingPlayer?.prepareToPlay()
-            print("[Audio] Sword swing audio loaded successfully")
+            debugLog("[Audio] Sword swing audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load sword swing audio: \(error)")
+            debugLog("[Audio] Failed to load sword swing audio: \(error)")
         }
     }
     
@@ -88,7 +96,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "metal-hit", withExtension: "wav") {
             setupMetalHitPlayer(with: url)
         } else {
-            print("[Audio] Could not find metal-hit.wav in bundle")
+            debugLog("[Audio] Could not find metal-hit.wav in bundle")
         }
     }
     
@@ -98,9 +106,9 @@ final class AudioManager {
             metalHitPlayer?.numberOfLoops = 0  // Play once
             metalHitPlayer?.volume = 0.7
             metalHitPlayer?.prepareToPlay()
-            print("[Audio] Metal hit audio loaded successfully")
+            debugLog("[Audio] Metal hit audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load metal hit audio: \(error)")
+            debugLog("[Audio] Failed to load metal hit audio: \(error)")
         }
     }
     
@@ -110,7 +118,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "treasure-chest-open", withExtension: "wav") {
             setupTreasureChestOpenPlayer(with: url)
         } else {
-            print("[Audio] Could not find treasure-chest-open.wav in bundle")
+            debugLog("[Audio] Could not find treasure-chest-open.wav in bundle")
         }
     }
     
@@ -120,9 +128,9 @@ final class AudioManager {
             treasureChestOpenPlayer?.numberOfLoops = 0
             treasureChestOpenPlayer?.volume = 0.6
             treasureChestOpenPlayer?.prepareToPlay()
-            print("[Audio] Treasure chest open audio loaded successfully")
+            debugLog("[Audio] Treasure chest open audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load treasure chest open audio: \(error)")
+            debugLog("[Audio] Failed to load treasure chest open audio: \(error)")
         }
     }
     
@@ -132,7 +140,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "level-up", withExtension: "wav") {
             setupLevelUpPlayer(with: url)
         } else {
-            print("[Audio] Could not find level-up.wav in bundle")
+            debugLog("[Audio] Could not find level-up.wav in bundle")
         }
     }
     
@@ -142,9 +150,9 @@ final class AudioManager {
             levelUpPlayer?.numberOfLoops = 0
             levelUpPlayer?.volume = 0.8
             levelUpPlayer?.prepareToPlay()
-            print("[Audio] Level up audio loaded successfully")
+            debugLog("[Audio] Level up audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load level up audio: \(error)")
+            debugLog("[Audio] Failed to load level up audio: \(error)")
         }
     }
     
@@ -156,10 +164,10 @@ final class AudioManager {
             } else if let url = Bundle.main.url(forResource: fileName, withExtension: "wav") {
                 setupHurtPlayer(with: url)
             } else {
-                print("[Audio] Could not find \(fileName).wav in bundle")
+                debugLog("[Audio] Could not find \(fileName).wav in bundle")
             }
         }
-        print("[Audio] Loaded \(hurtPlayers.count) hurt sounds")
+        debugLog("[Audio] Loaded \(hurtPlayers.count) hurt sounds")
     }
     
     private func setupHurtPlayer(with url: URL) {
@@ -170,7 +178,7 @@ final class AudioManager {
             player.prepareToPlay()
             hurtPlayers.append(player)
         } catch {
-            print("[Audio] Failed to load hurt audio: \(error)")
+            debugLog("[Audio] Failed to load hurt audio: \(error)")
         }
     }
     
@@ -180,7 +188,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "die", withExtension: "wav") {
             setupDiePlayer(with: url)
         } else {
-            print("[Audio] Could not find die.wav in bundle")
+            debugLog("[Audio] Could not find die.wav in bundle")
         }
     }
     
@@ -190,9 +198,9 @@ final class AudioManager {
             diePlayer?.numberOfLoops = 0
             diePlayer?.volume = 0.7
             diePlayer?.prepareToPlay()
-            print("[Audio] Die audio loaded successfully")
+            debugLog("[Audio] Die audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load die audio: \(error)")
+            debugLog("[Audio] Failed to load die audio: \(error)")
         }
     }
     
@@ -262,7 +270,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "tick", withExtension: "wav") {
             setupTickPlayer(with: url)
         } else {
-            print("[Audio] Could not find tick.wav in bundle")
+            debugLog("[Audio] Could not find tick.wav in bundle")
         }
     }
     
@@ -272,9 +280,9 @@ final class AudioManager {
             tickPlayer?.numberOfLoops = 0
             tickPlayer?.volume = 0.5
             tickPlayer?.prepareToPlay()
-            print("[Audio] Tick audio loaded successfully")
+            debugLog("[Audio] Tick audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load tick audio: \(error)")
+            debugLog("[Audio] Failed to load tick audio: \(error)")
         }
     }
     
@@ -290,7 +298,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "spotted", withExtension: "wav") {
             setupSpottedPlayer(with: url)
         } else {
-            print("[Audio] Could not find spotted.wav in bundle")
+            debugLog("[Audio] Could not find spotted.wav in bundle")
         }
     }
     
@@ -300,9 +308,9 @@ final class AudioManager {
             spottedPlayer?.numberOfLoops = 0
             spottedPlayer?.volume = 0.6
             spottedPlayer?.prepareToPlay()
-            print("[Audio] Spotted audio loaded successfully")
+            debugLog("[Audio] Spotted audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load spotted audio: \(error)")
+            debugLog("[Audio] Failed to load spotted audio: \(error)")
         }
     }
     
@@ -327,7 +335,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "player-die", withExtension: "wav") {
             setupPlayerDiePlayer(with: url)
         } else {
-            print("[Audio] Could not find player-die.wav in bundle")
+            debugLog("[Audio] Could not find player-die.wav in bundle")
         }
         
         // Setup death-laugh.wav
@@ -336,7 +344,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "death-laugh", withExtension: "wav") {
             setupDeathLaughPlayer(with: url)
         } else {
-            print("[Audio] Could not find death-laugh.wav in bundle")
+            debugLog("[Audio] Could not find death-laugh.wav in bundle")
         }
     }
     
@@ -346,9 +354,9 @@ final class AudioManager {
             playerDiePlayer?.numberOfLoops = 0
             playerDiePlayer?.volume = 0.8
             playerDiePlayer?.prepareToPlay()
-            print("[Audio] Player die audio loaded successfully")
+            debugLog("[Audio] Player die audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load player die audio: \(error)")
+            debugLog("[Audio] Failed to load player die audio: \(error)")
         }
     }
     
@@ -358,9 +366,9 @@ final class AudioManager {
             deathLaughPlayer?.numberOfLoops = 0
             deathLaughPlayer?.volume = 0.7
             deathLaughPlayer?.prepareToPlay()
-            print("[Audio] Death laugh audio loaded successfully")
+            debugLog("[Audio] Death laugh audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load death laugh audio: \(error)")
+            debugLog("[Audio] Failed to load death laugh audio: \(error)")
         }
     }
     
@@ -386,7 +394,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "loot-menu", withExtension: "wav") {
             setupLootMenuPlayer(with: url)
         } else {
-            print("[Audio] Could not find loot-menu.wav in bundle")
+            debugLog("[Audio] Could not find loot-menu.wav in bundle")
         }
     }
     
@@ -396,9 +404,9 @@ final class AudioManager {
             lootMenuPlayer?.numberOfLoops = 0
             lootMenuPlayer?.volume = 0.5
             lootMenuPlayer?.prepareToPlay()
-            print("[Audio] Loot menu audio loaded successfully")
+            debugLog("[Audio] Loot menu audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load loot menu audio: \(error)")
+            debugLog("[Audio] Failed to load loot menu audio: \(error)")
         }
     }
     
@@ -414,7 +422,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "game-music1", withExtension: "mp3") {
             setupBackgroundMusicPlayer(with: url)
         } else {
-            print("[Audio] Could not find game-music1.mp3 in bundle")
+            debugLog("[Audio] Could not find game-music1.mp3 in bundle")
         }
     }
     
@@ -425,9 +433,9 @@ final class AudioManager {
             backgroundMusicPlayer?.volume = 0.15  // Low volume
             backgroundMusicPlayer?.prepareToPlay()
             backgroundMusicPlayer?.play()  // Start playing immediately
-            print("[Audio] Background music loaded and started")
+            debugLog("[Audio] Background music loaded and started")
         } catch {
-            print("[Audio] Failed to load background music: \(error)")
+            debugLog("[Audio] Failed to load background music: \(error)")
         }
     }
     
@@ -454,7 +462,7 @@ final class AudioManager {
         } else if let url = Bundle.main.url(forResource: "drink-potion", withExtension: "wav") {
             setupDrinkPotionPlayer(with: url)
         } else {
-            print("[Audio] Could not find drink-potion.wav in bundle")
+            debugLog("[Audio] Could not find drink-potion.wav in bundle")
         }
     }
     
@@ -464,9 +472,9 @@ final class AudioManager {
             drinkPotionPlayer?.numberOfLoops = 0
             drinkPotionPlayer?.volume = 0.6
             drinkPotionPlayer?.prepareToPlay()
-            print("[Audio] Drink potion audio loaded successfully")
+            debugLog("[Audio] Drink potion audio loaded successfully")
         } catch {
-            print("[Audio] Failed to load drink potion audio: \(error)")
+            debugLog("[Audio] Failed to load drink potion audio: \(error)")
         }
     }
     

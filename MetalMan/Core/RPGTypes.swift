@@ -1,6 +1,14 @@
 import Foundation
 import simd
 
+// Disable verbose logging for RPG system
+private let rpgDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if rpgDebugLogging {
+        print(message())
+    }
+}
+
 // MARK: - Character Stats
 
 /// Core character attributes that affect gameplay
@@ -101,7 +109,7 @@ enum ItemCategory {
 }
 
 /// Equipment slot for wearable items
-enum EquipmentSlot: CaseIterable {
+enum EquipmentSlot: String, CaseIterable {
     case head
     case chest
     case legs
@@ -347,6 +355,23 @@ final class Inventory: @unchecked Sendable {
         }
         
         return item
+    }
+    
+    /// Swap items between two slots (for drag and drop)
+    func swapSlots(_ fromIndex: Int, _ toIndex: Int) {
+        guard fromIndex >= 0 && fromIndex < capacity else { return }
+        guard toIndex >= 0 && toIndex < capacity else { return }
+        guard fromIndex != toIndex else { return }
+        
+        let temp = slots[fromIndex]
+        slots[fromIndex] = slots[toIndex]
+        slots[toIndex] = temp
+    }
+    
+    /// Set a specific slot directly (for drag and drop with equipment)
+    func setSlot(_ index: Int, to stack: ItemStack?) {
+        guard index >= 0 && index < capacity else { return }
+        slots[index] = stack
     }
     
     /// Add gold
@@ -1332,10 +1357,10 @@ final class SaveGameManager {
             encoder.outputFormatting = .prettyPrinted
             let data = try encoder.encode(saveData)
             try data.write(to: fileURL)
-            print("[SaveGame] Game saved successfully as '\(name)' to \(fileURL.path)")
+            debugLog("[SaveGame] Game saved successfully as '\(name)' to \(fileURL.path)")
             return true
         } catch {
-            print("[SaveGame] Failed to save game: \(error)")
+            debugLog("[SaveGame] Failed to save game: \(error)")
             return false
         }
     }
@@ -1389,10 +1414,10 @@ final class SaveGameManager {
             encoder.outputFormatting = .prettyPrinted
             let data = try encoder.encode(saveData)
             try data.write(to: quickSaveURL)
-            print("[SaveGame] Quick save successful")
+            debugLog("[SaveGame] Quick save successful")
             return true
         } catch {
-            print("[SaveGame] Failed to quick save: \(error)")
+            debugLog("[SaveGame] Failed to quick save: \(error)")
             return false
         }
     }
@@ -1402,17 +1427,17 @@ final class SaveGameManager {
         let fileURL = savesDirectoryURL.appendingPathComponent("\(id.uuidString).json")
         
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            print("[SaveGame] Save file not found for ID: \(id)")
+            debugLog("[SaveGame] Save file not found for ID: \(id)")
             return nil
         }
         
         do {
             let data = try Data(contentsOf: fileURL)
             let saveData = try JSONDecoder().decode(SaveGameData.self, from: data)
-            print("[SaveGame] Game loaded successfully: \(saveData.saveName)")
+            debugLog("[SaveGame] Game loaded successfully: \(saveData.saveName)")
             return saveData
         } catch {
-            print("[SaveGame] Failed to load game: \(error)")
+            debugLog("[SaveGame] Failed to load game: \(error)")
             return nil
         }
     }
@@ -1420,17 +1445,17 @@ final class SaveGameManager {
     /// Load the quick save
     func loadQuickSave() -> SaveGameData? {
         guard hasQuickSave else {
-            print("[SaveGame] No quick save found")
+            debugLog("[SaveGame] No quick save found")
             return nil
         }
         
         do {
             let data = try Data(contentsOf: quickSaveURL)
             let saveData = try JSONDecoder().decode(SaveGameData.self, from: data)
-            print("[SaveGame] Quick save loaded successfully")
+            debugLog("[SaveGame] Quick save loaded successfully")
             return saveData
         } catch {
-            print("[SaveGame] Failed to load quick save: \(error)")
+            debugLog("[SaveGame] Failed to load quick save: \(error)")
             return nil
         }
     }
@@ -1450,9 +1475,9 @@ final class SaveGameManager {
         let fileURL = savesDirectoryURL.appendingPathComponent("\(id.uuidString).json")
         do {
             try FileManager.default.removeItem(at: fileURL)
-            print("[SaveGame] Save deleted: \(id)")
+            debugLog("[SaveGame] Save deleted: \(id)")
         } catch {
-            print("[SaveGame] Failed to delete save: \(error)")
+            debugLog("[SaveGame] Failed to delete save: \(error)")
         }
     }
     
@@ -1460,9 +1485,9 @@ final class SaveGameManager {
     func deleteQuickSave() {
         do {
             try FileManager.default.removeItem(at: quickSaveURL)
-            print("[SaveGame] Quick save deleted")
+            debugLog("[SaveGame] Quick save deleted")
         } catch {
-            print("[SaveGame] Failed to delete quick save: \(error)")
+            debugLog("[SaveGame] Failed to delete quick save: \(error)")
         }
     }
     
@@ -1472,7 +1497,7 @@ final class SaveGameManager {
             deleteSave(id: save.id)
         }
         deleteQuickSave()
-        print("[SaveGame] All saves deleted")
+        debugLog("[SaveGame] All saves deleted")
     }
     
     /// Convert an Item to SavedItem format

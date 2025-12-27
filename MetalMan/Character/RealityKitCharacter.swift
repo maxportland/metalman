@@ -10,6 +10,14 @@ import RealityKit
 import SwiftUI
 import Combine
 
+// Disable verbose logging
+private let realityKitCharDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if realityKitCharDebugLogging {
+        print(message())
+    }
+}
+
 /// Manages a RealityKit entity for the player character with proper animation
 @MainActor
 class RealityKitCharacter: ObservableObject {
@@ -34,13 +42,13 @@ class RealityKitCharacter: ObservableObject {
     
     /// Load the character from a USDZ file
     func loadCharacter(from url: URL) async {
-        print("[RealityKitChar] Loading character from: \(url.lastPathComponent)")
+        debugLog("[RealityKitChar] Loading character from: \(url.lastPathComponent)")
         
         do {
             // Load the entity
             let loadedEntity = try await Entity(contentsOf: url)
             
-            print("[RealityKitChar] Entity loaded successfully")
+            debugLog("[RealityKitChar] Entity loaded successfully")
             
             // Create anchor at origin
             let anchorEntity = AnchorEntity(world: .zero)
@@ -51,12 +59,12 @@ class RealityKitCharacter: ObservableObject {
             
             // Get available animations
             let availableAnims = loadedEntity.availableAnimations
-            print("[RealityKitChar] Available animations: \(availableAnims.count)")
+            debugLog("[RealityKitChar] Available animations: \(availableAnims.count)")
             
             for (index, animResource) in availableAnims.enumerated() {
                 let name = "animation_\(index)"
                 animations[name] = animResource
-                print("[RealityKitChar]   [\(index)] \(name)")
+                debugLog("[RealityKitChar]   [\(index)] \(name)")
             }
             
             // If there's at least one animation, store it as "walk"
@@ -65,10 +73,10 @@ class RealityKitCharacter: ObservableObject {
             }
             
             isLoaded = true
-            print("[RealityKitChar] ✅ Character ready with \(animations.count) animations")
+            debugLog("[RealityKitChar] ✅ Character ready with \(animations.count) animations")
             
         } catch {
-            print("[RealityKitChar] Failed to load character: \(error)")
+            debugLog("[RealityKitChar] Failed to load character: \(error)")
         }
     }
     
@@ -110,7 +118,7 @@ class RealityKitCharacter: ObservableObject {
     func playAnimation(named name: String, loop: Bool = true) {
         guard let entity = entity,
               let animResource = animations[name] else {
-            print("[RealityKitChar] Animation '\(name)' not found")
+            debugLog("[RealityKitChar] Animation '\(name)' not found")
             return
         }
         
@@ -125,7 +133,7 @@ class RealityKitCharacter: ObservableObject {
         }
         
         currentAnimation = name
-        print("[RealityKitChar] Playing animation: \(name)")
+        debugLog("[RealityKitChar] Playing animation: \(name)")
     }
     
     /// Stop all animations

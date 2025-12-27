@@ -3,6 +3,14 @@ import MetalKit
 import ModelIO
 import simd
 
+// Disable verbose logging for USD loading
+private let usdDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if usdDebugLogging {
+        print(message())
+    }
+}
+
 /// Loads USD/USDC/USDZ models and converts them to Metal-compatible meshes
 final class USDModelLoader {
     
@@ -38,7 +46,7 @@ final class USDModelLoader {
     /// Load a USD model from a file path
     func loadModel(named name: String, withExtension ext: String = "usdc", materialIndex: UInt32) -> LoadedModel? {
         guard let url = Bundle.main.url(forResource: name, withExtension: ext) else {
-            print("[USDLoader] Could not find \(name).\(ext) in bundle")
+            debugLog("[USDLoader] Could not find \(name).\(ext) in bundle")
             return nil
         }
         
@@ -47,21 +55,25 @@ final class USDModelLoader {
     
     /// Print the full hierarchy of a USD asset for debugging
     func printAssetHierarchy(from url: URL) {
+        guard usdDebugLogging else { return }
+        
         let allocator = MTKMeshBufferAllocator(device: device)
         let asset = MDLAsset(url: url, vertexDescriptor: nil, bufferAllocator: allocator)
         
-        print("\n[USDLoader] ========== ASSET HIERARCHY ==========")
-        print("[USDLoader] URL: \(url.lastPathComponent)")
-        print("[USDLoader] Object count: \(asset.count)")
+        debugLog("\n[USDLoader] ========== ASSET HIERARCHY ==========")
+        debugLog("[USDLoader] URL: \(url.lastPathComponent)")
+        debugLog("[USDLoader] Object count: \(asset.count)")
         
         for i in 0..<asset.count {
             let object = asset.object(at: i)
             printObjectHierarchy(object, indent: 0)
         }
-        print("[USDLoader] ======================================\n")
+        debugLog("[USDLoader] ======================================\n")
     }
     
     private func printObjectHierarchy(_ object: MDLObject, indent: Int) {
+        guard usdDebugLogging else { return }
+        
         let indentStr = String(repeating: "  ", count: indent)
         let typeName = String(describing: type(of: object))
         
@@ -85,15 +97,15 @@ final class USDModelLoader {
         // Check for skeleton
         if let skeleton = object as? MDLSkeleton {
             info += " SKELETON"
-            print(info)
+            debugLog(info)
             // Print joint paths
             let jointPaths = skeleton.jointPaths
-            print("\(indentStr)  Joint count: \(jointPaths.count)")
+            debugLog("\(indentStr)  Joint count: \(jointPaths.count)")
             for (i, path) in jointPaths.enumerated() {
                 if i < 20 {  // Print first 20 joints
-                    print("\(indentStr)    [\(i)] \(path)")
+                    debugLog("\(indentStr)    [\(i)] \(path)")
                 } else if i == 20 {
-                    print("\(indentStr)    ... and \(jointPaths.count - 20) more joints")
+                    debugLog("\(indentStr)    ... and \(jointPaths.count - 20) more joints")
                 }
             }
             
@@ -122,7 +134,7 @@ final class USDModelLoader {
             info += " components=[\(componentNames.joined(separator: ", "))]"
         }
         
-        print(info)
+        debugLog(info)
         
         // Print children
         for child in object.children.objects {
@@ -406,7 +418,7 @@ final class USDModelLoader {
         let asset = MDLAsset(url: url, vertexDescriptor: mdlDescriptor, bufferAllocator: allocator)
         
         guard asset.count > 0 else {
-            print("[USDLoader] Chest: No objects in asset")
+            debugLog("[USDLoader] Chest: No objects in asset")
             return nil
         }
         
@@ -719,7 +731,7 @@ final class USDModelLoader {
             return loadTexture(from: url)
         }
         
-        print("[USDLoader] Could not find texture: \(name).\(ext)")
+        debugLog("[USDLoader] Could not find texture: \(name).\(ext)")
         return nil
     }
     
@@ -734,10 +746,10 @@ final class USDModelLoader {
             ]
             
             let texture = try textureLoader.newTexture(URL: url, options: options)
-            print("[USDLoader] Loaded texture: \(url.lastPathComponent)")
+            debugLog("[USDLoader] Loaded texture: \(url.lastPathComponent)")
             return texture
         } catch {
-            print("[USDLoader] Failed to load texture: \(error)")
+            debugLog("[USDLoader] Failed to load texture: \(error)")
             return nil
         }
     }

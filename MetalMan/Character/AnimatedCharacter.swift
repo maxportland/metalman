@@ -149,6 +149,18 @@ final class AnimatedCharacter {
         
         // Initialize bone transforms
         self.previousBoneTransforms = Array(repeating: matrix_identity_float4x4, count: mesh.bones.count)
+        
+        // Log bone information for combat debugging
+        print("[AnimatedCharacter] Created with \(mesh.bones.count) bones")
+        if let handBone = findRightHandBoneIndex() {
+            let boneName = mesh.bones[handBone].name
+            print("[AnimatedCharacter] Found right hand bone: '\(boneName)' at index \(handBone)")
+        } else {
+            print("[AnimatedCharacter] WARNING: No right hand bone found! Available bones:")
+            for bone in mesh.bones.prefix(20) {
+                print("[AnimatedCharacter]   - \(bone.name)")
+            }
+        }
     }
     
     // MARK: - Animation Control
@@ -227,6 +239,132 @@ final class AnimatedCharacter {
             return animationTime >= animation.duration
         }
         return true
+    }
+    
+    /// Get the current animation frame number (0-based)
+    /// Returns nil if animation not found
+    var currentAnimationFrame: Int? {
+        let animName = animationState.animationName
+        
+        // Try primary animation
+        if let animation = mesh.animations[animName], !animation.keyframes.isEmpty {
+            let frameCount = animation.keyframes.count
+            let normalizedTime = animationTime / max(animation.duration, 0.001)
+            let frame = Int(normalizedTime * Float(frameCount))
+            return min(frame, frameCount - 1)
+        }
+        
+        // Try fallback names
+        for fallbackName in animationState.fallbackNames {
+            if let animation = mesh.animations[fallbackName], !animation.keyframes.isEmpty {
+                let frameCount = animation.keyframes.count
+                let normalizedTime = animationTime / max(animation.duration, 0.001)
+                let frame = Int(normalizedTime * Float(frameCount))
+                return min(frame, frameCount - 1)
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Check if we've reached or passed a specific frame in the current animation
+    func hasReachedFrame(_ targetFrame: Int) -> Bool {
+        guard let currentFrame = currentAnimationFrame else { return false }
+        return currentFrame >= targetFrame
+    }
+    
+    // MARK: - Sword Collision
+    
+    /// Names of bones that could be the right hand (sword hand)
+    /// Listed in order of preference - will also try partial matching
+    private static let rightHandBoneNames = [
+        "RightHand", "mixamorig:RightHand", "mixamorig_RightHand",
+        "Right_Hand", "hand.R", "Hand_R", "RightHandX",
+        "RightForeArm", "mixamorig:RightForeArm", "RightArm"
+    ]
+    
+    /// Find the right hand bone index, using partial matching if exact match fails
+    private func findRightHandBoneIndex() -> Int? {
+        // First try exact matches
+        for boneName in Self.rightHandBoneNames {
+            if let index = mesh.boneNameToIndex[boneName] {
+                return index
+            }
+        }
+        
+        // Try partial matching (case insensitive)
+        for (name, index) in mesh.boneNameToIndex {
+            let lowered = name.lowercased()
+            if lowered.contains("righthand") || lowered.contains("right_hand") ||
+               (lowered.contains("right") && lowered.contains("hand")) {
+                return index
+            }
+        }
+        
+        // Try any hand bone
+        for (name, index) in mesh.boneNameToIndex {
+            let lowered = name.lowercased()
+            if lowered.contains("hand") && !lowered.contains("left") {
+                return index
+            }
+        }
+        
+        // Last resort: try right arm/forearm
+        for (name, index) in mesh.boneNameToIndex {
+            let lowered = name.lowercased()
+            if (lowered.contains("rightforearm") || lowered.contains("right_forearm") ||
+                lowered.contains("rightarm")) {
+                return index
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Get the world-space position of the sword tip for collision detection
+    /// Returns nil if no sword bone can be found
+    func getSwordTipWorldPosition(playerModelMatrix: simd_float4x4) -> simd_float3? {
+        guard let boneIndex = findRightHandBoneIndex() else {
+            return nil
+        }
+        
+        // Get the bone's current transform from the bone matrix buffer
+        let boneMatrixPtr = mesh.boneMatrixBuffer.contents().assumingMemoryBound(to: simd_float4x4.self)
+        let boneMatrix = boneMatrixPtr[boneIndex]
+        
+        // The sword extends from the hand. Estimate sword tip offset (in local bone space)
+        // Sword is roughly 1.0-1.2 meters long - try multiple directions
+        let swordLength: Float = 1.2
+        
+        // Try different sword orientations (different models have different hand orientations)
+        // Primary: sword extends in local Y (common for Mixamo)
+        let swordTipLocal = simd_float4(0, swordLength, 0, 1)
+        
+        // Transform through bone matrix (in model space)
+        let swordTipModel = boneMatrix * swordTipLocal
+        
+        // Transform through player model matrix (to world space)
+        let swordTipWorld = playerModelMatrix * swordTipModel
+        
+        return simd_float3(swordTipWorld.x, swordTipWorld.y, swordTipWorld.z)
+    }
+    
+    /// Get the world-space position of the sword base (hand position) for collision detection
+    func getSwordBaseWorldPosition(playerModelMatrix: simd_float4x4) -> simd_float3? {
+        guard let boneIndex = findRightHandBoneIndex() else {
+            return nil
+        }
+        
+        // Get the bone's current transform
+        let boneMatrixPtr = mesh.boneMatrixBuffer.contents().assumingMemoryBound(to: simd_float4x4.self)
+        let boneMatrix = boneMatrixPtr[boneIndex]
+        
+        // Hand position (origin of sword)
+        let handLocal = simd_float4(0, 0, 0, 1)
+        let handModel = boneMatrix * handLocal
+        let handWorld = playerModelMatrix * handModel
+        
+        return simd_float3(handWorld.x, handWorld.y, handWorld.z)
     }
     
     // MARK: - Rendering

@@ -1,6 +1,14 @@
 import Metal
 import AppKit
 
+// Disable verbose logging for texture generation
+private let textureDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if textureDebugLogging {
+        print(message())
+    }
+}
+
 /// Generates procedural textures for the game
 class TextureGenerator {
     private let device: MTLDevice
@@ -42,7 +50,7 @@ class TextureGenerator {
         }
         
         guard let cgImage = loadedImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            print("Failed to get CGImage for: \(filename)")
+            debugLog("Failed to get CGImage for: \(filename)")
             return nil
         }
         
@@ -59,7 +67,7 @@ class TextureGenerator {
         descriptor.usage = [.shaderRead]
         
         guard let texture = device.makeTexture(descriptor: descriptor) else {
-            print("Failed to create texture for: \(filename)")
+            debugLog("Failed to create texture for: \(filename)")
             return nil
         }
         
@@ -83,7 +91,7 @@ class TextureGenerator {
             space: colorSpace,
             bitmapInfo: bitmapInfo.rawValue
         ) else {
-            print("Failed to create context for: \(filename)")
+            debugLog("Failed to create context for: \(filename)")
             // Try alternate bitmap info for images with alpha
             let altBitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
             guard let altContext = CGContext(
@@ -95,7 +103,7 @@ class TextureGenerator {
                 space: colorSpace,
                 bitmapInfo: altBitmapInfo.rawValue
             ) else {
-                print("Failed to create alternate context for: \(filename)")
+                debugLog("Failed to create alternate context for: \(filename)")
                 return nil
             }
             altContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
@@ -156,7 +164,7 @@ class TextureGenerator {
         for path in possiblePaths {
             if FileManager.default.isReadableFile(atPath: path),
                let image = NSImage(contentsOfFile: path) {
-                print("[TextureGen] Found LandscapeModels texture at: \(path)")
+                debugLog("[TextureGen] Found LandscapeModels texture at: \(path)")
                 return createTextureFromNSImage(image, filename: filename)
             }
         }
@@ -167,7 +175,7 @@ class TextureGenerator {
     /// Create a texture from an NSImage
     private func createTextureFromNSImage(_ image: NSImage, filename: String) -> MTLTexture? {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            print("[TextureGen] Failed to get CGImage for: \(filename)")
+            debugLog("[TextureGen] Failed to get CGImage for: \(filename)")
             return nil
         }
         
@@ -223,7 +231,7 @@ class TextureGenerator {
             commandBuffer.waitUntilCompleted()
         }
         
-        print("[TextureGen] Loaded \(filename) (\(width)x\(height))")
+        debugLog("[TextureGen] Loaded \(filename) (\(width)x\(height))")
         return texture
     }
     
@@ -264,7 +272,7 @@ class TextureGenerator {
         }
         // Try the actual tree model bark texture
         if let texture = loadTextureFromLandscapeModels(named: "3DGardenPlants_Koelreuteria_paniculata_Bark_Diffuse.jpg") {
-            print("[TextureGen] Loaded bark texture from LandscapeModels")
+            debugLog("[TextureGen] Loaded bark texture from LandscapeModels")
             return texture
         }
         
@@ -296,7 +304,7 @@ class TextureGenerator {
         }
         // Try the actual tree model leaves texture (PNG format)
         if let texture = loadTextureFromLandscapeModels(named: "3DGardenPlants_Koelreuteria_paniculata_Leaves_01_DIffuse.png") {
-            print("[TextureGen] Loaded leaves texture from LandscapeModels")
+            debugLog("[TextureGen] Loaded leaves texture from LandscapeModels")
             return texture
         }
         

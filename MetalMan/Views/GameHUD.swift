@@ -1,6 +1,14 @@
 import SwiftUI
 import AppKit
 
+// Disable verbose logging for GameHUD
+private let hudDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if hudDebugLogging {
+        print(message())
+    }
+}
+
 // MARK: - Instant Tooltip Modifier
 
 /// A custom tooltip that appears immediately on hover (no delay)
@@ -189,6 +197,8 @@ struct InventoryItemDisplay: Identifiable {
 /// HUD overlay displaying player stats, health, and XP
 struct GameHUD: View {
     @Bindable var viewModel: GameHUDViewModel
+    @State private var isEquipSlotTargeted: [EquipmentSlot: Bool] = [:]
+    @State private var draggedInventoryIndex: Int? = nil  // Track which inventory slot is being dragged
     
     var body: some View {
         ZStack {
@@ -440,10 +450,17 @@ struct GameHUD: View {
                     
                     Spacer()
                     
-                    // Close hint
-                    Text("Press I to close")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .foregroundColor(.gray)
+                    // Close button
+                    Button(action: {
+                        AudioManager.shared.playTick()
+                        viewModel.isInventoryOpen = false
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundColor(.gray)
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
                 }
                 .padding(.horizontal)
                 
@@ -455,13 +472,13 @@ struct GameHUD: View {
                             .foregroundColor(.gray)
                         
                         // Main Hand slot (Weapon)
-                        equipmentSlotView(item: viewModel.equippedMainHand, slotName: "Weapon", slot: .mainHand)
+                        draggableEquipmentSlot(item: viewModel.equippedMainHand, slotName: "Weapon", slot: .mainHand)
                         
                         // Off Hand slot (Shield)
-                        equipmentSlotView(item: viewModel.equippedOffHand, slotName: "Shield", slot: .offHand)
+                        draggableEquipmentSlot(item: viewModel.equippedOffHand, slotName: "Shield", slot: .offHand)
                         
                         // Chest slot (Armor)
-                        equipmentSlotView(item: viewModel.equippedChest, slotName: "Armor", slot: .chest)
+                        draggableEquipmentSlot(item: viewModel.equippedChest, slotName: "Armor", slot: .chest)
                     }
                     .frame(width: 90)
                     
@@ -636,6 +653,19 @@ struct GameHUD: View {
                             .font(.system(size: 18, weight: .bold, design: .monospaced))
                             .foregroundColor(.yellow)
                     }
+                    
+                    // Close button
+                    Button(action: {
+                        AudioManager.shared.playTick()
+                        viewModel.closeShop()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundColor(.gray)
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .padding(.leading, 12)
                 }
                 .padding(.horizontal)
                 
@@ -1766,13 +1796,23 @@ struct GameHUD: View {
     }
     
     private func equipmentSlotView(item: InventoryItemDisplay?, slotName: String, slot: EquipmentSlot) -> some View {
-        ZStack {
+        let isTargeted = isEquipSlotTargeted[slot] ?? false
+        
+        // Determine if the dragged item is compatible with this slot
+        let isCompatible: Bool = {
+            guard let dragIndex = draggedInventoryIndex else { return true }
+            return viewModel.canEquipToSlot(fromInventoryIndex: dragIndex, toSlot: slot)
+        }()
+        
+        let highlightColor = isCompatible ? Color.green : Color.red
+        
+        return ZStack {
             // Slot background
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color(white: 0.15))
+                .fill(isTargeted ? highlightColor.opacity(0.3) : Color(white: 0.15))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(item != nil ? Color.orange.opacity(0.8) : Color.gray.opacity(0.3), lineWidth: 2)
+                        .stroke(isTargeted ? highlightColor : (item != nil ? Color.orange.opacity(0.8) : Color.gray.opacity(0.3)), lineWidth: isTargeted ? 3 : 2)
                 )
             
             if let item = item {
@@ -1791,11 +1831,64 @@ struct GameHUD: View {
         }
         .frame(width: 80, height: 80)
         .instantTooltip(item?.tooltipText ?? slotName)
+        .contentShape(Rectangle())
+        // Drop support - accept items from inventory that fit this slot (applied FIRST)
+        .dropDestination(for: String.self) { items, _ in
+            guard let droppedString = items.first else { 
+                return false
+            }
+            
+            // Handle drop from inventory slot
+            if droppedString.hasPrefix("inv:") {
+                let indexStr = droppedString.replacingOccurrences(of: "inv:", with: "")
+                guard let fromIndex = Int(indexStr) else { 
+                    return false
+                }
+                
+                // Check if item can be equipped to this slot
+                if viewModel.canEquipToSlot(fromInventoryIndex: fromIndex, toSlot: slot) {
+                    AudioManager.shared.playTick()
+                    viewModel.equipItemToSlot(fromInventoryIndex: fromIndex, toSlot: slot)
+                    draggedInventoryIndex = nil
+                    return true
+                } else {
+                    draggedInventoryIndex = nil
+                    return false
+                }
+            }
+            
+            draggedInventoryIndex = nil
+            return false
+        } isTargeted: { targeted in
+            isEquipSlotTargeted[slot] = targeted
+            // Clear dragged index when drag ends (no longer targeting any slot)
+            if !targeted && isEquipSlotTargeted.values.allSatisfy({ !$0 }) {
+                draggedInventoryIndex = nil
+            }
+        }
         .onTapGesture(count: 2) {
             AudioManager.shared.playTick()
             if item != nil {
                 viewModel.unequipSlot(slot)
             }
+        }
+    }
+    
+    /// Equipment slot that can also be dragged when it has an item
+    @ViewBuilder
+    private func draggableEquipmentSlot(item: InventoryItemDisplay?, slotName: String, slot: EquipmentSlot) -> some View {
+        if let item = item {
+            equipmentSlotView(item: item, slotName: slotName, slot: slot)
+                .draggable("equip:\(slot.rawValue)") {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(white: 0.2))
+                            .frame(width: 60, height: 60)
+                        itemIcon(item.iconName, size: 28, color: rarityColor(item.rarity), variant: item.iconVariant)
+                    }
+                }
+        } else {
+            equipmentSlotView(item: nil, slotName: slotName, slot: slot)
         }
     }
     
@@ -1850,9 +1943,54 @@ struct GameHUD: View {
             .frame(width: 70, height: 70)
         }
         .instantTooltip(slot.item?.tooltipText ?? "")
+        // Drag support - only items can be dragged (using onDrag for start/end tracking)
+        .onDrag {
+            // Track which slot is being dragged for compatibility highlighting
+            draggedInventoryIndex = slot.id
+            return NSItemProvider(object: "inv:\(slot.id)" as NSString)
+        } preview: {
+            // Drag preview
+            if let item = slot.item {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(white: 0.2))
+                        .frame(width: 60, height: 60)
+                    itemIcon(item.iconName, size: 28, color: rarityColor(item.rarity), variant: item.iconVariant)
+                }
+            } else {
+                EmptyView()
+            }
+        }
+        // Drop support - can receive items from inventory or equipment
+        .dropDestination(for: String.self) { items, _ in
+            draggedInventoryIndex = nil  // Clear drag tracking
+            guard let droppedString = items.first else { return false }
+            
+            // Handle drop from another inventory slot
+            if droppedString.hasPrefix("inv:") {
+                let indexStr = droppedString.replacingOccurrences(of: "inv:", with: "")
+                guard let fromIndex = Int(indexStr) else { return false }
+                
+                AudioManager.shared.playTick()
+                viewModel.swapInventorySlots(from: fromIndex, to: slot.id)
+                return true
+            }
+            
+            // Handle drop from equipment slot
+            if droppedString.hasPrefix("equip:") {
+                let slotStr = droppedString.replacingOccurrences(of: "equip:", with: "")
+                guard let equipSlot = EquipmentSlot(rawValue: slotStr) else { return false }
+                
+                AudioManager.shared.playTick()
+                viewModel.unequipToInventorySlot(fromSlot: equipSlot, toInventoryIndex: slot.id)
+                return true
+            }
+            
+            return false
+        }
         .onTapGesture(count: 2) {
             AudioManager.shared.playTick()
-            print("[UI] Double-clicked slot \(slot.id), hasItem: \(slot.item != nil)")
+            debugLog("[UI] Double-clicked slot \(slot.id), hasItem: \(slot.item != nil)")
             if slot.item != nil {
                 viewModel.equipItem(at: slot.id)
             }
@@ -2694,19 +2832,19 @@ final class GameHUDViewModel {
         
         // Check if available
         guard shopItem.isAvailable else {
-            print("[Shop] Item '\(shopItem.item.name)' is out of stock")
+            debugLog("[Shop] Item '\(shopItem.item.name)' is out of stock")
             return
         }
         
         // Check if player has enough gold
         guard player.inventory.gold >= shopItem.price else {
-            print("[Shop] Not enough gold! Need \(shopItem.price), have \(player.inventory.gold)")
+            debugLog("[Shop] Not enough gold! Need \(shopItem.price), have \(player.inventory.gold)")
             return
         }
         
         // Try to add item to inventory
         guard player.inventory.addItem(shopItem.item) else {
-            print("[Shop] Inventory full!")
+            debugLog("[Shop] Inventory full!")
             return
         }
         
@@ -2720,23 +2858,23 @@ final class GameHUDViewModel {
         update()
         updateInventorySlots()
         
-        print("[Shop] Purchased '\(shopItem.item.name)' for \(shopItem.price) gold")
+        debugLog("[Shop] Purchased '\(shopItem.item.name)' for \(shopItem.price) gold")
     }
     
     /// Equip an item from inventory slot
     func equipItem(at slotIndex: Int) {
-        print("[Inventory] equipItem called for slot \(slotIndex)")
+        debugLog("[Inventory] equipItem called for slot \(slotIndex)")
         
         guard let player = player else {
-            print("[Inventory] ERROR: player is nil")
+            debugLog("[Inventory] ERROR: player is nil")
             return
         }
         guard slotIndex >= 0 && slotIndex < player.inventory.slots.count else {
-            print("[Inventory] ERROR: slotIndex \(slotIndex) out of range (0..<\(player.inventory.slots.count))")
+            debugLog("[Inventory] ERROR: slotIndex \(slotIndex) out of range (0..<\(player.inventory.slots.count))")
             return
         }
         guard let stack = player.inventory.slots[slotIndex] else {
-            print("[Inventory] ERROR: no item in slot \(slotIndex)")
+            debugLog("[Inventory] ERROR: no item in slot \(slotIndex)")
             return
         }
         
@@ -2750,7 +2888,7 @@ final class GameHUDViewModel {
         
         // Only equip if it has an equipment slot
         guard item.equipSlot != nil else {
-            print("[Inventory] Item '\(item.name)' is not equippable")
+            debugLog("[Inventory] Item '\(item.name)' is not equippable")
             return
         }
         
@@ -2758,9 +2896,9 @@ final class GameHUDViewModel {
         if let previousItem = player.equipment.equip(item) {
             // Put the previously equipped item back in inventory
             player.inventory.addItem(previousItem)
-            print("[Inventory] Swapped '\(previousItem.name)' for '\(item.name)'")
+            debugLog("[Inventory] Swapped '\(previousItem.name)' for '\(item.name)'")
         } else {
-            print("[Inventory] Equipped '\(item.name)'")
+            debugLog("[Inventory] Equipped '\(item.name)'")
         }
         
         // Remove the equipped item from inventory
@@ -2771,20 +2909,98 @@ final class GameHUDViewModel {
         updateEquipmentDisplay()
     }
     
+    /// Swap items between two inventory slots (for drag and drop)
+    func swapInventorySlots(from fromIndex: Int, to toIndex: Int) {
+        guard let player = player else { return }
+        guard fromIndex != toIndex else { return }
+        
+        player.inventory.swapSlots(fromIndex, toIndex)
+        updateInventorySlots()
+    }
+    
+    /// Check if an inventory item can be equipped to a specific slot
+    func canEquipToSlot(fromInventoryIndex: Int, toSlot: EquipmentSlot) -> Bool {
+        guard let player = player else { return false }
+        guard fromInventoryIndex >= 0 && fromInventoryIndex < player.inventory.slots.count else { return false }
+        guard let stack = player.inventory.slots[fromInventoryIndex] else { return false }
+        
+        // Check if item's equip slot matches the target slot
+        return stack.item.equipSlot == toSlot
+    }
+    
+    /// Equip an item from a specific inventory slot to a specific equipment slot
+    func equipItemToSlot(fromInventoryIndex: Int, toSlot: EquipmentSlot) {
+        guard let player = player else { return }
+        guard fromInventoryIndex >= 0 && fromInventoryIndex < player.inventory.slots.count else { return }
+        guard let stack = player.inventory.slots[fromInventoryIndex] else { return }
+        
+        let item = stack.item
+        guard item.equipSlot == toSlot else { return }
+        
+        // Remove from inventory
+        player.inventory.removeItem(at: fromInventoryIndex)
+        
+        // Equip (may return previously equipped item)
+        if let previousItem = player.equipment.equip(item) {
+            // Put previous item in the same inventory slot
+            player.inventory.setSlot(fromInventoryIndex, to: ItemStack(item: previousItem, quantity: 1))
+        }
+        
+        // Update display
+        updateInventorySlots()
+        updateEquipmentDisplay()
+    }
+    
+    /// Unequip an item to a specific inventory slot (swap if slot has item)
+    func unequipToInventorySlot(fromSlot: EquipmentSlot, toInventoryIndex: Int) {
+        guard let player = player else { return }
+        guard toInventoryIndex >= 0 && toInventoryIndex < player.inventory.slots.count else { return }
+        
+        // Get the equipped item
+        guard let equippedItem = player.equipment.itemIn(fromSlot) else { return }
+        
+        // Get the item in the target inventory slot (if any)
+        let inventoryStack = player.inventory.slots[toInventoryIndex]
+        
+        // Check if we can swap (target item must fit the equipment slot, or be empty)
+        if let targetStack = inventoryStack {
+            // Can only swap if target item can equip to this slot
+            guard targetStack.item.equipSlot == fromSlot else { return }
+            
+            // Unequip current item
+            _ = player.equipment.unequip(fromSlot)
+            
+            // Remove target from inventory and equip it
+            player.inventory.removeItem(at: toInventoryIndex)
+            _ = player.equipment.equip(targetStack.item)
+            
+            // Put unequipped item in inventory slot
+            player.inventory.setSlot(toInventoryIndex, to: ItemStack(item: equippedItem, quantity: 1))
+        } else {
+            // Empty slot - just unequip to it
+            _ = player.equipment.unequip(fromSlot)
+            player.inventory.setSlot(toInventoryIndex, to: ItemStack(item: equippedItem, quantity: 1))
+        }
+        
+        // Update display
+        updateInventorySlots()
+        updateEquipmentDisplay()
+    }
+    
     /// Consume an item (potions, etc.)
     func consumeItem(at slotIndex: Int) {
-        print("[Inventory] consumeItem called for slot \(slotIndex)")
+        debugLog("[Inventory] consumeItem called for slot \(slotIndex)")
         
         guard let player = player else {
-            print("[Inventory] ERROR: player is nil")
+            debugLog("[Inventory] ERROR: player is nil")
             return
         }
         guard slotIndex >= 0 && slotIndex < player.inventory.slots.count else {
-            print("[Inventory] ERROR: slotIndex out of range")
+            debugLog("[Inventory] ERROR: slotIndex out of range")
             return
         }
         guard let stack = player.inventory.slots[slotIndex] else {
-            print("[Inventory] ERROR: no item in slot")
+            debugLog("[Inventory] ERROR: no item in slot")
             return
         }
         
@@ -2796,7 +3012,7 @@ final class GameHUDViewModel {
             AudioManager.shared.playDrinkPotion()
             
             let healed = player.heal(item.healAmount)
-            print("[Inventory] Consumed '\(item.name)', healed \(healed) HP")
+            debugLog("[Inventory] Consumed '\(item.name)', healed \(healed) HP")
             // Show heal notification
             showLoot(gold: 0, itemName: "+\(healed) HP", itemRarity: "common", title: "💚 Healed!", icon: "heart.fill")
         }
@@ -2811,18 +3027,18 @@ final class GameHUDViewModel {
     
     /// Discard items from inventory (permanently remove)
     func discardItem(at slotIndex: Int, quantity: Int = 1) {
-        print("[Inventory] discardItem called for slot \(slotIndex), quantity: \(quantity)")
+        debugLog("[Inventory] discardItem called for slot \(slotIndex), quantity: \(quantity)")
         
         guard let player = player else {
-            print("[Inventory] ERROR: player is nil")
+            debugLog("[Inventory] ERROR: player is nil")
             return
         }
         guard slotIndex >= 0 && slotIndex < player.inventory.slots.count else {
-            print("[Inventory] ERROR: slotIndex out of range")
+            debugLog("[Inventory] ERROR: slotIndex out of range")
             return
         }
         guard let stack = player.inventory.slots[slotIndex] else {
-            print("[Inventory] ERROR: no item in slot")
+            debugLog("[Inventory] ERROR: no item in slot")
             return
         }
         
@@ -2832,7 +3048,7 @@ final class GameHUDViewModel {
         // Remove from inventory
         player.inventory.removeItem(at: slotIndex, quantity: actualQuantity)
         
-        print("[Inventory] Discarded \(actualQuantity)x '\(item.name)'")
+        debugLog("[Inventory] Discarded \(actualQuantity)x '\(item.name)'")
         
         // Show discard notification
         let message = actualQuantity > 1 ? "Discarded \(actualQuantity)x \(item.name)" : "Discarded \(item.name)"
@@ -2851,22 +3067,22 @@ final class GameHUDViewModel {
     
     /// Sell items from inventory to vendor
     func sellItem(at slotIndex: Int, quantity: Int = 1) {
-        print("[Shop] sellItem called for slot \(slotIndex), quantity: \(quantity)")
+        debugLog("[Shop] sellItem called for slot \(slotIndex), quantity: \(quantity)")
         
         guard isShopOpen else {
-            print("[Shop] ERROR: shop is not open")
+            debugLog("[Shop] ERROR: shop is not open")
             return
         }
         guard let player = player else {
-            print("[Shop] ERROR: player is nil")
+            debugLog("[Shop] ERROR: player is nil")
             return
         }
         guard slotIndex >= 0 && slotIndex < player.inventory.slots.count else {
-            print("[Shop] ERROR: slotIndex out of range")
+            debugLog("[Shop] ERROR: slotIndex out of range")
             return
         }
         guard let stack = player.inventory.slots[slotIndex] else {
-            print("[Shop] ERROR: no item in slot")
+            debugLog("[Shop] ERROR: no item in slot")
             return
         }
         
@@ -2881,7 +3097,7 @@ final class GameHUDViewModel {
         // Add gold
         player.inventory.addGold(totalGold)
         
-        print("[Shop] Sold \(actualQuantity)x '\(item.name)' for \(totalGold) gold")
+        debugLog("[Shop] Sold \(actualQuantity)x '\(item.name)' for \(totalGold) gold")
         
         // Show sell notification
         let message = actualQuantity > 1 ? "\(actualQuantity)x \(item.name)" : item.name
@@ -2894,24 +3110,24 @@ final class GameHUDViewModel {
     
     /// Unequip item from main hand and return to inventory
     func unequipMainHand() {
-        print("[Inventory] unequipMainHand called")
+        debugLog("[Inventory] unequipMainHand called")
         guard let player = player else {
-            print("[Inventory] ERROR: player is nil")
+            debugLog("[Inventory] ERROR: player is nil")
             return
         }
         
         guard let item = player.equipment.unequip(.mainHand) else {
-            print("[Inventory] No item equipped in main hand")
+            debugLog("[Inventory] No item equipped in main hand")
             return
         }
         
         // Add back to inventory
         if player.inventory.addItem(item) {
-            print("[Inventory] Unequipped '\(item.name)' and returned to inventory")
+            debugLog("[Inventory] Unequipped '\(item.name)' and returned to inventory")
         } else {
             // Inventory full, re-equip
             player.equipment.equip(item)
-            print("[Inventory] Inventory full! Cannot unequip '\(item.name)'")
+            debugLog("[Inventory] Inventory full! Cannot unequip '\(item.name)'")
         }
         
         updateInventorySlots()
@@ -2920,24 +3136,24 @@ final class GameHUDViewModel {
     
     /// Unequip item from any slot and return to inventory
     func unequipSlot(_ slot: EquipmentSlot) {
-        print("[Inventory] unequipSlot called for \(slot.displayName)")
+        debugLog("[Inventory] unequipSlot called for \(slot.displayName)")
         guard let player = player else {
-            print("[Inventory] ERROR: player is nil")
+            debugLog("[Inventory] ERROR: player is nil")
             return
         }
         
         guard let item = player.equipment.unequip(slot) else {
-            print("[Inventory] No item equipped in \(slot.displayName)")
+            debugLog("[Inventory] No item equipped in \(slot.displayName)")
             return
         }
         
         // Add back to inventory
         if player.inventory.addItem(item) {
-            print("[Inventory] Unequipped '\(item.name)' and returned to inventory")
+            debugLog("[Inventory] Unequipped '\(item.name)' and returned to inventory")
         } else {
             // Inventory full, re-equip
             player.equipment.equip(item)
-            print("[Inventory] Inventory full! Cannot unequip '\(item.name)'")
+            debugLog("[Inventory] Inventory full! Cannot unequip '\(item.name)'")
         }
         
         updateInventorySlots()

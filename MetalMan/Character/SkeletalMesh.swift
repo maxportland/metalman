@@ -10,6 +10,14 @@ import MetalKit
 import ModelIO
 import simd
 
+// Disable verbose logging for skeletal mesh loading
+private let skeletalMeshDebugLogging = false
+private func debugLog(_ message: @autoclosure () -> String) {
+    if skeletalMeshDebugLogging {
+        print(message())
+    }
+}
+
 // MARK: - Skinned Vertex
 
 /// Vertex structure for skeletal meshes with bone weights
@@ -204,13 +212,13 @@ final class SkeletalMesh {
         
         // Use actual MemoryLayout stride to ensure buffer matches array layout
         let actualStride = MemoryLayout<SkinnedVertex>.stride
-        print("[SkeletalMesh] Creating vertex buffer with \(vertices.count) vertices, stride=\(actualStride)")
+        debugLog("[SkeletalMesh] Creating vertex buffer with \(vertices.count) vertices, stride=\(actualStride)")
         
         // Log submesh info
         if !submeshes.isEmpty {
-            print("[SkeletalMesh] Submeshes:")
+            debugLog("[SkeletalMesh] Submeshes:")
             for (i, sub) in submeshes.enumerated() {
-                print("[SkeletalMesh]   [\(i)] '\(sub.name)' - vertices \(sub.vertexStart)..<\(sub.vertexStart + sub.vertexCount) (shield=\(sub.isShield), weapon=\(sub.isWeapon))")
+                debugLog("[SkeletalMesh]   [\(i)] '\(sub.name)' - vertices \(sub.vertexStart)..<\(sub.vertexStart + sub.vertexCount) (shield=\(sub.isShield), weapon=\(sub.isWeapon))")
             }
         }
         
@@ -405,7 +413,7 @@ final class SkeletalMeshLoader {
         let layout = MDLVertexBufferLayout(stride: offset)
         descriptor.layouts[0] = layout
         
-        print("[SkeletalLoader] Created vertex descriptor with stride \(offset), requesting joint data")
+        debugLog("[SkeletalLoader] Created vertex descriptor with stride \(offset), requesting joint data")
         
         return descriptor
     }
@@ -417,8 +425,8 @@ final class SkeletalMeshLoader {
     ///   - flipUV: Whether to flip UV V-coordinate (default true for Mixamo models, false for some other exports)
     func loadSkeletalMesh(from url: URL, materialIndex: UInt32, flipUV: Bool = true) -> SkeletalMesh? {
         self.shouldFlipUV = flipUV
-        print("[SkeletalLoader] Loading skeletal mesh from: \(url.lastPathComponent)")
-        print("[SkeletalLoader] SkinnedVertex size: \(MemoryLayout<SkinnedVertex>.size), stride: \(MemoryLayout<SkinnedVertex>.stride), alignment: \(MemoryLayout<SkinnedVertex>.alignment)")
+        debugLog("[SkeletalLoader] Loading skeletal mesh from: \(url.lastPathComponent)")
+        debugLog("[SkeletalLoader] SkinnedVertex size: \(MemoryLayout<SkinnedVertex>.size), stride: \(MemoryLayout<SkinnedVertex>.stride), alignment: \(MemoryLayout<SkinnedVertex>.alignment)")
         
         // Create allocator
         let allocator = MTKMeshBufferAllocator(device: device)
@@ -431,7 +439,7 @@ final class SkeletalMeshLoader {
         asset.loadTextures()
         
         guard asset.count > 0 else {
-            print("[SkeletalLoader] No objects in asset")
+            debugLog("[SkeletalLoader] No objects in asset")
             return nil
         }
         
@@ -444,7 +452,7 @@ final class SkeletalMeshLoader {
             findSkeletonAndMeshes(object, skeleton: &mdlSkeleton, meshes: &meshObjects)
         }
         
-        print("[SkeletalLoader] Found \(meshObjects.count) meshes")
+        debugLog("[SkeletalLoader] Found \(meshObjects.count) meshes")
         
         // Extract skeleton from MDLSkeleton
         var bones: [Bone] = []
@@ -452,9 +460,9 @@ final class SkeletalMeshLoader {
         
         if let skeleton = mdlSkeleton {
             extractBonesFromMDLSkeleton(skeleton, bones: &bones, boneNameToIndex: &boneNameToIndex)
-            print("[SkeletalLoader] Extracted \(bones.count) bones from MDLSkeleton")
+            debugLog("[SkeletalLoader] Extracted \(bones.count) bones from MDLSkeleton")
         } else {
-            print("[SkeletalLoader] No MDLSkeleton found - creating single root bone")
+            debugLog("[SkeletalLoader] No MDLSkeleton found - creating single root bone")
             bones.append(Bone(name: "root", index: 0, parentIndex: -1))
             boneNameToIndex["root"] = 0
         }
@@ -476,26 +484,26 @@ final class SkeletalMeshLoader {
         }
         
         if vertices.isEmpty {
-            print("[SkeletalLoader] No vertices extracted")
+            debugLog("[SkeletalLoader] No vertices extracted")
             return nil
         }
         
-        print("[SkeletalLoader] Loaded \(vertices.count) skinned vertices")
-        print("[SkeletalLoader] Bounds: min=\(minBound), max=\(maxBound)")
+        debugLog("[SkeletalLoader] Loaded \(vertices.count) skinned vertices")
+        debugLog("[SkeletalLoader] Bounds: min=\(minBound), max=\(maxBound)")
         
         if hasValidJointData {
-            print("[SkeletalLoader] ✅ Mesh has valid joint weights for animation!")
+            debugLog("[SkeletalLoader] ✅ Mesh has valid joint weights for animation!")
         }
         
         // Extract texture from materials with detailed logging
-        print("[SkeletalLoader] ========== TEXTURE EXTRACTION ==========")
+        debugLog("[SkeletalLoader] ========== TEXTURE EXTRACTION ==========")
         let texture = extractTextureFromMeshes(meshObjects, verbose: true)
         if texture != nil {
-            print("[SkeletalLoader] ✅ Extracted texture: \(texture!.width)x\(texture!.height)")
+            debugLog("[SkeletalLoader] ✅ Extracted texture: \(texture!.width)x\(texture!.height)")
         } else {
-            print("[SkeletalLoader] ❌ No texture found in materials")
+            debugLog("[SkeletalLoader] ❌ No texture found in materials")
         }
-        print("[SkeletalLoader] ========================================")
+        debugLog("[SkeletalLoader] ========================================")
         
         // Try loading animations using ModelIO deep inspection
         var animations: [String: AnimationClip] = [:]
@@ -504,7 +512,7 @@ final class SkeletalMeshLoader {
         let extractedAnimations = ModelIOAnimationExtractor.extractFromMDLAsset(asset, device: device)
         
         if !extractedAnimations.isEmpty {
-            print("[SkeletalLoader] ✅ Loaded \(extractedAnimations.count) animations from ModelIO")
+            debugLog("[SkeletalLoader] ✅ Loaded \(extractedAnimations.count) animations from ModelIO")
             
             // Convert extracted animations to our AnimationClip format
             for extracted in extractedAnimations {
@@ -529,11 +537,11 @@ final class SkeletalMeshLoader {
         
         // Fall back to identity animations if nothing loaded
         if animations.isEmpty {
-            print("[SkeletalLoader] No ModelIO animations found, using identity animations")
+            debugLog("[SkeletalLoader] No ModelIO animations found, using identity animations")
             animations = createMixamoWalkAnimation(bones: bones, boneNameToIndex: boneNameToIndex)
         }
         
-        print("[SkeletalLoader] Total animations: \(animations.count)")
+        debugLog("[SkeletalLoader] Total animations: \(animations.count)")
         
         // Classify submeshes by size if name-based detection didn't work
         // For Mixamo characters: smaller submeshes are typically equipment (sword, shield)
@@ -567,9 +575,9 @@ final class SkeletalMeshLoader {
                     classifiedSubmeshes[smallestIdx].equipmentType = .shield
                     classifiedSubmeshes[secondSmallestIdx].equipmentType = .weapon
                     
-                    print("[SkeletalLoader] Size-based equipment detection:")
-                    print("[SkeletalLoader]   Shield: submesh[\(smallestIdx)] '\(smallest.name)' (\(smallest.vertexCount) verts)")
-                    print("[SkeletalLoader]   Weapon: submesh[\(secondSmallestIdx)] '\(secondSmallest.name)' (\(secondSmallest.vertexCount) verts)")
+                    debugLog("[SkeletalLoader] Size-based equipment detection:")
+                    debugLog("[SkeletalLoader]   Shield: submesh[\(smallestIdx)] '\(smallest.name)' (\(smallest.vertexCount) verts)")
+                    debugLog("[SkeletalLoader]   Weapon: submesh[\(secondSmallestIdx)] '\(secondSmallest.name)' (\(secondSmallest.vertexCount) verts)")
                 }
             }
         }
@@ -609,21 +617,21 @@ final class SkeletalMeshLoader {
         
         // First pass: analyze all materials and textures
         if verbose {
-            print("[SkeletalLoader] Analyzing \(meshes.count) meshes for textures...")
+            debugLog("[SkeletalLoader] Analyzing \(meshes.count) meshes for textures...")
             for (meshIdx, mesh) in meshes.enumerated() {
-                print("[SkeletalLoader] Mesh[\(meshIdx)]: \(mesh.name)")
+                debugLog("[SkeletalLoader] Mesh[\(meshIdx)]: \(mesh.name)")
                 guard let submeshes = mesh.submeshes as? [MDLSubmesh] else { 
-                    print("[SkeletalLoader]   No submeshes")
+                    debugLog("[SkeletalLoader]   No submeshes")
                     continue 
                 }
                 
                 for (subIdx, submesh) in submeshes.enumerated() {
-                    print("[SkeletalLoader]   Submesh[\(subIdx)]: '\(submesh.name)'")
+                    debugLog("[SkeletalLoader]   Submesh[\(subIdx)]: '\(submesh.name)'")
                     guard let material = submesh.material else { 
-                        print("[SkeletalLoader]     No material")
+                        debugLog("[SkeletalLoader]     No material")
                         continue 
                     }
-                    print("[SkeletalLoader]     Material: '\(material.name)' with \(material.count) properties")
+                    debugLog("[SkeletalLoader]     Material: '\(material.name)' with \(material.count) properties")
                     
                     // List ALL properties
                     for i in 0..<material.count {
@@ -643,12 +651,12 @@ final class SkeletalMeshLoader {
                             case .none: typeStr = "none"
                             @unknown default: typeStr = "type(\(prop.type.rawValue))"
                             }
-                            print("[SkeletalLoader]       [\(i)] '\(prop.name)': \(typeStr)")
+                            debugLog("[SkeletalLoader]       [\(i)] '\(prop.name)': \(typeStr)")
                             
                             if prop.type == .texture,
                                let textureValue = prop.textureSamplerValue,
                                let mdlTexture = textureValue.texture {
-                                print("[SkeletalLoader]         -> MDLTexture: '\(mdlTexture.name)' \(Int(mdlTexture.dimensions.x))x\(Int(mdlTexture.dimensions.y)) channels=\(mdlTexture.channelCount)")
+                                debugLog("[SkeletalLoader]         -> MDLTexture: '\(mdlTexture.name)' \(Int(mdlTexture.dimensions.x))x\(Int(mdlTexture.dimensions.y)) channels=\(mdlTexture.channelCount)")
                             }
                         }
                     }
@@ -664,7 +672,7 @@ final class SkeletalMeshLoader {
                 guard let material = submesh.material else { continue }
                 
                 if verbose {
-                    print("[SkeletalLoader] Trying to extract texture from material: \(material.name)")
+                    debugLog("[SkeletalLoader] Trying to extract texture from material: \(material.name)")
                 }
                 
                 // Try each semantic that might have a texture
@@ -675,14 +683,14 @@ final class SkeletalMeshLoader {
                            let mdlTexture = textureValue.texture {
                             
                             if verbose {
-                                print("[SkeletalLoader] Found texture in semantic \(semantic.rawValue)")
+                                debugLog("[SkeletalLoader] Found texture in semantic \(semantic.rawValue)")
                             }
                             
                             // Try to load from the texture's URL/name
                             let textureName = mdlTexture.name
                             if !textureName.isEmpty {
                                 if verbose {
-                                    print("[SkeletalLoader] Texture name: '\(textureName)'")
+                                    debugLog("[SkeletalLoader] Texture name: '\(textureName)'")
                                 }
                                 
                                 // Try as URL
@@ -699,18 +707,18 @@ final class SkeletalMeshLoader {
                             // Try to create texture from MDLTexture data
                             if let tex = createTextureFromMDLTexture(mdlTexture) {
                                 if verbose {
-                                    print("[SkeletalLoader] Created texture from MDLTexture data: \(tex.width)x\(tex.height)")
+                                    debugLog("[SkeletalLoader] Created texture from MDLTexture data: \(tex.width)x\(tex.height)")
                                 }
                                 return tex
                             } else if verbose {
-                                print("[SkeletalLoader] Failed to create texture from MDLTexture data")
+                                debugLog("[SkeletalLoader] Failed to create texture from MDLTexture data")
                             }
                         }
                         
                         // Check for string paths
                         if property.type == .string, let path = property.stringValue, !path.isEmpty {
                             if verbose {
-                                print("[SkeletalLoader] Found texture path: \(path)")
+                                debugLog("[SkeletalLoader] Found texture path: \(path)")
                             }
                             if let tex = loadTextureFromPath(path) {
                                 return tex
@@ -724,7 +732,7 @@ final class SkeletalMeshLoader {
                     if let prop = material[i] {
                         if prop.type == .texture {
                             if verbose {
-                                print("[SkeletalLoader] Trying texture property by index: \(prop.name)")
+                                debugLog("[SkeletalLoader] Trying texture property by index: \(prop.name)")
                             }
                             if let textureValue = prop.textureSamplerValue,
                                let mdlTexture = textureValue.texture,
@@ -750,7 +758,7 @@ final class SkeletalMeshLoader {
             ]
             return try textureLoader.newTexture(URL: url, options: options)
         } catch {
-            print("[SkeletalLoader] Failed to load texture from URL: \(error)")
+            debugLog("[SkeletalLoader] Failed to load texture from URL: \(error)")
             return nil
         }
     }
@@ -784,15 +792,15 @@ final class SkeletalMeshLoader {
         
         guard width > 0 && height > 0 else { return nil }
         
-        print("[SkeletalLoader] MDLTexture: \(width)x\(height), \(channelCount) channels")
-        print("[SkeletalLoader] MDLTexture name: \(mdlTexture.name)")
+        debugLog("[SkeletalLoader] MDLTexture: \(width)x\(height), \(channelCount) channels")
+        debugLog("[SkeletalLoader] MDLTexture name: \(mdlTexture.name)")
         
         // Try to write to temporary file and load with MTKTextureLoader
         // This handles compressed texture formats (PNG, JPEG) better
         if let imageData = mdlTexture.texelDataWithTopLeftOrigin(atMipLevel: 0, create: true) {
             // Check if this is compressed image data (PNG/JPEG magic bytes)
             let isCompressed = imageData.count < width * height * 3 / 2 // Compressed would be much smaller
-            print("[SkeletalLoader] Texture data size: \(imageData.count) bytes, expected raw: \(width * height * channelCount)")
+            debugLog("[SkeletalLoader] Texture data size: \(imageData.count) bytes, expected raw: \(width * height * channelCount)")
             
             if isCompressed {
                 // Try loading as CGImage
@@ -808,10 +816,10 @@ final class SkeletalMeshLoader {
                             .SRGB: true  // Handle sRGB properly
                         ]
                         let texture = try textureLoader.newTexture(cgImage: cgImage, options: options)
-                        print("[SkeletalLoader] Created texture from compressed image data via CGImage")
+                        debugLog("[SkeletalLoader] Created texture from compressed image data via CGImage")
                         return texture
                     } catch {
-                        print("[SkeletalLoader] Failed to create texture from CGImage: \(error)")
+                        debugLog("[SkeletalLoader] Failed to create texture from CGImage: \(error)")
                     }
                 }
             }
@@ -819,7 +827,7 @@ final class SkeletalMeshLoader {
         
         // Get texture data for raw pixel approach
         guard let texData = mdlTexture.texelDataWithTopLeftOrigin(atMipLevel: 0, create: true) else {
-            print("[SkeletalLoader] Could not get texture data from MDLTexture")
+            debugLog("[SkeletalLoader] Could not get texture data from MDLTexture")
             return nil
         }
         
@@ -886,10 +894,10 @@ final class SkeletalMeshLoader {
                         .SRGB: true
                     ]
                     let texture = try textureLoader.newTexture(cgImage: cgImage, options: options)
-                    print("[SkeletalLoader] Created texture \(width)x\(height) via CGImage from RGB data")
+                    debugLog("[SkeletalLoader] Created texture \(width)x\(height) via CGImage from RGB data")
                     return texture
                 } catch {
-                    print("[SkeletalLoader] Failed to create texture from CGImage: \(error)")
+                    debugLog("[SkeletalLoader] Failed to create texture from CGImage: \(error)")
                 }
             }
         } else if channelCount == 4 {
@@ -916,16 +924,16 @@ final class SkeletalMeshLoader {
                         .SRGB: true
                     ]
                     let texture = try textureLoader.newTexture(cgImage: cgImage, options: options)
-                    print("[SkeletalLoader] Created texture \(width)x\(height) via CGImage from RGBA data")
+                    debugLog("[SkeletalLoader] Created texture \(width)x\(height) via CGImage from RGBA data")
                     return texture
                 } catch {
-                    print("[SkeletalLoader] Failed to create texture from CGImage: \(error)")
+                    debugLog("[SkeletalLoader] Failed to create texture from CGImage: \(error)")
                 }
             }
         }
         
         // Fallback: manual texture creation
-        print("[SkeletalLoader] Falling back to manual texture creation")
+        debugLog("[SkeletalLoader] Falling back to manual texture creation")
         
         let pixelFormat: MTLPixelFormat = .rgba8Unorm_srgb  // Use sRGB for correct color
         let bytesPerPixelOut = 4
@@ -1001,7 +1009,7 @@ final class SkeletalMeshLoader {
             }
         }
         
-        print("[SkeletalLoader] Created texture \(width)x\(height) manually (\(channelCount) -> 4 channels)")
+        debugLog("[SkeletalLoader] Created texture \(width)x\(height) manually (\(channelCount) -> 4 channels)")
         return texture
     }
     
@@ -1010,7 +1018,7 @@ final class SkeletalMeshLoader {
         // Check if this is an MDLSkeleton
         if let skel = object as? MDLSkeleton {
             skeleton = skel
-            print("[SkeletalLoader] Found MDLSkeleton: \(skel.name) with \(skel.jointPaths.count) joints")
+            debugLog("[SkeletalLoader] Found MDLSkeleton: \(skel.name) with \(skel.jointPaths.count) joints")
         }
         
         // Check if this is a mesh
@@ -1030,7 +1038,7 @@ final class SkeletalMeshLoader {
         let jointBindTransforms = skeleton.jointBindTransforms
         let worldBindTransforms = jointBindTransforms.float4x4Array
         
-        print("[SkeletalLoader] jointBindTransforms count: \(worldBindTransforms.count)")
+        debugLog("[SkeletalLoader] jointBindTransforms count: \(worldBindTransforms.count)")
         
         // MDLSkeleton.jointBindTransforms are typically in WORLD space
         // We need to:
@@ -1095,7 +1103,7 @@ final class SkeletalMeshLoader {
         
         // Print first few bones for debugging
         for bone in bones.prefix(5) {
-            print("[SkeletalLoader]   Bone[\(bone.index)]: \(bone.name), parent=\(bone.parentIndex)")
+            debugLog("[SkeletalLoader]   Bone[\(bone.index)]: \(bone.name), parent=\(bone.parentIndex)")
         }
     }
     
@@ -1125,12 +1133,12 @@ final class SkeletalMeshLoader {
         var jointIndicesFormat: MDLVertexFormat = .invalid
         var jointWeightsFormat: MDLVertexFormat = .invalid
         
-        print("[SkeletalLoader] Mesh vertex descriptor stride: \(stride)")
-        print("[SkeletalLoader] Mesh vertex descriptor attributes:")
+        debugLog("[SkeletalLoader] Mesh vertex descriptor stride: \(stride)")
+        debugLog("[SkeletalLoader] Mesh vertex descriptor attributes:")
         
         for attr in mesh.vertexDescriptor.attributes as! [MDLVertexAttribute] {
             if attr.format != .invalid {
-                print("[SkeletalLoader]   \(attr.name): offset=\(attr.offset), format=\(attr.format.rawValue)")
+                debugLog("[SkeletalLoader]   \(attr.name): offset=\(attr.offset), format=\(attr.format.rawValue)")
             }
             
             switch attr.name {
@@ -1157,11 +1165,11 @@ final class SkeletalMeshLoader {
                                     jointIndicesFormat != .invalid && jointWeightsFormat != .invalid
         
         if meshHasValidJointData {
-            print("[SkeletalLoader] ✅ Valid joint data: indices at \(jointIndicesOffset) (format \(jointIndicesFormat.rawValue)), weights at \(jointWeightsOffset) (format \(jointWeightsFormat.rawValue))")
+            debugLog("[SkeletalLoader] ✅ Valid joint data: indices at \(jointIndicesOffset) (format \(jointIndicesFormat.rawValue)), weights at \(jointWeightsOffset) (format \(jointWeightsFormat.rawValue))")
             hasValidJointData = true  // Set the output flag to indicate animation is possible
         } else {
-            print("[SkeletalLoader] ⚠️ No valid joint data found - vertices will be bound to bone 0")
-            print("[SkeletalLoader]   jointIndicesOffset=\(jointIndicesOffset), jointWeightsOffset=\(jointWeightsOffset)")
+            debugLog("[SkeletalLoader] ⚠️ No valid joint data found - vertices will be bound to bone 0")
+            debugLog("[SkeletalLoader]   jointIndicesOffset=\(jointIndicesOffset), jointWeightsOffset=\(jointWeightsOffset)")
         }
         
         // Process submeshes
@@ -1171,7 +1179,7 @@ final class SkeletalMeshLoader {
             // Track submesh info for selective rendering
             let submeshStartVertex = vertices.count
             let submeshName = submesh.material?.name ?? submesh.name
-            print("[SkeletalLoader] Processing submesh: '\(submeshName)'")
+            debugLog("[SkeletalLoader] Processing submesh: '\(submeshName)'")
             
             let indexBuffer = submesh.indexBuffer
             let indexData = indexBuffer.map()
@@ -1280,7 +1288,7 @@ final class SkeletalMeshLoader {
                         
                         // Debug: print first few vertices' joint data
                         if vertices.count < 3 {
-                            print("[SkeletalLoader] Vertex \(vertices.count) joints: \(boneIndices), weights: \(boneWeights)")
+                            debugLog("[SkeletalLoader] Vertex \(vertices.count) joints: \(boneIndices), weights: \(boneWeights)")
                         }
                     }
                     
@@ -1315,9 +1323,9 @@ final class SkeletalMeshLoader {
                     vertexCount: submeshVertexCount
                 )
                 submeshInfos.append(info)
-                print("[SkeletalLoader] Submesh '\(submeshName)': \(submeshVertexCount) vertices")
-                print("[SkeletalLoader]   UV bounds: (\(String(format: "%.3f", uvMin.x)), \(String(format: "%.3f", uvMin.y))) to (\(String(format: "%.3f", uvMax.x)), \(String(format: "%.3f", uvMax.y)))")
-                print("[SkeletalLoader]   Equipment: shield=\(info.isShield), weapon=\(info.isWeapon)")
+                debugLog("[SkeletalLoader] Submesh '\(submeshName)': \(submeshVertexCount) vertices")
+                debugLog("[SkeletalLoader]   UV bounds: (\(String(format: "%.3f", uvMin.x)), \(String(format: "%.3f", uvMin.y))) to (\(String(format: "%.3f", uvMax.x)), \(String(format: "%.3f", uvMax.y)))")
+                debugLog("[SkeletalLoader]   Equipment: shield=\(info.isShield), weapon=\(info.isWeapon)")
             }
         }
     }
@@ -1326,8 +1334,8 @@ final class SkeletalMeshLoader {
     private func extractAnimationsFromAsset(_ asset: MDLAsset, bones: [Bone], boneNameToIndex: [String: Int]) -> [String: AnimationClip] {
         var animations: [String: AnimationClip] = [:]
         
-        print("[SkeletalLoader] Searching for animation data...")
-        print("[SkeletalLoader] Asset time range: \(asset.startTime) to \(asset.endTime)")
+        debugLog("[SkeletalLoader] Searching for animation data...")
+        debugLog("[SkeletalLoader] Asset time range: \(asset.startTime) to \(asset.endTime)")
         
         // Find animation bind components and packed joint animations
         var foundAnimation = false
@@ -1337,7 +1345,7 @@ final class SkeletalMeshLoader {
             if let animClip = extractAnimationFromObject(object, bones: bones, boneNameToIndex: boneNameToIndex) {
                 animations["walk"] = animClip
                 foundAnimation = true
-                print("[SkeletalLoader] ✅ Extracted animation '\(animClip.name)' with duration \(animClip.duration)s")
+                debugLog("[SkeletalLoader] ✅ Extracted animation '\(animClip.name)' with duration \(animClip.duration)s")
                 break
             }
         }
@@ -1348,19 +1356,19 @@ final class SkeletalMeshLoader {
             let endTime = asset.endTime
             
             if endTime > startTime {
-                print("[SkeletalLoader] Asset has animation time range, attempting to sample...")
+                debugLog("[SkeletalLoader] Asset has animation time range, attempting to sample...")
                 
                 // Look for skeleton and try to sample transforms
                 if let animClip = sampleAnimationFromAsset(asset, bones: bones, boneNameToIndex: boneNameToIndex) {
                     animations["walk"] = animClip
                     foundAnimation = true
-                    print("[SkeletalLoader] ✅ Sampled animation with duration \(animClip.duration)s")
+                    debugLog("[SkeletalLoader] ✅ Sampled animation with duration \(animClip.duration)s")
                 }
             }
         }
         
         if !foundAnimation {
-            print("[SkeletalLoader] No animation data found in asset")
+            debugLog("[SkeletalLoader] No animation data found in asset")
         }
         
         return animations
@@ -1373,17 +1381,17 @@ final class SkeletalMeshLoader {
             // Check all components on this object
             for component in object.components {
                 if let animBind = component as? MDLAnimationBindComponent {
-                    print("[SkeletalLoader] Found MDLAnimationBindComponent on mesh: \(mesh.name)")
+                    debugLog("[SkeletalLoader] Found MDLAnimationBindComponent on mesh: \(mesh.name)")
                     
                     if let skeleton = animBind.skeleton {
-                        print("[SkeletalLoader]   Bound to skeleton: \(skeleton.name)")
+                        debugLog("[SkeletalLoader]   Bound to skeleton: \(skeleton.name)")
                         
                         // Check for joint animation (MDLPackedJointAnimation)
                         if let jointAnimation = animBind.jointAnimation {
-                            print("[SkeletalLoader]   Found joint animation!")
+                            debugLog("[SkeletalLoader]   Found joint animation!")
                             return extractFromJointAnimation(jointAnimation, bones: bones, boneNameToIndex: boneNameToIndex)
                         } else {
-                            print("[SkeletalLoader]   No jointAnimation property - trying transform sampling...")
+                            debugLog("[SkeletalLoader]   No jointAnimation property - trying transform sampling...")
                             // Try to extract animation from skeleton's joint transforms
                             if let anim = extractAnimationFromSkeletonTransforms(skeleton, bones: bones, boneNameToIndex: boneNameToIndex) {
                                 return anim
@@ -1398,7 +1406,7 @@ final class SkeletalMeshLoader {
         if let transform = object.transform {
             // MDLTransform can contain animation data
             if transform.minimumTime < transform.maximumTime {
-                print("[SkeletalLoader] Object '\(object.name)' has transform animation: \(transform.minimumTime) to \(transform.maximumTime)")
+                debugLog("[SkeletalLoader] Object '\(object.name)' has transform animation: \(transform.minimumTime) to \(transform.maximumTime)")
             }
         }
         
@@ -1416,42 +1424,42 @@ final class SkeletalMeshLoader {
     private func extractAnimationFromSkeletonTransforms(_ skeleton: MDLSkeleton, bones: [Bone], boneNameToIndex: [String: Int]) -> AnimationClip? {
         // Check if skeleton transform has animation
         guard let skeletonTransform = skeleton.transform else {
-            print("[SkeletalLoader]   Skeleton has no transform")
+            debugLog("[SkeletalLoader]   Skeleton has no transform")
             return nil
         }
         
         let minTime = skeletonTransform.minimumTime
         let maxTime = skeletonTransform.maximumTime
         
-        print("[SkeletalLoader]   Skeleton transform time range: \(minTime) to \(maxTime)")
+        debugLog("[SkeletalLoader]   Skeleton transform time range: \(minTime) to \(maxTime)")
         
         // Get the joint bind transforms
         let jointTransforms = skeleton.jointBindTransforms
         let bindTransformArray = jointTransforms.float4x4Array
         let jointCount = skeleton.jointPaths.count
         
-        print("[SkeletalLoader]   Joint bind transforms count: \(bindTransformArray.count)")
-        print("[SkeletalLoader]   Joint count: \(jointCount)")
+        debugLog("[SkeletalLoader]   Joint bind transforms count: \(bindTransformArray.count)")
+        debugLog("[SkeletalLoader]   Joint count: \(jointCount)")
         
         // Check if there are multiple time samples (animation)
         // If array size > joint count, there might be multiple frames
         let estimatedFrameCount = bindTransformArray.count / max(jointCount, 1)
-        print("[SkeletalLoader]   Estimated frame count: \(estimatedFrameCount)")
+        debugLog("[SkeletalLoader]   Estimated frame count: \(estimatedFrameCount)")
         
         guard estimatedFrameCount > 1 else {
-            print("[SkeletalLoader]   Only \(estimatedFrameCount) frame(s) - no animation data in jointBindTransforms")
-            print("[SkeletalLoader]   Model I/O may not expose USDZ animation through this API")
+            debugLog("[SkeletalLoader]   Only \(estimatedFrameCount) frame(s) - no animation data in jointBindTransforms")
+            debugLog("[SkeletalLoader]   Model I/O may not expose USDZ animation through this API")
             return nil
         }
         
         // If we have multiple frames, try to extract them
         let duration = Float(maxTime - minTime)
         guard duration > 0.001 else {
-            print("[SkeletalLoader]   No valid time range for animation")
+            debugLog("[SkeletalLoader]   No valid time range for animation")
             return nil
         }
         
-        print("[SkeletalLoader]   Extracting animation over \(duration)s with \(estimatedFrameCount) keyframes...")
+        debugLog("[SkeletalLoader]   Extracting animation over \(duration)s with \(estimatedFrameCount) keyframes...")
         
         var keyframes: [AnimationKeyframe] = []
         
@@ -1481,11 +1489,11 @@ final class SkeletalMeshLoader {
         }
         
         if keyframes.count > 1 {
-            print("[SkeletalLoader]   ✅ Created animation with \(keyframes.count) keyframes")
+            debugLog("[SkeletalLoader]   ✅ Created animation with \(keyframes.count) keyframes")
             return AnimationClip(name: "walk", duration: duration, keyframes: keyframes)
         }
         
-        print("[SkeletalLoader]   Failed to create animation keyframes")
+        debugLog("[SkeletalLoader]   Failed to create animation keyframes")
         return nil
     }
     
@@ -1493,8 +1501,8 @@ final class SkeletalMeshLoader {
     private func extractFromJointAnimation(_ jointAnimation: MDLJointAnimation, bones: [Bone], boneNameToIndex: [String: Int]) -> AnimationClip? {
         // Try as packed joint animation
         if let packed = jointAnimation as? MDLPackedJointAnimation {
-            print("[SkeletalLoader] Processing MDLPackedJointAnimation...")
-            print("[SkeletalLoader]   Joint paths: \(packed.jointPaths.count)")
+            debugLog("[SkeletalLoader] Processing MDLPackedJointAnimation...")
+            debugLog("[SkeletalLoader]   Joint paths: \(packed.jointPaths.count)")
             
             // Get animation data arrays
             let translations = packed.translations
@@ -1505,11 +1513,11 @@ final class SkeletalMeshLoader {
             let times = translations.times
             let sampleCount = times.count
             
-            print("[SkeletalLoader]   Translations times: \(sampleCount)")
-            print("[SkeletalLoader]   Rotations times: \(rotations.times.count)")
+            debugLog("[SkeletalLoader]   Translations times: \(sampleCount)")
+            debugLog("[SkeletalLoader]   Rotations times: \(rotations.times.count)")
             
             guard sampleCount > 0 else {
-                print("[SkeletalLoader]   No samples found")
+                debugLog("[SkeletalLoader]   No samples found")
                 return nil
             }
             
@@ -1573,12 +1581,12 @@ final class SkeletalMeshLoader {
             }
             
             if !keyframes.isEmpty {
-                print("[SkeletalLoader] ✅ Created animation with \(keyframes.count) keyframes, \(jointCount) joints")
+                debugLog("[SkeletalLoader] ✅ Created animation with \(keyframes.count) keyframes, \(jointCount) joints")
                 return AnimationClip(name: "walk", duration: duration, keyframes: keyframes)
             }
         }
         
-        print("[SkeletalLoader] Joint animation type not supported: \(type(of: jointAnimation))")
+        debugLog("[SkeletalLoader] Joint animation type not supported: \(type(of: jointAnimation))")
         return nil
     }
     
@@ -1597,18 +1605,18 @@ final class SkeletalMeshLoader {
         }
         
         guard let skeleton = skeletonObject else {
-            print("[SkeletalLoader] No skeleton found for animation sampling")
+            debugLog("[SkeletalLoader] No skeleton found for animation sampling")
             return nil
         }
         
-        print("[SkeletalLoader] Sampling animation from skeleton '\(skeleton.name)'...")
+        debugLog("[SkeletalLoader] Sampling animation from skeleton '\(skeleton.name)'...")
         
         // Try the new extraction method first
         if let anim = extractAnimationFromSkeletonTransforms(skeleton, bones: bones, boneNameToIndex: boneNameToIndex) {
             return anim
         }
         
-        print("[SkeletalLoader] Skeleton transform sampling failed, using identity animation")
+        debugLog("[SkeletalLoader] Skeleton transform sampling failed, using identity animation")
         
         let frameCount = max(2, Int(duration * 30))  // 30 fps
         var keyframes: [AnimationKeyframe] = []
@@ -1638,7 +1646,7 @@ final class SkeletalMeshLoader {
     private func createMixamoWalkAnimation(bones: [Bone], boneNameToIndex: [String: Int]) -> [String: AnimationClip] {
         var animations: [String: AnimationClip] = [:]
         
-        print("[SkeletalLoader] Creating placeholder animations (identity transforms only)")
+        debugLog("[SkeletalLoader] Creating placeholder animations (identity transforms only)")
         
         // For now, create animations that keep the character in bind pose (identity transforms)
         // This prevents mesh mangling while we debug the animation system
@@ -1672,7 +1680,7 @@ final class SkeletalMeshLoader {
     func loadAnimationFromJSON(named filename: String, bones: [Bone], boneNameToIndex: [String: Int]) -> AnimationClip? {
         // Try to find the JSON file in the bundle
         guard let url = Bundle.main.url(forResource: filename, withExtension: "json") else {
-            print("[SkeletalLoader] Animation JSON not found: \(filename).json")
+            debugLog("[SkeletalLoader] Animation JSON not found: \(filename).json")
             return nil
         }
         
@@ -1681,13 +1689,13 @@ final class SkeletalMeshLoader {
     
     /// Load animation from a JSON file URL
     func loadAnimationFromJSON(url: URL, bones: [Bone], boneNameToIndex: [String: Int]) -> AnimationClip? {
-        print("[SkeletalLoader] Loading animation from JSON: \(url.lastPathComponent)")
+        debugLog("[SkeletalLoader] Loading animation from JSON: \(url.lastPathComponent)")
         
         do {
             let data = try Data(contentsOf: url)
             return parseAnimationJSON(data: data, bones: bones, boneNameToIndex: boneNameToIndex)
         } catch {
-            print("[SkeletalLoader] Failed to read JSON file: \(error)")
+            debugLog("[SkeletalLoader] Failed to read JSON file: \(error)")
             return nil
         }
     }
@@ -1696,7 +1704,7 @@ final class SkeletalMeshLoader {
     private func parseAnimationJSON(data: Data, bones: [Bone], boneNameToIndex: [String: Int]) -> AnimationClip? {
         do {
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                print("[SkeletalLoader] Invalid JSON format")
+                debugLog("[SkeletalLoader] Invalid JSON format")
                 return nil
             }
             
@@ -1704,11 +1712,11 @@ final class SkeletalMeshLoader {
                   let duration = json["duration"] as? Double,
                   let jsonKeyframes = json["keyframes"] as? [[String: Any]],
                   let jsonBones = json["bones"] as? [[String: Any]] else {
-                print("[SkeletalLoader] Missing required fields in animation JSON")
+                debugLog("[SkeletalLoader] Missing required fields in animation JSON")
                 return nil
             }
             
-            print("[SkeletalLoader] Parsing animation '\(name)' with \(jsonKeyframes.count) keyframes")
+            debugLog("[SkeletalLoader] Parsing animation '\(name)' with \(jsonKeyframes.count) keyframes")
             
             // Build a mapping from JSON bone index to our bone index
             var jsonBoneToOurBone: [Int: Int] = [:]
@@ -1730,7 +1738,7 @@ final class SkeletalMeshLoader {
                 }
             }
             
-            print("[SkeletalLoader] Mapped \(jsonBoneToOurBone.count)/\(jsonBones.count) bones from JSON to skeleton")
+            debugLog("[SkeletalLoader] Mapped \(jsonBoneToOurBone.count)/\(jsonBones.count) bones from JSON to skeleton")
             
             // Parse keyframes
             var keyframes: [AnimationKeyframe] = []
@@ -1768,17 +1776,17 @@ final class SkeletalMeshLoader {
             }
             
             guard !keyframes.isEmpty else {
-                print("[SkeletalLoader] No valid keyframes parsed from JSON")
+                debugLog("[SkeletalLoader] No valid keyframes parsed from JSON")
                 return nil
             }
             
-            print("[SkeletalLoader] ✅ Loaded animation '\(name)' with \(keyframes.count) keyframes, duration \(duration)s")
+            debugLog("[SkeletalLoader] ✅ Loaded animation '\(name)' with \(keyframes.count) keyframes, duration \(duration)s")
             
             // JSON animations use absolute local transforms, not deltas
             return AnimationClip(name: name, duration: Float(duration), keyframes: keyframes)
             
         } catch {
-            print("[SkeletalLoader] Failed to parse JSON: \(error)")
+            debugLog("[SkeletalLoader] Failed to parse JSON: \(error)")
             return nil
         }
     }
@@ -1837,8 +1845,8 @@ final class SkeletalMeshLoader {
     ///   - mesh: The SkeletalMesh to add the animation to
     /// - Returns: True if animation was loaded successfully
     func loadAnimationIntoMesh(from url: URL, name: String, mesh: SkeletalMesh) -> Bool {
-        print("[SkeletalLoader] Loading animation '\(name)' from: \(url.lastPathComponent)")
-        print("[SkeletalLoader] Full path: \(url.path)")
+        debugLog("[SkeletalLoader] Loading animation '\(name)' from: \(url.lastPathComponent)")
+        debugLog("[SkeletalLoader] Full path: \(url.path)")
         
         // Create a FRESH allocator for each animation to avoid caching issues
         let allocator = MTKMeshBufferAllocator(device: device)
@@ -1848,14 +1856,14 @@ final class SkeletalMeshLoader {
         
         // Debug: Print asset object pointer to verify it's distinct
         let assetPtr = Unmanaged.passUnretained(asset).toOpaque()
-        print("[SkeletalLoader] Asset object: \(assetPtr)")
+        debugLog("[SkeletalLoader] Asset object: \(assetPtr)")
         
         // Check time range
         let duration = asset.endTime - asset.startTime
-        print("[SkeletalLoader] Asset time range: \(asset.startTime) to \(asset.endTime) (duration: \(duration)s)")
+        debugLog("[SkeletalLoader] Asset time range: \(asset.startTime) to \(asset.endTime) (duration: \(duration)s)")
         
         if duration <= 0 {
-            print("[SkeletalLoader] No animation duration in file")
+            debugLog("[SkeletalLoader] No animation duration in file")
             return false
         }
         
@@ -1863,7 +1871,7 @@ final class SkeletalMeshLoader {
         let extractedAnimations = ModelIOAnimationExtractor.extractFromMDLAsset(asset, device: device)
         
         if extractedAnimations.isEmpty {
-            print("[SkeletalLoader] No animations found in '\(url.lastPathComponent)'")
+            debugLog("[SkeletalLoader] No animations found in '\(url.lastPathComponent)'")
             return false
         }
         
@@ -1878,7 +1886,7 @@ final class SkeletalMeshLoader {
             if !keyframes.isEmpty {
                 let clip = AnimationClip(name: name, duration: extracted.duration, keyframes: keyframes)
                 mesh.animations[name] = clip
-                print("[SkeletalLoader] ✅ Added animation '\(name)' (\(keyframes.count) keyframes, \(extracted.duration)s)")
+                debugLog("[SkeletalLoader] ✅ Added animation '\(name)' (\(keyframes.count) keyframes, \(extracted.duration)s)")
                 return true
             }
         }
@@ -1895,12 +1903,12 @@ final class SkeletalMeshLoader {
         var loadedCount = 0
         
         guard let contents = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
-            print("[SkeletalLoader] Cannot read directory: \(directory.path)")
+            debugLog("[SkeletalLoader] Cannot read directory: \(directory.path)")
             return 0
         }
         
         let usdzFiles = contents.filter { $0.pathExtension.lowercased() == "usdz" }
-        print("[SkeletalLoader] Found \(usdzFiles.count) USDZ files in \(directory.lastPathComponent)")
+        debugLog("[SkeletalLoader] Found \(usdzFiles.count) USDZ files in \(directory.lastPathComponent)")
         
         for fileURL in usdzFiles {
             // Use filename (without extension) as animation name
@@ -1911,7 +1919,7 @@ final class SkeletalMeshLoader {
             }
         }
         
-        print("[SkeletalLoader] Loaded \(loadedCount) of \(usdzFiles.count) animations")
+        debugLog("[SkeletalLoader] Loaded \(loadedCount) of \(usdzFiles.count) animations")
         return loadedCount
     }
 }
